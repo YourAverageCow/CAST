@@ -1,33 +1,7 @@
-// AITAH Video Creator — fully client-side web version.
-// Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
+// Everything runs in the browser: DeepSeek API, Edge TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 27;
-
-// GitHub Pages doesn't provide cross-origin isolation, so the global
-// SharedArrayBuffer may be undefined. ONNX/emscripten probe for it at load.
-// The robust fix: define SharedArrayBuffer to the REAL shared-memory buffer
-// constructor, which browsers expose via WebAssembly.Memory({shared:true}).
-// This satisfies both the `globalThis.SharedArrayBuffer ?? ...` nullish check
-// and the `instanceof` checks used during wasm instantiation.
-if (typeof SharedArrayBuffer === "undefined") {
-  try {
-    const realCtor = new WebAssembly.Memory({ initial: 0, maximum: 0, shared: true }).buffer.constructor;
-    if (typeof realCtor === "function") {
-      window.SharedArrayBuffer = realCtor;
-    } else {
-      // Last resort stub (should never be meaningfully used at numThreads:1)
-      window.SharedArrayBuffer = class SharedArrayBuffer {
-        constructor(byteLength) { return new ArrayBuffer(byteLength); }
-      };
-    }
-  } catch (e) {
-    // Fallback stub if even shared Memory probe fails
-    window.SharedArrayBuffer = class SharedArrayBuffer {
-      constructor(byteLength) { return new ArrayBuffer(byteLength); }
-    };
-  }
-}
+const VERSION = 28;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -40,18 +14,17 @@ let previewRAF = null;
 let ttsAudio = null;
 let lastVideoUrl = null;
 
-// CDN sources (fallback) — vendor files served locally are preferred
-const PIPER_JS = "./vendor/piper-tts-web.js";
-// Piper voice model (HuggingFace)
-const PIPER_VOICE = {
-  name: "en_US-libritts_r-medium",
-  onnx: "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx",
-  json: "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx.json",
-};
-
-let piperEngine = null;
+// ---------- TTS & video engine state ----------
+const DEFAULT_VOICE = "en-US-EmmaMultilingualNeural";
 let ffmpeg = null;
 let ffmpegLoaded = false;
+
+// ---------- Edge TTS (in-browser, no server/wasm) ----------
+let edgeTTSModule = null;
+async function ensureEdgeTTS() {
+  if (!edgeTTSModule) edgeTTSModule = await import("./edge-tts.js");
+  return edgeTTSModule;
+}
 
 // ---------- Tiny helpers ----------
 function showToast(msg) {
@@ -143,7 +116,8 @@ function loadSettings() {
 // ---------- Init ----------
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  populateVoices(["en_US-libritts_r-medium"]);
+  const edge = await ensureEdgeTTS();
+  populateVoices(edge.EDGE_VOICES.map(v => v.id));
   loadSettings();
   populateModels();
   // Save on any settings change
@@ -166,7 +140,7 @@ function populateVoices(list) {
   $("#voiceQuick").innerHTML = '<option value="">Use settings voice</option>' + opts;
 }
 function syncVoiceQuick() { const v = $("#voiceQuick").value; if (v) $("#voice").value = v; }
-function getVoice() { syncVoiceQuick(); return $("#voice").value || PIPER_VOICE.name; }
+function getVoice() { syncVoiceQuick(); return $("#voice").value || DEFAULT_VOICE; }
 
 // ---------- DeepSeek story generation (streaming, client-side) ----------
 async function streamChat(messages, onChunk) {
@@ -311,63 +285,24 @@ function hideDownloadToast() {
   if (t) t.classList.remove("show");
 }
 
-async function ensurePiper() {
-  if (piperEngine) return piperEngine;
-  showDownloadToast("Loading TTS engine (first time only)...");
+async function generateSpeech(text) {
+  const edge = await ensureEdgeTTS();
+  const voice = getVoice();
+  showDownloadToast("Connecting to Edge TTS...");
   try {
-    const mod = await import(PIPER_JS);
-    const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime } = mod;
-    const voiceProvider = {
-      async fetch(voice) {
-        // Correct HuggingFace path for piper voices (the library's built-in
-        // provider builds a wrong path like en/US/... which 404s).
-        const parts = voice.split("-"); // en_US, libritts_r, medium
-        const lang = parts[0].split("_")[0]; // en
-        const base = `https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang}/${parts[0]}/`;
-        const sub = parts.slice(1).join("/");
-        const stem = parts.join("-");
-        const jsonUrl = `${base}${sub}/${stem}.onnx.json`;
-        const onnxUrl = `${base}${sub}/${stem}.onnx`;
-        const json = await (await fetch(jsonUrl)).json();
-        const onnx = URL.createObjectURL(await (await fetch(onnxUrl)).blob());
-        return [json, onnx];
-      },
-    };
-    piperEngine = new PiperWebEngine({
-      onnxRuntime: new OnnxWebRuntime({ basePath: BASE + "onnx/", numThreads: 1 }),
-      phonemizeRuntime: new PhonemizeWebRuntime({ basePath: BASE + "piper/" }),
-      voiceProvider,
-    });
+    const result = await edge.edgeTTS(text, { voice, rate: "+0%" });
+    hideDownloadToast();
+    const audioUrl = URL.createObjectURL(result.file);
+    let words = result.words;
+    // Fall back to estimated timing if no word boundaries came through
+    if (!words || !words.length) {
+      words = computeWordTimings(text, 0);
+    }
+    return { audioUrl, words };
   } catch (e) {
     hideDownloadToast();
     throw e;
   }
-  return piperEngine;
-}
-
-let ttsModelReady = false;
-
-async function generateSpeech(text) {
-  const engine = await ensurePiper();
-  const voice = getVoice();
-  let response;
-  if (!ttsModelReady) {
-    showDownloadToast(`Downloading TTS voice model (${voice})...`);
-    try {
-      response = await engine.generate(text, voice, 0);
-      ttsModelReady = true;
-      hideDownloadToast();
-    } catch (e) {
-      hideDownloadToast();
-      throw e;
-    }
-  } else {
-    showToast("Generating voice...");
-    response = await engine.generate(text, voice, 0);
-  }
-  const audioUrl = URL.createObjectURL(response.file);
-  const words = computeWordTimings(text, response.duration / 1000);
-  return { audioUrl, words };
 }
 
 // Estimate per-word timing from the full audio duration.
@@ -375,6 +310,11 @@ async function generateSpeech(text) {
 // words proportional to character length (better than uniform since it
 // reflects word size), and respect paragraph pauses in the source text.
 function computeWordTimings(text, totalDuration) {
+  // Fallback estimate: if no real duration, assume ~150 words/min (~0.4s/word).
+  if (!totalDuration || totalDuration <= 0) {
+    const wordCount = (text.trim().split(/\s+/).filter(Boolean)).length || 1;
+    totalDuration = wordCount * 0.4;
+  }
   const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
   const allWords = [];
   let offset = 0;
@@ -498,7 +438,7 @@ async function exportVideo() {
     // Load background video + audio into ffmpeg's virtual FS
     ffmpeg.FS("writeFile", "bg.mp4", await currentVideo.arrayBuffer());
     const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
-    ffmpeg.FS("writeFile", "audio.mp3", audioData);
+    ffmpeg.FS("writeFile", "audio.wav", audioData);
     const assText = buildASS(subtitles, $("#font").value, parseInt($("#fontSize").value) || 68, $("#textColor").value, $("#strokeColor").value, parseInt($("#strokeWidth").value) || 3, parseFloat($("#positionY").value) || 0.55, w, h);
     ffmpeg.FS("writeFile", "subs.ass", new TextEncoder().encode(assText));
 
@@ -506,7 +446,7 @@ async function exportVideo() {
     const ret = await ffmpeg.callMain([
       "-stream_loop", "-1",
       "-i", "bg.mp4",
-      "-i", "audio.mp3",
+      "-i", "audio.wav",
       "-filter_complex", `[0:v]${vf}[v]`,
       "-map", "[v]", "-map", "1:a",
       "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
