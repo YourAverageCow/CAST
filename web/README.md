@@ -1,48 +1,56 @@
-# AITAH Video Creator — Web Version
+# Slopdaddy
 
-A fully client-side version that runs 100% in the browser:
-- **No server, no install** — everything runs locally in your browser
-- **Story generation** — DeepSeek / OpenAI API called directly from the browser
-- **TTS** — Piper neural TTS running in-browser via WASM (free, no server)
-- **Video rendering** — ffmpeg.wasm renders the MP4 with burned-in captions in-browser
+A totally real, 100% production-ready AI video factory. Don't read too much into the name.
 
-## Run it
+## ⚠️ IMPORTANT: Do not use this
+
+Seriously. This was **vibe-coded** — dragged into existence by an AI assistant one questionable prompt at a time over the course of an afternoon. It is held together with:
+
+- dueling Python modules that argue about who owns the prompts
+- a browser WASM engine bigger than your operating system
+- exactly zero tests
+- commit messages written by someone who was clearly not paying attention
+
+Do I recommend using it? No. I recommend you look at it, laugh, and then go find an actual product. This is the software equivalent of a car held together with duct tape and optimism.
+
+## What it does
+
+It mass-produces "AITAH" Reddit stories with dramatic AI narration and TikTok-style captions burned onto a background video. You know, content. The kind that makes you question humanity. Slopdaddy's right in the name.
+
+It's a "vibecoded" project in the purest sense:
+- The captions are synced to the audio using timestamps we fully believe are correct (they are not)
+- The TTS runs in your browser because installing Python on the server was "too much work"
+- There's a `desktop/` folder with an older, different version that also kind of works
+- Everything is over-engineered, under-tested, and vibe-forward
+
+## Running it
 
 ```bash
 python3 serve_web.py
 ```
 
-Then open **http://localhost:8123**
+Then open http://localhost:8123. If something breaks, that's intended behavior.
 
-> Note: the app must be served over HTTP (not opened as a plain `file://`) because
-> the TTS/video engines load WASM + workers. The bundled `serve_web.py` handles this.
-> For real deployment, upload the `web/` folder to any static host (GitHub Pages,
-> Netlify, Vercel, etc.) and it works the same.
+## Live on GitHub Pages
 
-## What's in the folder
+It's deployed at https://youraveragecow.github.io/Slopdaddy/ — because why not let the whole world experience this.
 
-```
-web/
-├── index.html            # UI
-├── app.js                # all browser logic
-├── onnx/                 # ONNX runtime wasm (Piper TTS)
-├── piper/                # piper_phonemize wasm + data (Piper TTS)
-├── worker/               # piper worker scripts
-└── vendor/
-    ├── piper-tts-web.js  # Piper TTS engine bundle
-    └── ffmpeg/           # ffmpeg.wasm (renders video in-browser)
-```
+## Requirements
 
-## First-use downloads
+- A web browser that believes in you
+- An OpenAI-compatible API key you're willing to throw at DeepSeek
+- A background video (Subway Surfers gameplay recommended)
+- Low standards (non-negotiable)
 
-On first use, the browser downloads:
-- The Piper voice model (~60MB) from HuggingFace
-- (ffmpeg.wasm ~25MB is bundled locally)
+## Known issues
 
-These are cached by the browser after the first time.
+- All of them
+- The captions might drift
+- The video render is slow because it's literally running ffmpeg in your browser
+- The "it just works" promise does not extend to this project
 
-## Limitations vs. the desktop version
+## Disclaimer
 
-- TTS quality: Piper is good, slightly below Edge TTS
-- Video rendering runs in JS (WASM) so it's slower than native ffmpeg for long videos
-- The API key is entered in Settings and only used for direct browser calls to your chosen provider
+If you use this and go viral, great. If you use this and lose followers, that's on you. If you use this at all, that's on you. This project was built to prove a point and the point was "we can", not "we should".
+
+© vibecoded by YourAverageCow. No refunds.
