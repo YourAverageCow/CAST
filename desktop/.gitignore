@@ -1,0 +1,7 @@
+.env
+uploads/
+outputs/
+__pycache__/
+
+# Sample media
+*.mp4

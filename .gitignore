@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Env
+.env
+
+# Runtime data
+desktop/uploads/
+desktop/outputs/
+desktop/__pycache__/
+
+# Editor
+.vscode/
+.idea/
