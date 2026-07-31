@@ -1,27 +1,22 @@
 # Slopdaddy
 
-A totally real, 100% production-ready AI video factory. Don't read too much into the name.
+An AI video factory for making AITAH story videos. Name checks out.
 
-## ⚠️ IMPORTANT: Do not use this
+## About
 
-Seriously. This was **vibe-coded** — dragged into existence by an AI assistant one questionable prompt at a time over the course of an afternoon. It is held together with:
+This project was vibe-coded — built with an AI assistant in an afternoon, one questionable prompt at a time. It's held together by:
 
-- dueling Python modules that argue about who owns the prompts
-- a browser WASM engine bigger than your operating system
-- exactly zero tests
-- commit messages written by someone who was clearly not paying attention
+- a browser WASM engine the size of a small OS
+- zero tests
+- commit messages nobody was paying attention to
 
-Do I recommend using it? No. I recommend you look at it, laugh, and then go find an actual product. This is the software equivalent of a car held together with duct tape and optimism.
+It works. Probably. We did not put a "probably" in the production docs because there are no production docs.
 
 ## What it does
 
-It mass-produces "AITAH" Reddit stories with dramatic AI narration and TikTok-style captions burned onto a background video. You know, content. The kind that makes you question humanity. Slopdaddy's right in the name.
+Turns AITAH Reddit stories into narrated videos with captions burned onto a background clip. If you've seen those AI voiceover videos on TikTok, this is the machine behind them.
 
-It's a "vibecoded" project in the purest sense:
-- The captions are synced to the audio using timestamps we fully believe are correct (they are not)
-- The TTS runs in your browser because installing Python on the server was "too much work"
-- There's a `desktop/` folder with an older, different version that also kind of works
-- Everything is over-engineered, under-tested, and vibe-forward
+The whole thing runs in your browser: Piper TTS for the voice, ffmpeg.wasm for rendering, DeepSeek/OpenAI for the story writing. No server, no install.
 
 ## Running it
 
@@ -29,28 +24,23 @@ It's a "vibecoded" project in the purest sense:
 python3 serve_web.py
 ```
 
-Then open http://localhost:8123. If something breaks, that's intended behavior.
+Then open http://localhost:8123.
 
-## Live on GitHub Pages
+Or just use the deployed version: https://youraveragecow.github.io/Slopdaddy/
 
-It's deployed at https://youraveragecow.github.io/Slopdaddy/ — because why not let the whole world experience this.
+## What you need
 
-## Requirements
+- A browser
+- An API key for an OpenAI-compatible provider (settings panel, top-right)
+- A background video (Subway Surfers gameplay is the classic choice)
+- Reasonable expectations
 
-- A web browser that believes in you
-- An OpenAI-compatible API key you're willing to throw at DeepSeek
-- A background video (Subway Surfers gameplay recommended)
-- Low standards (non-negotiable)
+## Known limitations
 
-## Known issues
+- Caption sync is "close enough", not frame-perfect
+- Browser-based rendering is slower than native ffmpeg for longer videos
+- It's vibe-coded, so treat it accordingly
 
-- All of them
-- The captions might drift
-- The video render is slow because it's literally running ffmpeg in your browser
-- The "it just works" promise does not extend to this project
+## License
 
-## Disclaimer
-
-If you use this and go viral, great. If you use this and lose followers, that's on you. If you use this at all, that's on you. This project was built to prove a point and the point was "we can", not "we should".
-
-© vibecoded by YourAverageCow. No refunds.
+Do whatever. No refunds.
