@@ -2,7 +2,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 18;
+const VERSION = 19;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -366,19 +366,25 @@ async function startPreview() {
   }
   btn.disabled = false;
 }
-// ---------- Export (ffmpeg.wasm 0.11) ----------
+// ---------- Export (ffmpeg.wasm via core directly) ----------
 
 async function ensureFFmpeg() {
   if (ffmpegLoaded) return;
-  showToast("Loading video engine (first time only, ~25MB)...");
-  await loadScript("./vendor/ffmpeg/ffmpeg.min.js");
-  const { createFFmpeg } = window;
-  ffmpeg = createFFmpeg({
-    corePath: "./vendor/ffmpeg/ffmpeg-core.js",
-    log: false,
-  });
-  await ffmpeg.load();
-  ffmpegLoaded = true;
+  showDownloadToast("Loading video engine (first time only, ~25MB)...");
+  try {
+    await loadScript("./vendor/ffmpeg/ffmpeg-core.js");
+    if (typeof window.createFFmpegCore !== "function") {
+      throw new Error("ffmpeg core failed to load (createFFmpegCore not found)");
+    }
+    ffmpeg = await window.createFFmpegCore({
+      mainScriptUrlOrBlob: new URL("./vendor/ffmpeg/ffmpeg-core.js", document.baseURI).href,
+    });
+    ffmpegLoaded = true;
+    hideDownloadToast();
+  } catch (e) {
+    hideDownloadToast();
+    throw e;
+  }
 }
 
 async function exportVideo() {
@@ -409,7 +415,7 @@ async function exportVideo() {
     ffmpeg.FS("writeFile", "subs.ass", new TextEncoder().encode(assText));
 
     const vf = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},subtitles=subs.ass`;
-    await ffmpeg.run(
+    const ret = await ffmpeg.callMain([
       "-stream_loop", "-1",
       "-i", "bg.mp4",
       "-i", "audio.mp3",
@@ -419,7 +425,8 @@ async function exportVideo() {
       "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
       "-r", String(fps),
       "-shortest", "-y", "out.mp4",
-    );
+    ]);
+    if (ret !== 0) throw new Error("ffmpeg exited with code " + ret);
 
     setProgress(50, "Rendering...");
     const data = ffmpeg.FS("readFile", "out.mp4");
