@@ -1,20 +1,20 @@
 # Slopdaddy
 
-An AI video factory for making AITAH story videos. Name checks out.
+An AI slop video factory for making AITAH story videos. 
 
 ## About
 
-This project was vibe-coded — built with an AI assistant in an afternoon, one questionable prompt at a time. It's held together by:
+This project was completely vibe-coded, built in an afternoon, It's held together by:
 
 - a browser WASM engine the size of a small OS
 - zero tests
 - commit messages nobody was paying attention to
 
-It works. Probably. We did not put a "probably" in the production docs because there are no production docs.
+It works. Probably. 
 
 ## What it does
 
-Turns AITAH Reddit stories into narrated videos with captions burned onto a background clip. If you've seen those AI voiceover videos on TikTok, this is the machine behind them.
+Generates or Turns your AITAH Reddit stories into narrated videos with captions on a background clip, as seen on your favorite doom scrolling platform 
 
 The whole thing runs in your browser: Piper TTS for the voice, ffmpeg.wasm for rendering, DeepSeek/OpenAI for the story writing. No server, no install.
 
@@ -43,4 +43,4 @@ Or just use the deployed version: https://youraveragecow.github.io/Slopdaddy/
 
 ## License
 
-Do whatever. No refunds.
+Do whatever. 
