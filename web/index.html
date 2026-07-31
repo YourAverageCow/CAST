@@ -131,8 +131,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   align-items: center;
   gap: 10px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  pointer-events: none;
 }
-#downloadToast.show { opacity: 1; }
+#downloadToast.show { opacity: 1; pointer-events: auto; }
 .download-spinner {
   width: 16px; height: 16px;
   border: 2px solid var(--border);
@@ -147,7 +148,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .voice-preview-row select { flex: 1; }
 .voice-preview-row button { width: auto; padding: 7px 12px; font-size: 0.75rem; }
 
-.app-gear { position: fixed; top: 16px; right: 16px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; z-index: 80; padding: 0; }
+.app-gear { position: fixed; top: 16px; right: 16px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; z-index: 220; padding: 0; }
 .app-gear:hover { color: var(--text); border-color: var(--accent); background: #21262d; }
 .app-version { position: fixed; bottom: 12px; right: 16px; font-family: 'SF Mono', Menlo, monospace; font-size: 0.7rem; color: var(--accent); background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); padding: 2px 8px; border-radius: 4px; z-index: 80; }
 
