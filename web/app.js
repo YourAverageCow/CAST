@@ -2,7 +2,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 21;
+const VERSION = 22;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -73,12 +73,25 @@ function getApiKey() {
   return k;
 }
 
+// Persist the API key in localStorage so it survives page reloads / hard resets.
+function saveApiKey() {
+  try { localStorage.setItem("slopdaddy_api_key", $("#apiKey").value.trim()); } catch (e) {}
+}
+function loadApiKey() {
+  try {
+    const k = localStorage.getItem("slopdaddy_api_key");
+    if (k) $("#apiKey").value = k;
+  } catch (e) {}
+}
+
 // ---------- Init ----------
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
   $("#provider").value = "deepseek";
   populateModels();
   populateVoices(["en_US-libritts_r-medium"]);
+  loadApiKey();
+  $("#apiKey").addEventListener("input", saveApiKey);
 }
 
 function populateModels() {
