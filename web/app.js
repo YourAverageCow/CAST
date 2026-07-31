@@ -1,7 +1,7 @@
-// Everything runs in the browser: DeepSeek API, Edge TTS, ffmpeg.wasm.
+// Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 28;
+const VERSION = 29;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -15,16 +15,11 @@ let ttsAudio = null;
 let lastVideoUrl = null;
 
 // ---------- TTS & video engine state ----------
-const DEFAULT_VOICE = "en-US-EmmaMultilingualNeural";
+const DEFAULT_VOICE = "en_US-libritts_r-medium";
+const PIPER_JS = "./vendor/piper-tts-web.js";
+let piperEngine = null;
 let ffmpeg = null;
 let ffmpegLoaded = false;
-
-// ---------- Edge TTS (in-browser, no server/wasm) ----------
-let edgeTTSModule = null;
-async function ensureEdgeTTS() {
-  if (!edgeTTSModule) edgeTTSModule = await import("./edge-tts.js");
-  return edgeTTSModule;
-}
 
 // ---------- Tiny helpers ----------
 function showToast(msg) {
@@ -116,8 +111,7 @@ function loadSettings() {
 // ---------- Init ----------
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  const edge = await ensureEdgeTTS();
-  populateVoices(edge.EDGE_VOICES.map(v => v.id));
+  populateVoices([DEFAULT_VOICE]);
   loadSettings();
   populateModels();
   // Save on any settings change
@@ -285,19 +279,68 @@ function hideDownloadToast() {
   if (t) t.classList.remove("show");
 }
 
-async function generateSpeech(text) {
-  const edge = await ensureEdgeTTS();
-  const voice = getVoice();
-  showDownloadToast("Connecting to Edge TTS...");
-  try {
-    const result = await edge.edgeTTS(text, { voice, rate: "+0%" });
+// Wait until the page is cross-origin isolated (the coi-serviceworker enables
+// this on GitHub Pages, with a one-time reload). Piper's threaded wasm needs
+// SharedArrayBuffer, which is only available when crossOriginIsolated.
+async function waitForIsolation(timeoutMs = 15000) {
+  const start = Date.now();
+  while (!window.crossOriginIsolated && typeof SharedArrayBuffer === "undefined") {
+    if (Date.now() - start > timeoutMs) return false;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return true;
+}
+
+async function ensurePiper() {
+  if (piperEngine) return piperEngine;
+  showDownloadToast("Preparing TTS engine...");
+  const isolated = await waitForIsolation();
+  if (!isolated) {
     hideDownloadToast();
-    const audioUrl = URL.createObjectURL(result.file);
-    let words = result.words;
-    // Fall back to estimated timing if no word boundaries came through
-    if (!words || !words.length) {
-      words = computeWordTimings(text, 0);
-    }
+    throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
+  }
+  try {
+    const mod = await import(PIPER_JS);
+    const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime } = mod;
+    const voiceProvider = {
+      async fetch(voice) {
+        // Correct HuggingFace path for piper voices.
+        const parts = voice.split("-");
+        const lang = parts[0].split("_")[0];
+        const base = `https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang}/${parts[0]}/`;
+        const sub = parts.slice(1).join("/");
+        const stem = parts.join("-");
+        const jsonUrl = `${base}${sub}/${stem}.onnx.json`;
+        const onnxUrl = `${base}${sub}/${stem}.onnx`;
+        const json = await (await fetch(jsonUrl)).json();
+        const onnx = URL.createObjectURL(await (await fetch(onnxUrl)).blob());
+        return [json, onnx];
+      },
+    };
+    piperEngine = new PiperWebEngine({
+      onnxRuntime: new OnnxWebRuntime({ basePath: BASE + "onnx/", numThreads: 1 }),
+      phonemizeRuntime: new PhonemizeWebRuntime({ basePath: BASE + "piper/" }),
+      voiceProvider,
+    });
+  } catch (e) {
+    hideDownloadToast();
+    throw e;
+  }
+  return piperEngine;
+}
+
+async function generateSpeech(text) {
+  const engine = await ensurePiper();
+  const voice = getVoice();
+  showDownloadToast(`Generating voice...`);
+  try {
+    const response = await engine.generate(text, voice, 0);
+    hideDownloadToast();
+    const audioUrl = URL.createObjectURL(response.file);
+    // Piper phoneme data doesn't expose per-word timestamps directly;
+    // estimate word timings from the audio duration.
+    const durationSec = (response.duration || 0) / 1000;
+    const words = computeWordTimings(text, durationSec);
     return { audioUrl, words };
   } catch (e) {
     hideDownloadToast();
