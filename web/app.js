@@ -2,7 +2,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 22;
+const VERSION = 23;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -73,25 +73,60 @@ function getApiKey() {
   return k;
 }
 
-// Persist the API key in localStorage so it survives page reloads / hard resets.
-function saveApiKey() {
-  try { localStorage.setItem("slopdaddy_api_key", $("#apiKey").value.trim()); } catch (e) {}
-}
-function loadApiKey() {
+// Persist all settings in localStorage so they survive page reloads / hard resets.
+const SETTINGS_FIELDS = [
+  "apiKey", "provider", "model", "storyLength",
+  "resW", "resH", "fps",
+  "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
+  "voice",
+];
+function saveSettings() {
   try {
-    const k = localStorage.getItem("slopdaddy_api_key");
-    if (k) $("#apiKey").value = k;
+    const data = {};
+    for (const id of SETTINGS_FIELDS) {
+      const el = document.getElementById(id);
+      if (el) data[id] = el.value;
+    }
+    localStorage.setItem("slopdaddy_settings", JSON.stringify(data));
+  } catch (e) {}
+}
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem("slopdaddy_settings");
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    // Restore everything except model (model dropdown is rebuilt by provider),
+    // then restore model after populateModels runs.
+    for (const id of SETTINGS_FIELDS) {
+      const el = document.getElementById(id);
+      if (el && data[id] !== undefined && id !== "model") el.value = data[id];
+    }
+    populateModels();
+    if (data["model"]) {
+      const m = document.getElementById("model");
+      if (m && [...m.options].some(o => o.value === data["model"])) m.value = data["model"];
+    }
+    // Keep the quick voice selector in sync
+    if (data["voice"]) {
+      const vq = document.getElementById("voiceQuick");
+      if (vq) vq.value = data["voice"];
+    }
   } catch (e) {}
 }
 
 // ---------- Init ----------
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  $("#provider").value = "deepseek";
-  populateModels();
   populateVoices(["en_US-libritts_r-medium"]);
-  loadApiKey();
-  $("#apiKey").addEventListener("input", saveApiKey);
+  loadSettings();
+  populateModels();
+  // Save on any settings change
+  for (const id of SETTINGS_FIELDS) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", saveSettings);
+    if (el && el.tagName === "SELECT") el.addEventListener("change", saveSettings);
+  }
 }
 
 function populateModels() {
