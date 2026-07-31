@@ -2,7 +2,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 1;
+const VERSION = 18;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -76,7 +76,6 @@ function getApiKey() {
 // ---------- Init ----------
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  $("#versionBadge2").textContent = `v${VERSION}`;
   $("#provider").value = "deepseek";
   populateModels();
   populateVoices(["en_US-libritts_r-medium"]);
@@ -228,25 +227,56 @@ function stopPreview() {
   $("#previewBtn").textContent = "Preview";
 }
 
+function showDownloadToast(msg) {
+  const t = $("#downloadToast");
+  if (!t) return;
+  $("#downloadToastText").textContent = msg || "Downloading...";
+  t.classList.add("show");
+}
+function hideDownloadToast() {
+  const t = $("#downloadToast");
+  if (t) t.classList.remove("show");
+}
+
 async function ensurePiper() {
   if (piperEngine) return piperEngine;
-  showToast("Loading TTS engine (first time only)...");
-  const mod = await import(PIPER_JS);
-  const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime, HuggingFaceVoiceProvider } = mod;
-  const voiceProvider = new HuggingFaceVoiceProvider();
-  piperEngine = new PiperWebEngine({
-    onnxRuntime: new OnnxWebRuntime({ basePath: BASE + "onnx/" }),
-    phonemizeRuntime: new PhonemizeWebRuntime({ basePath: BASE + "piper/" }),
-    voiceProvider,
-  });
+  showDownloadToast("Loading TTS engine (first time only)...");
+  try {
+    const mod = await import(PIPER_JS);
+    const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime, HuggingFaceVoiceProvider } = mod;
+    const voiceProvider = new HuggingFaceVoiceProvider();
+    piperEngine = new PiperWebEngine({
+      onnxRuntime: new OnnxWebRuntime({ basePath: BASE + "onnx/" }),
+      phonemizeRuntime: new PhonemizeWebRuntime({ basePath: BASE + "piper/" }),
+      voiceProvider,
+    });
+  } catch (e) {
+    hideDownloadToast();
+    throw e;
+  }
   return piperEngine;
 }
+
+let ttsModelReady = false;
 
 async function generateSpeech(text) {
   const engine = await ensurePiper();
   const voice = getVoice();
-  showToast("Generating voice...");
-  const response = await engine.generate(text, voice, 0);
+  let response;
+  if (!ttsModelReady) {
+    showDownloadToast(`Downloading TTS voice model (${voice})...`);
+    try {
+      response = await engine.generate(text, voice, 0);
+      ttsModelReady = true;
+      hideDownloadToast();
+    } catch (e) {
+      hideDownloadToast();
+      throw e;
+    }
+  } else {
+    showToast("Generating voice...");
+    response = await engine.generate(text, voice, 0);
+  }
   const audioUrl = URL.createObjectURL(response.file);
   const words = computeWordTimings(text, response.duration / 1000);
   return { audioUrl, words };

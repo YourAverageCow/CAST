@@ -115,6 +115,34 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .toast { position: fixed; bottom: 20px; right: 20px; background: #238636; color: #fff; padding: 10px 18px; border-radius: 6px; font-size: 0.8rem; opacity: 0; transition: opacity 0.3s; z-index: 200; }
 .toast.show { opacity: 1; }
 
+#downloadToast {
+  position: fixed;
+  top: 16px; right: 16px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  opacity: 0;
+  transition: opacity 0.3s;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+#downloadToast.show { opacity: 1; }
+.download-spinner {
+  width: 16px; height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: dspin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes dspin { to { transform: rotate(360deg); } }
+
 .voice-preview-row { display: flex; gap: 8px; align-items: end; }
 .voice-preview-row select { flex: 1; }
 .voice-preview-row button { width: auto; padding: 7px 12px; font-size: 0.75rem; }
@@ -244,13 +272,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   </div>
   <div class="sidebar-footer">
     <span class="build-tag">● ready</span>
-    <span class="version" id="versionBadge">v0</span>
   </div>
 </div>
 
 <div class="main">
   <button class="gear-btn app-gear" onclick="openSettings()" title="Settings">&#9881;</button>
-  <span class="version app-version" id="versionBadge2">v0</span>
+  <span class="version app-version" id="versionBadge">v0</span>
   <div class="preview-wrapper" id="previewContainer">
     <video id="videoPreview" loop muted playsinline style="display:none"></video>
     <div id="previewPlaceholder">Upload a background video</div>
@@ -266,6 +293,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 </div>
 
 <div class="toast" id="toast"></div>
+<div id="downloadToast">
+  <span class="download-spinner"></span>
+  <span id="downloadToastText">Downloading TTS model...</span>
+</div>
 
 <div id="playerOverlay">
   <div class="player-box">
