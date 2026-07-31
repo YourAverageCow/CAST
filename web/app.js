@@ -2,7 +2,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 19;
+const VERSION = 20;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -243,8 +243,23 @@ async function ensurePiper() {
   showDownloadToast("Loading TTS engine (first time only)...");
   try {
     const mod = await import(PIPER_JS);
-    const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime, HuggingFaceVoiceProvider } = mod;
-    const voiceProvider = new HuggingFaceVoiceProvider();
+    const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime } = mod;
+    const voiceProvider = {
+      async fetch(voice) {
+        // Correct HuggingFace path for piper voices (the library's built-in
+        // provider builds a wrong path like en/US/... which 404s).
+        const parts = voice.split("-"); // en_US, libritts_r, medium
+        const lang = parts[0].split("_")[0]; // en
+        const base = `https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang}/${parts[0]}/`;
+        const sub = parts.slice(1).join("/");
+        const stem = parts.join("-");
+        const jsonUrl = `${base}${sub}/${stem}.onnx.json`;
+        const onnxUrl = `${base}${sub}/${stem}.onnx`;
+        const json = await (await fetch(jsonUrl)).json();
+        const onnx = URL.createObjectURL(await (await fetch(onnxUrl)).blob());
+        return [json, onnx];
+      },
+    };
     piperEngine = new PiperWebEngine({
       onnxRuntime: new OnnxWebRuntime({ basePath: BASE + "onnx/" }),
       phonemizeRuntime: new PhonemizeWebRuntime({ basePath: BASE + "piper/" }),
