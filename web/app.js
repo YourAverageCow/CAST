@@ -2,7 +2,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 26;
+const VERSION = 27;
 
 // GitHub Pages doesn't provide cross-origin isolation, so the global
 // SharedArrayBuffer may be undefined. ONNX/emscripten probe for it at load.
@@ -423,7 +423,7 @@ function buildSubsFromWords(words) {
 }
 
 async function startPreview() {
-  const story = $("#storyText").value.trim();
+  const story = sanitizeText($("#storyText").value.trim());
   if (!story) { alert("Generate or paste a story first."); return; }
   if (!currentVideo) { alert("Upload a background video first."); return; }
   if (previewActive) { stopPreview(); return; }
@@ -477,7 +477,7 @@ async function ensureFFmpeg() {
 
 async function exportVideo() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
-  const story = $("#storyText").value.trim();
+  const story = sanitizeText($("#storyText").value.trim());
   if (!story) { alert("Generate or paste a story first."); return; }
 
   stopPreview();
@@ -542,6 +542,15 @@ async function exportVideo() {
 }
 
 // ---------- ASS building ----------
+// Remove characters TextEncoder/ffmpeg choke on (lone surrogates, control chars).
+function sanitizeText(s) {
+  if (typeof s !== "string") return "";
+  return s
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")   // lone high surrogates
+    .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "$1") // lone low surrogates
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ""); // control chars
+}
+
 function buildASS(subs, font, size, textColor, strokeColor, strokeWidth, positionY, w, h) {
   const colorMap = { white: "&H00FFFFFF", black: "&H00000000", red: "&H000000FF", yellow: "&H0000FFFF", green: "&H0000FF00", blue: "&H00FF0000" };
   function pc(c) {
@@ -558,7 +567,7 @@ function buildASS(subs, font, size, textColor, strokeColor, strokeWidth, positio
     `PlayResX: ${w}`, `PlayResY: ${h}`, "ScaledBorderAndShadow: yes", "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: Default,${font},${size},${primary},&H00000000,${outline},&H00000000,-1,0,0,0,100,100,0,0,1,${strokeWidth},0,5,20,20,${marginV},1`,
+    `Style: Default,${sanitizeText(font)},${size},${primary},&H00000000,${outline},&H00000000,-1,0,0,0,100,100,0,0,1,${strokeWidth},0,5,20,20,${marginV},1`,
     "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
   ];
   function fmt(t) {
@@ -567,7 +576,9 @@ function buildASS(subs, font, size, textColor, strokeColor, strokeWidth, positio
   }
   for (const s of subs) {
     if (s.end - s.start < 0.04) continue;
-    lines.push(`Dialogue: 0,${fmt(s.start)},${fmt(s.end)},Default,,0,0,0,,${s.text.replace(/\n/g,"\\N")}`);
+    const text = sanitizeText(s.text);
+    if (!text) continue;
+    lines.push(`Dialogue: 0,${fmt(s.start)},${fmt(s.end)},Default,,0,0,0,,${text.replace(/\n/g,"\\N")}`);
   }
   return lines.join("\n");
 }
