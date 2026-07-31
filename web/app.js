@@ -2,19 +2,31 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 25;
+const VERSION = 26;
 
-// GitHub Pages doesn't provide cross-origin isolation, so SharedArrayBuffer is
-// not available. Emscripten/ONNX probe for it at load time (new SharedArrayBuffer(1))
-// which throws "SharedArrayBuffer is not defined". Provide a minimal shim so that
-// detection passes; with numThreads:1 no real threads are used, so the shim is never
-// meaningfully exercised.
+// GitHub Pages doesn't provide cross-origin isolation, so the global
+// SharedArrayBuffer may be undefined. ONNX/emscripten probe for it at load.
+// The robust fix: define SharedArrayBuffer to the REAL shared-memory buffer
+// constructor, which browsers expose via WebAssembly.Memory({shared:true}).
+// This satisfies both the `globalThis.SharedArrayBuffer ?? ...` nullish check
+// and the `instanceof` checks used during wasm instantiation.
 if (typeof SharedArrayBuffer === "undefined") {
-  window.SharedArrayBuffer = class SharedArrayBuffer {
-    constructor(byteLength) {
-      return new ArrayBuffer(byteLength);
+  try {
+    const realCtor = new WebAssembly.Memory({ initial: 0, maximum: 0, shared: true }).buffer.constructor;
+    if (typeof realCtor === "function") {
+      window.SharedArrayBuffer = realCtor;
+    } else {
+      // Last resort stub (should never be meaningfully used at numThreads:1)
+      window.SharedArrayBuffer = class SharedArrayBuffer {
+        constructor(byteLength) { return new ArrayBuffer(byteLength); }
+      };
     }
-  };
+  } catch (e) {
+    // Fallback stub if even shared Memory probe fails
+    window.SharedArrayBuffer = class SharedArrayBuffer {
+      constructor(byteLength) { return new ArrayBuffer(byteLength); }
+    };
+  }
 }
 
 // Compute the app's base path so it works on GitHub Pages (where the site
