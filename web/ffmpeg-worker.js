@@ -22,6 +22,10 @@ async function ensureLoaded(base) {
       self.postMessage({ type: "progress", progress: progress || 0, time: time || 0 });
     });
   }
+  self.__log = [];
+  if (typeof ffmpeg.setLogger === "function") {
+    ffmpeg.setLogger(({ type, message }) => { self.__log.push(type + ": " + message); });
+  }
   loaded = true;
 }
 
@@ -50,15 +54,16 @@ self.onmessage = async (e) => {
         "-shortest", "-y", "out.mp4",
       ];
 
+      self.__log.length = 0;
       if (ffmpeg.setTimeout) ffmpeg.setTimeout(-1);
       if (typeof ffmpeg.exec === "function") {
         ffmpeg.exec(...args);
         const ret = ffmpeg.ret;
         if (ffmpeg.reset) ffmpeg.reset();
-        if (ret !== 0) throw new Error("ffmpeg exited with code " + ret);
+        if (ret !== 0) throw new Error("ffmpeg exited with code " + ret + " | log=" + self.__log.slice(-20).join(" || "));
       } else if (typeof ffmpeg.callMain === "function") {
         const ret = ffmpeg.callMain(args);
-        if (ret !== 0) throw new Error("ffmpeg exited with code " + ret);
+        if (ret !== 0) throw new Error("ffmpeg exited with code " + ret + " | log=" + self.__log.slice(-20).join(" || "));
       } else {
         throw new Error("ffmpeg has no exec/callMain");
       }

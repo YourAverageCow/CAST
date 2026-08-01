@@ -8,6 +8,7 @@ const VERSION = 36;
 const BASE = document.currentScript ? new URL('.', document.currentScript.src).pathname : '/';
 let currentVideo = null;      // File / Blob of background
 let currentVideoUrl = null;
+let currentVideoUnsupportedCodec = null; // e.g. "AV1" if sniffed as unsupported
 let subtitles = [];           // [{start, end, text}]
 let previewActive = false;
 let previewRAF = null;
@@ -22,11 +23,11 @@ let ffmpeg = null;
 let ffmpegLoaded = false;
 
 // ---------- Tiny helpers ----------
-function showToast(msg) {
+function showToast(msg, duration) {
   const t = $("#toast");
   t.textContent = msg;
   t.classList.add("show");
-  setTimeout(() => t.classList.remove("show"), 2500);
+  setTimeout(() => t.classList.remove("show"), duration || 2500);
 }
 function setProgress(pct, stage) {
   const bar = $("#progressBar");
@@ -215,6 +216,24 @@ async function getIdeas() {
 }
 
 // ---------- Video upload ----------
+// The bundled ffmpeg.wasm core only has H.264/HEVC decoders — no AV1, VP8, or
+// VP9. Feeding it those hangs forever with zero output (no error, no timeout).
+// Sniff the MP4 sample-entry fourcc so we can warn before the user wastes
+// minutes waiting on an export that will never finish.
+const UNSUPPORTED_VIDEO_CODECS = {
+  av01: "AV1", vp09: "VP9", vp08: "VP8",
+};
+async function sniffUnsupportedVideoCodec(file) {
+  try {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const text = new TextDecoder("latin1").decode(buf);
+    for (const fourcc in UNSUPPORTED_VIDEO_CODECS) {
+      if (text.includes(fourcc)) return UNSUPPORTED_VIDEO_CODECS[fourcc];
+    }
+  } catch (e) { /* best-effort only */ }
+  return null;
+}
+
 async function handleVideoUpload(input) {
   const file = input.files[0];
   if (!file) return;
@@ -222,6 +241,7 @@ async function handleVideoUpload(input) {
 }
 async function setBackground(file, label) {
   currentVideo = file;
+  currentVideoUnsupportedCodec = null;
   if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
   currentVideoUrl = URL.createObjectURL(file);
   const vid = $("#videoPreview");
@@ -232,6 +252,12 @@ async function setBackground(file, label) {
   area.classList.add("uploaded");
   area.querySelector(".icon").textContent = "✓";
   $("#uploadStatus").textContent = label;
+
+  const codec = await sniffUnsupportedVideoCodec(file);
+  currentVideoUnsupportedCodec = codec;
+  if (codec) {
+    showToast(`Heads up: this video looks like it's ${codec}-encoded, which the in-browser renderer can't decode. Export will fail — re-encode it to H.264 first (e.g. HandBrake or "ffmpeg -c:v libx264").`, 8000);
+  }
 }
 
 // ---------- Preview (realtime captions) ----------
@@ -474,21 +500,46 @@ function ensureFFmpeg() {
 }
 
 // Render via the worker; resolves to an ArrayBuffer of the MP4.
+// ffmpeg.exec() runs synchronously inside the worker, so if it's fed a codec
+// it has no decoder for (see UNSUPPORTED_VIDEO_CODECS), it hangs forever with
+// no progress tick, no error, nothing. Watch for a stall and bail out rather
+// than leaving the user staring at a frozen progress bar indefinitely.
+const RENDER_STALL_TIMEOUT_MS = 45000;
 function renderVideoInWorker(payload, onProgress) {
   return new Promise((resolve, reject) => {
+    let stallTimer = null;
+    const resetStallTimer = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        // The worker is unrecoverably stuck mid-exec (synchronous WASM call) —
+        // terminate it outright and force a fresh worker on the next attempt.
+        ffmpegWorker.terminate();
+        ffmpegWorker = null;
+        ffmpegWorkerReady = null;
+        reject(new Error(
+          "Rendering stalled with no progress for " + (RENDER_STALL_TIMEOUT_MS / 1000) +
+          "s. This almost always means the background video's codec (e.g. AV1/VP9) " +
+          "isn't supported by the in-browser renderer — re-encode it to H.264 and try again."
+        ));
+      }, RENDER_STALL_TIMEOUT_MS);
+    };
     ffmpegWorker.onmessage = (e) => {
       if (e.data.type === "done") {
+        clearTimeout(stallTimer);
         resolve(new Uint8Array(e.data.data));
       } else if (e.data.type === "progress") {
+        resetStallTimer();
         if (onProgress) {
           // ffmpeg progress is 0..1; map to 30%..95% (final 100 on completion)
           const pct = Math.min(95, Math.round(30 + (e.data.progress || 0) * 65));
           onProgress(pct);
         }
       } else if (e.data.type === "error") {
+        clearTimeout(stallTimer);
         reject(new Error(e.data.message));
       }
     };
+    resetStallTimer();
     ffmpegWorker.postMessage(payload, [payload.bg.buffer, payload.audio.buffer]);
   });
 }
@@ -515,6 +566,14 @@ async function exportVideo() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
   const story = sanitizeText($("#storyText").value.trim());
   if (!story) { alert("Generate or paste a story first."); return; }
+  if (currentVideoUnsupportedCodec) {
+    alert(
+      `This video looks like it's ${currentVideoUnsupportedCodec}-encoded, which the ` +
+      `in-browser renderer can't decode (it only supports H.264). Re-encode it first, ` +
+      `e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`
+    );
+    return;
+  }
 
   stopPreview();
   const btn = $("#exportBtn");
