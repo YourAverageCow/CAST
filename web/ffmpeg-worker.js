@@ -81,12 +81,7 @@ function buildCaptionFilter(subs, style, w, h) {
   const strokeWidth = Math.max(0, Math.min(10, parseInt(style.strokeWidth) || 3));
   const positionY = Math.max(0.05, Math.min(0.95, parseFloat(style.positionY) || 0.55));
 
-  // Loop inside the filter graph (not via -stream_loop on the input) so frame
-  // timestamps stay continuous across loop cycles — -stream_loop restarts the
-  // demuxer each cycle, and depending on the input's own timestamps that can
-  // reset `t` back near 0, which would make enable='between(t,...)' never
-  // fire for any caption past the first loop.
-  const chain = [`[0:v]loop=loop=-1:size=32767:start=0,scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}[base0]`];
+  const chain = [`[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}[base0]`];
   const writtenFiles = [];
   let prev = "base0";
   let i = 0;
@@ -122,6 +117,7 @@ self.onmessage = async (e) => {
         buildCaptionFilter(msg.subs || [], msg.style || {}, msg.w, msg.h);
 
       runFFmpeg([
+        "-stream_loop", "-1",
         "-i", "bg.mp4",
         "-i", "audio.wav",
         "-filter_complex", filterComplex,
