@@ -1,8 +1,28 @@
 /*! coi-serviceworker v0.1.7 - Guido Zuidhof and contributors, licensed under MIT */
 let coepCredentialless = false;
+
+// Cache-first for the large, rarely-changing vendored assets (ffmpeg cores,
+// ONNX runtime, Piper phonemize wasm/data, fonts) — these only change when
+// someone re-vendors a new build, so serving them from Cache Storage saves
+// re-fetching ~50-90MB on every repeat visit. Bump CACHE_NAME (not the app's
+// own VERSION in app.js) only when the vendored asset *set* itself changes.
+// Everything else (index.html, app.js, ffmpeg-worker.js, this file) stays
+// network-first/uncached, same as before — those change on every version
+// bump, and caching them would reintroduce exactly the "testing against
+// stale cached code" problem this app already hit once this session.
+const CACHE_NAME = "slopdaddy-assets-v1";
+const CACHEABLE_PATTERNS = [/\/vendor\//, /\/onnx\//, /\/piper\//];
+function isCacheableAsset(url) {
+    return url.origin === self.location.origin && CACHEABLE_PATTERNS.some((re) => re.test(url.pathname));
+}
+
 if (typeof window === 'undefined') {
     self.addEventListener("install", () => self.skipWaiting());
-    self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+    self.addEventListener("activate", (event) => event.waitUntil(
+        caches.keys()
+            .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+            .then(() => self.clients.claim())
+    ));
 
     self.addEventListener("message", (ev) => {
         if (!ev.data) {
@@ -32,28 +52,42 @@ if (typeof window === 'undefined') {
                 credentials: "omit",
             })
             : r;
+
+        const cacheable = r.method === "GET" && isCacheableAsset(new URL(r.url));
+
         event.respondWith(
-            fetch(request)
-                .then((response) => {
-                    if (response.status === 0) {
-                        return response;
-                    }
+            (cacheable ? caches.open(CACHE_NAME).then((cache) => cache.match(request)) : Promise.resolve(undefined))
+                .then((cached) => cached || fetch(request)
+                    .then((response) => {
+                        if (response.status === 0) {
+                            return response;
+                        }
 
-                    const newHeaders = new Headers(response.headers);
-                    newHeaders.set("Cross-Origin-Embedder-Policy",
-                        coepCredentialless ? "credentialless" : "require-corp"
-                    );
-                    if (!coepCredentialless) {
-                        newHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
-                    }
-                    newHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
+                        const newHeaders = new Headers(response.headers);
+                        newHeaders.set("Cross-Origin-Embedder-Policy",
+                            coepCredentialless ? "credentialless" : "require-corp"
+                        );
+                        if (!coepCredentialless) {
+                            newHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
+                        }
+                        newHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
 
-                    return new Response(response.body, {
-                        status: response.status,
-                        statusText: response.statusText,
-                        headers: newHeaders,
-                    });
-                })
+                        const finalResponse = new Response(response.body, {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: newHeaders,
+                        });
+
+                        // Store the already header-injected response, so future cache
+                        // hits carry the right COOP/COEP headers with no extra work.
+                        // Clone first — a Response body can only be read/consumed once,
+                        // and finalResponse itself still needs to go back to the page.
+                        if (cacheable && response.ok) {
+                            caches.open(CACHE_NAME).then((cache) => cache.put(request, finalResponse.clone()));
+                        }
+                        return finalResponse;
+                    })
+                )
                 .catch((e) => console.error(e))
         );
     });

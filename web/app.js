@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 52;
+const VERSION = 53;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -297,20 +297,13 @@ async function getIdeas() {
 }
 
 // ---------- Video upload ----------
-// The bundled ffmpeg.wasm core has no usable AV1/VP8/VP9 decode path — feeding
-// it those hangs forever with zero output (no error, no timeout). Sniff the
-// MP4 sample-entry fourcc so we know to auto-convert before export instead of
-// letting the user wait on a render that will never finish.
-const UNSUPPORTED_VIDEO_CODECS = {
-  av01: "AV1", vp09: "VP9", vp08: "VP8",
-};
+// The fourcc-sniffing logic itself (detectUnsupportedCodec) lives in
+// lib/video-utils.js — pure, unit-tested. This is just the async
+// file-reading wrapper around it.
 async function sniffUnsupportedVideoCodec(file) {
   try {
     const buf = new Uint8Array(await file.arrayBuffer());
-    const text = new TextDecoder("latin1").decode(buf);
-    for (const fourcc in UNSUPPORTED_VIDEO_CODECS) {
-      if (text.includes(fourcc)) return UNSUPPORTED_VIDEO_CODECS[fourcc];
-    }
+    return detectUnsupportedCodec(buf);
   } catch (e) { /* best-effort only */ }
   return null;
 }
@@ -645,55 +638,9 @@ async function generateSpeech(text) {
   }
 }
 
-// Estimate per-word timing from the full audio duration.
-// We align words to the audio by distributing the narration time across
-// words proportional to character length (better than uniform since it
-// reflects word size), and respect paragraph pauses in the source text.
-function computeWordTimings(text, totalDuration) {
-  // Fallback estimate: if no real duration, assume ~150 words/min (~0.4s/word).
-  if (!totalDuration || totalDuration <= 0) {
-    const wordCount = (text.trim().split(/\s+/).filter(Boolean)).length || 1;
-    totalDuration = wordCount * 0.4;
-  }
-  const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
-  const allWords = paragraphs.flatMap(para =>
-    para.split(/\s+/).filter(w => w && !/^[.,!?;:]+$/.test(w))
-  );
-
-  const charTotal = allWords.reduce((s, w) => s + w.length + 1, 0) || 1;
-  const perChar = totalDuration / charTotal;
-
-  const times = [];
-  let t = 0;
-  for (const w of allWords) {
-    const dur = (w.length + 1) * perChar;
-    times.push({ text: w, start: t, end: t + dur });
-    t += dur;
-  }
-  // Scale so last word ends exactly at totalDuration
-  if (times.length && t > 0) {
-    const scale = totalDuration / t;
-    times.forEach(x => { x.start *= scale; x.end *= scale; });
-  }
-  return times;
-}
-
-function buildSubsFromWords(words) {
-  const subs = [];
-  let i = 0;
-  const maxChars = 14;
-  while (i < words.length) {
-    let takeTwo = false;
-    if (i + 1 < words.length) {
-      const combined = words[i].text + " " + words[i + 1].text;
-      if (combined.length <= maxChars && (words[i + 1].start - words[i].end) < 0.35) takeTwo = true;
-    }
-    const g = takeTwo ? [words[i], words[i + 1]] : [words[i]];
-    subs.push({ start: g[0].start, end: g[g.length - 1].end, text: g.map(w => w.text).join(" ") });
-    i += g.length;
-  }
-  return subs;
-}
+// computeWordTimings / buildSubsFromWords live in lib/captions.js (pure,
+// unit-tested) and are used here unqualified since it's loaded as a
+// classic <script> before this file.
 
 async function startPreview() {
   const story = sanitizeText($("#storyText").value.trim());
@@ -899,14 +846,7 @@ async function exportVideo() {
   btn.disabled = false;
 }
 
-// Remove characters TextEncoder/ffmpeg choke on (lone surrogates, control chars).
-function sanitizeText(s) {
-  if (typeof s !== "string") return "";
-  return s
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")   // lone high surrogates
-    .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "$1") // lone low surrogates
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ""); // control chars
-}
+// sanitizeText lives in lib/captions.js (pure, unit-tested).
 
 // ---------- Player / download ----------
 function previewExported(url) {

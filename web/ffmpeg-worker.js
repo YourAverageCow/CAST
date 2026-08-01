@@ -1,4 +1,6 @@
 // ffmpeg worker — runs rendering off the main thread so the UI never freezes.
+importScripts("./lib/ffmpeg-filters.js");
+
 // The multi-threaded core (vendor/ffmpeg/mt/) lets libx264 use every core
 // instead of one, but it needs SharedArrayBuffer, which only exists when
 // this worker is itself cross-origin isolated (same prerequisite Piper's
@@ -73,37 +75,11 @@ function safeUnlink(name) {
   try { ffmpeg.FS.unlink(name); } catch (e) { /* ignore */ }
 }
 
-// Only allow plain color names or hex, since this gets interpolated straight
-// into an ffmpeg filter-graph string.
-function safeColor(c, fallback) {
-  if (typeof c !== "string") return fallback;
-  c = c.trim();
-  if (/^[a-zA-Z]+$/.test(c)) return c;
-  if (/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(c)) return c;
-  if (/^0x[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(c)) return c;
-  return fallback;
-}
-
-// One drawtext instance, driven by sendcmd swapping its `textfile` at each
-// cue's start/end timestamp via the `reinit` command. drawtext's own AVOption
-// table only flags `text` as directly runtime-settable — `textfile` is not,
-// so sending it as a bare command (as this used to) is silently rejected by
-// ffmpeg and the on-screen text never advances past the initial empty file.
-// `reinit` (documented, always supported) re-applies a `key=value` option
-// string on top of the filter's current options, so `textfile=<file>` here
-// swaps just that one option while leaving fontsize/color/etc. untouched.
-// Previously this chained a *separate* drawtext filter per cue
-// (each gated by enable='between(t,...)') — for a full story that's
-// routinely 100+ filter nodes every single output frame has to pass
-// through, which is the dominant cost in render time. sendcmd collapses
-// that to two filter nodes total, independent of caption count, with the
-// same visual result. drawtext uses FreeType directly against an exact
-// font file — unlike the `subtitles` (libass) filter, it doesn't need a
-// font *provider* (fontconfig/CoreText/DirectWrite), which this WASM build
-// doesn't have, so this is what actually renders visible glyphs. Cue text
-// goes in its own file rather than inline in the command script, since
-// arbitrary story text would easily break the sendcmd/filter-graph string
-// parsers' own comma/colon/quote escaping rules.
+// Writes the caption cue/empty files and cmds.txt to ffmpeg's virtual FS and
+// returns the filter-graph string for the render. The actual event-list,
+// sendcmd-script, and filter-string logic lives in lib/ffmpeg-filters.js
+// (pure, no ffmpeg.FS dependency, unit-tested in web/lib/*.test.js) — this
+// is just the thin FS-writing wrapper around it.
 function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
   const fontSize = parseInt(style.fontSize) || 68;
   const textColor = safeColor(style.textColor, "white");
@@ -114,41 +90,21 @@ function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
   const writtenFiles = ["capempty.txt"];
   ffmpeg.FS.writeFile("capempty.txt", new Uint8Array(0));
 
-  const events = []; // {time, file}
-  let i = 0;
-  for (const s of subs) {
-    if (s.end - s.start < 0.04) continue;
-    const text = (s.text || "").trim();
-    if (!text) continue;
-    const fname = "cap" + String(i).padStart(5, "0") + ".txt";
-    ffmpeg.FS.writeFile(fname, new TextEncoder().encode(text));
-    writtenFiles.push(fname);
-    events.push({ time: s.start, file: fname });
-    events.push({ time: s.end, file: "capempty.txt" });
-    i++;
+  const events = buildCaptionEvents(subs);
+  for (const e of events) {
+    if (e.text !== undefined) ffmpeg.FS.writeFile(e.file, new TextEncoder().encode(e.text));
   }
-  // Stable sort: for two events at the identical timestamp (a cue's end
-  // exactly meeting the next cue's start), insertion order is preserved,
-  // and since each cue pushes [start, end] in that order across cues
-  // processed chronologically, "show next cue" always lands after
-  // "clear this cue" at a tie — text wins over a blank gap, as intended.
-  events.sort((a, b) => a.time - b.time);
-  const cmds = events.map(e => `${e.time.toFixed(3)} drawtext@cap reinit 'textfile=${e.file}';`).join("\n");
+  writtenFiles.push(...events.filter(e => e.text !== undefined).map(e => e.file));
+
+  const cmds = buildSendcmdScript(events);
   ffmpeg.FS.writeFile("cmds.txt", new TextEncoder().encode(cmds));
   writtenFiles.push("cmds.txt");
 
-  // Background is already at the target resolution (the common case for a
-  // purpose-shot/pre-cropped clip) — skip scale+crop entirely rather than
-  // running that per-frame work for a no-op.
-  const needsScale = !(bgW && bgH && bgW === w && bgH === h);
-  const vf =
-    (needsScale ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},` : "") +
-    `sendcmd=f=cmds.txt,` +
-    `drawtext@cap=fontfile=fonts/DejaVuSans.ttf:textfile=capempty.txt:fontsize=${fontSize}` +
-    `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
-    `:x=(w-text_w)/2:y=h*${positionY}-text_h/2`;
+  const { filterComplex, outLabel } = buildDrawtextFilterString({
+    w, h, bgW, bgH, fontSize, textColor, strokeColor, strokeWidth, positionY,
+  });
 
-  return { filterComplex: `[0:v]${vf}[vout]`, outLabel: "vout", writtenFiles };
+  return { filterComplex, outLabel, writtenFiles };
 }
 
 self.onmessage = async (e) => {

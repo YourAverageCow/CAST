@@ -7,7 +7,7 @@ An AI slop video factory for making AITAH story videos.
 This project was completely vibe-coded, built in an afternoon, It's held together by:
 
 - a browser WASM engine the size of a small OS
-- zero tests
+- a few tests, for the parts that kept silently breaking
 - commit messages nobody was paying attention to
 
 It works. Probably. 
@@ -27,6 +27,16 @@ node server.js
 Then open http://localhost:8123. Or double-click `Open AITAH Creator Web.command`, which does the same thing and opens the browser for you.
 
 Or just use the deployed version: https://youraveragecow.github.io/Slopdaddy/
+
+## Tests
+
+The pure logic (caption timing/chunking, codec sniffing, the ffmpeg filter-graph/sendcmd string building) has unit tests in `web/lib/`, using Node's built-in test runner — no dependencies to install:
+
+```bash
+node --test web/lib/*.test.js
+```
+
+Runs automatically on every push/PR via `.github/workflows/test.yml`.
 
 ## What you need
 
