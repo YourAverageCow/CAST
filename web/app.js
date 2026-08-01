@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 43;
+const VERSION = 44;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -92,7 +92,7 @@ function getApiKey() {
 const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "storyLength",
   "resW", "resH", "fps",
-  "font", "fontSize", "positionX", "positionY", "textColor", "strokeColor", "strokeWidth",
+  "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice",
 ];
 function saveSettings() {
@@ -143,7 +143,7 @@ async function init() {
     if (el && el.tagName === "SELECT") el.addEventListener("change", saveSettings);
   }
   // Keep the caption preview live when style fields are edited by hand
-  for (const id of ["font", "fontSize", "positionX", "positionY", "textColor", "strokeColor", "strokeWidth"]) {
+  for (const id of ["font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth"]) {
     const el = document.getElementById(id);
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
@@ -386,9 +386,8 @@ function updateCaptionStyle() {
   const sw = parseInt($("#strokeWidth").value) || 0;
   const sc = $("#strokeColor").value;
   el.style.textShadow = sw ? `-${sw}px -${sw}px 0 ${sc}, ${sw}px -${sw}px 0 ${sc}, -${sw}px ${sw}px 0 ${sc}, ${sw}px ${sw}px 0 ${sc}` : "none";
-  const x = parseFloat($("#positionX").value);
   const y = parseFloat($("#positionY").value);
-  el.style.left = ((isFinite(x) ? x : 0.5) * 100) + "%";
+  el.style.left = "50%";
   el.style.top = ((isFinite(y) ? y : 0.55) * 100) + "%";
   el.style.transform = "translate(-50%, -50%)";
 }
@@ -436,8 +435,7 @@ function initCaptionDrag() {
     e.preventDefault();
     captionDragState = {
       mode: "move", pointerId: e.pointerId,
-      startX: e.clientX, startY: e.clientY,
-      startCX: parseFloat($("#positionX").value) || 0.5,
+      startY: e.clientY,
       startCY: parseFloat($("#positionY").value) || 0.55,
     };
     el.setPointerCapture(e.pointerId);
@@ -456,9 +454,7 @@ function initCaptionDrag() {
     if (!captionDragState || e.pointerId !== captionDragState.pointerId) return;
     if (captionDragState.mode === "move") {
       const rect = container.getBoundingClientRect();
-      const dx = (e.clientX - captionDragState.startX) / rect.width;
       const dy = (e.clientY - captionDragState.startY) / rect.height;
-      $("#positionX").value = Math.min(0.95, Math.max(0.05, captionDragState.startCX + dx)).toFixed(3);
       $("#positionY").value = Math.min(0.95, Math.max(0.05, captionDragState.startCY + dy)).toFixed(3);
     } else {
       const dy = e.clientY - captionDragState.startY;
@@ -801,7 +797,6 @@ async function exportVideo() {
       textColor: $("#textColor").value,
       strokeColor: $("#strokeColor").value,
       strokeWidth: parseInt($("#strokeWidth").value) || 3,
-      positionX: parseFloat($("#positionX").value) || 0.5,
       positionY: parseFloat($("#positionY").value) || 0.55,
     };
 
