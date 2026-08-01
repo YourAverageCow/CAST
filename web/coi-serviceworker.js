@@ -21,6 +21,9 @@ if (typeof window === 'undefined') {
     self.addEventListener("activate", (event) => event.waitUntil(
         caches.keys()
             .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+            // However cache cleanup goes, activation must still claim clients —
+            // otherwise a storage error would leave pages running uncontrolled.
+            .catch((e) => console.error(e))
             .then(() => self.clients.claim())
     ));
 
@@ -85,8 +88,11 @@ if (typeof window === 'undefined') {
                         // hits carry the right COOP/COEP headers with no extra work.
                         // Clone first — a Response body can only be read/consumed once,
                         // and finalResponse itself still needs to go back to the page.
+                        // Wrapped in waitUntil so the browser can't tear the worker down
+                        // mid-write — without it, the write raced the worker's teardown
+                        // and could be silently dropped.
                         if (cachePromise && response.ok) {
-                            cachePromise.then((cache) => cache.put(request, finalResponse.clone()));
+                            event.waitUntil(cachePromise.then((cache) => cache.put(request, finalResponse.clone())));
                         }
                         return finalResponse;
                     })

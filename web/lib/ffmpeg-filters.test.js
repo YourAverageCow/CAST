@@ -68,17 +68,14 @@ test("buildSendcmdScript emits reinit 'textfile=<file>' (not a bare textfile com
 
 test("buildDrawtextFilterString includes scale+crop when background resolution is unknown or mismatched", () => {
   const unknown = buildDrawtextFilterString({ w: 1080, h: 1920, bgW: 0, bgH: 0, fontSize: 68, textColor: "white", strokeColor: "black", strokeWidth: 3, positionY: 0.55 });
-  assert.equal(unknown.needsScale, true);
   assert.match(unknown.filterComplex, /scale=1080:1920/);
 
   const mismatched = buildDrawtextFilterString({ w: 1080, h: 1920, bgW: 1280, bgH: 720, fontSize: 68, textColor: "white", strokeColor: "black", strokeWidth: 3, positionY: 0.55 });
-  assert.equal(mismatched.needsScale, true);
   assert.match(mismatched.filterComplex, /scale=1080:1920/);
 });
 
 test("buildDrawtextFilterString skips scale+crop when background already matches target resolution", () => {
   const matched = buildDrawtextFilterString({ w: 1080, h: 1920, bgW: 1080, bgH: 1920, fontSize: 68, textColor: "white", strokeColor: "black", strokeWidth: 3, positionY: 0.55 });
-  assert.equal(matched.needsScale, false);
   assert.doesNotMatch(matched.filterComplex, /scale=/);
   assert.match(matched.filterComplex, /^\[0:v\]sendcmd=f=cmds\.txt,drawtext@cap=/);
 });

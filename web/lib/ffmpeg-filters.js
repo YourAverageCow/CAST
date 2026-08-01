@@ -65,7 +65,7 @@ function buildDrawtextFilterString({ w, h, bgW, bgH, fontSize, textColor, stroke
     `drawtext@cap=fontfile=fonts/DejaVuSans.ttf:textfile=capempty.txt:fontsize=${fontSize}` +
     `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
     `:x=(w-text_w)/2:y=h*${positionY}-text_h/2`;
-  return { filterComplex: `[0:v]${vf}[vout]`, outLabel: "vout", needsScale };
+  return { filterComplex: `[0:v]${vf}[vout]`, outLabel: "vout" };
 }
 
 if (typeof module !== "undefined" && module.exports) {

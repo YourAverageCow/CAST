@@ -21,5 +21,5 @@ function detectUnsupportedCodec(bytes) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { UNSUPPORTED_VIDEO_CODECS, detectUnsupportedCodec };
+  module.exports = { detectUnsupportedCodec };
 }

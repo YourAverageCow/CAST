@@ -1,7 +1,9 @@
 name: Deploy web to GitHub Pages
 
 on:
-  push:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -17,9 +19,14 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Only deploy once the Tests workflow has actually passed on this push —
+    # a manual run (workflow_dispatch) skips this gate on purpose.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
