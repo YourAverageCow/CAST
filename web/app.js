@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 31;
+const VERSION = 32;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -453,8 +453,17 @@ async function ensureFFmpeg() {
     if (typeof window.createFFmpegCore !== "function") {
       throw new Error("ffmpeg core failed to load (createFFmpegCore not found)");
     }
+    const base = new URL("./", document.baseURI).href;
+    const coreURL = base + "vendor/ffmpeg/ffmpeg-core.js";
+    const wasmURL = base + "vendor/ffmpeg/ffmpeg-core.wasm";
+    // The core's _locateFile expects mainScriptUrlOrBlob to be
+    // `<core-url>#base64({wasmURL, workerURL})`.
+    const payload = btoa(JSON.stringify({
+      wasmURL,
+      workerURL: base + "vendor/ffmpeg/ffmpeg-core.js",
+    }));
     ffmpeg = await window.createFFmpegCore({
-      mainScriptUrlOrBlob: new URL("./vendor/ffmpeg/ffmpeg-core.js", document.baseURI).href,
+      mainScriptUrlOrBlob: coreURL + "#" + payload,
     });
     ffmpegLoaded = true;
     hideDownloadToast();
