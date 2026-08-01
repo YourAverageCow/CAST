@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 55;
+const VERSION = 56;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -148,6 +148,7 @@ async function init() {
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
   new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
+  initBatchUI();
 }
 
 // Drag-to-resize for the left sidebar and the right settings panel. `sign`
@@ -699,6 +700,9 @@ let ffmpegPoolSize = 0;
 function ensureFFmpeg(poolSize) {
   poolSize = poolSize || 1;
   if (ffmpegPool && ffmpegPoolSize >= poolSize) return ffmpegPoolReady;
+  // Only reached when growing past the current pool's capacity — destroy it
+  // first so its Workers don't leak silently in the background.
+  if (ffmpegPool) { ffmpegPool.destroy(); ffmpegPool = null; }
   ffmpegPoolSize = poolSize;
   showDownloadToast(
     poolSize > 1
@@ -849,8 +853,14 @@ function renderResultCard(job, container, opts) {
     div.dataset.jobId = job.id;
     if (opts.prepend) container.prepend(div); else container.appendChild(div);
   }
+  // Batch cards (in #resultsGrid) show a short title so it's clear which
+  // job a card belongs to; the single-flow's #outputContainer never has
+  // more than one live card at a time, so it doesn't need one.
+  const title = container.id === "resultsGrid"
+    ? `<div class="result-card-title">${escapeHtml((job.premise || job.story || "Untitled").slice(0, 60))}</div>`
+    : "";
   if (job.status === "done") {
-    div.innerHTML = `
+    div.innerHTML = title + `
       <div class="actions">
         <button data-action="preview">Preview</button>
         <button data-action="download">Download</button>
@@ -860,9 +870,13 @@ function renderResultCard(job, container, opts) {
     div.querySelector('[data-action="download"]').onclick = () => downloadVideo(job.resultUrl);
     div.querySelector('[data-action="copy"]').onclick = () => copyVideoLink(job.resultUrl);
   } else if (job.status === "error") {
-    div.innerHTML = `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>`;
+    div.innerHTML = title +
+      `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>` +
+      (container.id === "resultsGrid" ? `<button class="result-retry-btn" data-action="retry">Retry</button>` : "");
+    const retryBtn = div.querySelector('[data-action="retry"]');
+    if (retryBtn) retryBtn.onclick = () => retryBatchJob(job);
   } else {
-    div.innerHTML = `
+    div.innerHTML = title + `
       <div class="result-status">${escapeHtml(job.progressLabel || job.status)}</div>
       <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${job.progressPct || 0}%"></div></div>`;
   }
@@ -937,6 +951,244 @@ function downloadVideo(url) {
 }
 function copyVideoLink(url) {
   navigator.clipboard.writeText(url).then(() => showToast("Link copied!"));
+}
+
+// ---------- Batch composer ----------
+// Each card is its own fully independent job (own premise/story/background/
+// voice/style) — the global settings panel only supplies the fallback
+// values resolveJobSettings() falls back to for whatever a card doesn't
+// override. Batch and Single share one ffmpegPool/runJob() pipeline.
+let currentFlow = "single";
+let batchJobs = [];
+const MAX_PARALLEL_RENDERS = 15;
+
+function setFlow(flow) {
+  currentFlow = flow;
+  $("#singleFlow").style.display = flow === "single" ? "" : "none";
+  $("#batchFlow").style.display = flow === "batch" ? "" : "none";
+  for (const btn of document.querySelectorAll(".flow-toggle-btn")) {
+    btn.classList.toggle("active", btn.dataset.flow === flow);
+  }
+}
+
+function initBatchUI() {
+  const select = $("#batchParallelism");
+  const opts = [];
+  for (let i = 1; i <= MAX_PARALLEL_RENDERS; i++) opts.push(`<option value="${i}">${i}</option>`);
+  select.innerHTML = opts.join("");
+  // Conservative default — safe on most machines without a crowded tab;
+  // still lets the user dial all the way up to MAX_PARALLEL_RENDERS.
+  const defaultParallelism = Math.max(1, Math.min(3, navigator.hardwareConcurrency || 2));
+  select.value = String(defaultParallelism);
+  updateParallelismHint();
+  select.addEventListener("change", updateParallelismHint);
+  if (batchJobs.length === 0) addBatchCard();
+}
+
+function updateParallelismHint() {
+  const n = parseInt($("#batchParallelism").value) || 1;
+  $("#batchParallelismHint").textContent = n > 1
+    ? `Renders ${n} at once, using the single-core video engine per render to avoid overloading your CPU. Higher than your machine can handle may slow things down or crash the tab — start lower and raise it if it's stable.`
+    : "Renders one video at a time, using the faster multi-core video engine.";
+}
+
+function addBatchCard() {
+  const job = createJob();
+  batchJobs.push(job);
+  const el = buildBatchCardElement(job);
+  $("#batchCardList").appendChild(el);
+  reindexBatchCards();
+  return job;
+}
+
+function removeBatchCard(job, el) {
+  batchJobs = batchJobs.filter(j => j !== job);
+  el.remove();
+  if (job.bgUrl) URL.revokeObjectURL(job.bgUrl);
+  reindexBatchCards();
+}
+
+function reindexBatchCards() {
+  const cards = $("#batchCardList").querySelectorAll(".batch-card-index");
+  cards.forEach((el, i) => { el.textContent = "#" + (i + 1); });
+}
+
+// Builds one batch card's DOM once and wires all events directly to the
+// job object — inputs write straight into `job.*` on every keystroke rather
+// than going through a render/diff cycle, so typing never loses focus.
+function buildBatchCardElement(job) {
+  const voiceOpts = ['<option value="">Use settings voice</option>']
+    .concat(PIPER_VOICES.map(v => `<option value="${v}">${VOICE_LABELS[v] || v}</option>`))
+    .join("");
+
+  const div = document.createElement("div");
+  div.className = "batch-card";
+  div.dataset.jobId = job.id;
+  div.innerHTML = `
+    <div class="batch-card-header">
+      <span class="batch-card-index">#</span>
+      <button class="batch-card-remove" title="Remove">&times;</button>
+    </div>
+    <label>Premise / Idea</label>
+    <textarea class="bc-premise" rows="2" placeholder="e.g. My coworker keeps taking credit for my work..."></textarea>
+    <div class="row">
+      <button class="accent bc-ideas">Suggest Ideas</button>
+      <button class="primary bc-genstory">Generate Story</button>
+    </div>
+    <label>Story</label>
+    <textarea class="bc-story" rows="4" placeholder="Story text... or paste your own"></textarea>
+    <label>Background video</label>
+    <div class="bc-upload-area">Click to upload</div>
+    <input type="file" class="bc-upload-input" accept="video/*" style="display:none">
+    <label>Voice</label>
+    <select class="bc-voice">${voiceOpts}</select>
+    <button class="bc-customize-toggle">Customize style &#9662;</button>
+    <div class="bc-customize" style="display:none">
+      <div><label>Width</label><input type="number" class="bc-resW" min="480" max="2160" step="2"></div>
+      <div><label>Height</label><input type="number" class="bc-resH" min="480" max="3840" step="2"></div>
+      <div><label>FPS</label><input type="number" class="bc-fps" min="10" max="60"></div>
+      <div><label>Font Size</label><input type="number" class="bc-fontSize" min="24" max="120"></div>
+      <div><label>Position Y</label><input type="number" class="bc-positionY" min="0.05" max="0.95" step="0.01"></div>
+      <div class="field-full"><label>Font</label><input type="text" class="bc-font"></div>
+      <div><label>Text Color</label><input type="text" class="bc-textColor"></div>
+      <div><label>Stroke Color</label><input type="text" class="bc-strokeColor"></div>
+      <div class="field-full"><label>Stroke Width</label><input type="number" class="bc-strokeWidth" min="0" max="10"></div>
+    </div>
+  `;
+
+  div.querySelector(".batch-card-remove").onclick = () => removeBatchCard(job, div);
+
+  const premiseTa = div.querySelector(".bc-premise");
+  const storyTa = div.querySelector(".bc-story");
+  premiseTa.addEventListener("input", () => { job.premise = premiseTa.value; autoGrow(premiseTa); });
+  storyTa.addEventListener("input", () => { job.story = storyTa.value; autoGrow(storyTa); });
+
+  div.querySelector(".bc-ideas").onclick = () => getIdeasForCard(job, div.querySelector(".bc-ideas"), premiseTa);
+  div.querySelector(".bc-genstory").onclick = () => generateStoryForCard(job, div.querySelector(".bc-genstory"), storyTa);
+
+  const uploadArea = div.querySelector(".bc-upload-area");
+  const uploadInput = div.querySelector(".bc-upload-input");
+  uploadArea.onclick = () => uploadInput.click();
+  uploadInput.onchange = () => { if (uploadInput.files[0]) setBatchCardBackground(job, uploadInput.files[0], div); };
+  div.addEventListener("dragover", (e) => { e.preventDefault(); uploadArea.classList.add("drag"); });
+  div.addEventListener("dragleave", () => uploadArea.classList.remove("drag"));
+  div.addEventListener("drop", (e) => {
+    e.preventDefault();
+    uploadArea.classList.remove("drag");
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith("video/")) setBatchCardBackground(job, file, div);
+  });
+
+  div.querySelector(".bc-voice").addEventListener("change", (e) => { job.voice = e.target.value || null; });
+
+  const customizeToggle = div.querySelector(".bc-customize-toggle");
+  const customizePanel = div.querySelector(".bc-customize");
+  customizeToggle.onclick = () => {
+    const showing = customizePanel.style.display !== "none";
+    customizePanel.style.display = showing ? "none" : "grid";
+    customizeToggle.innerHTML = showing ? "Customize style &#9662;" : "Customize style &#9652;";
+  };
+  // Override fields are left blank (== inherit global default) until the
+  // user actually types something — mirrors resolveJobSettings' null/""
+  // fallback rule in lib/job-model.js.
+  for (const field of JOB_OVERRIDE_FIELDS) {
+    if (field === "voice") continue; // handled above via <select>
+    const input = div.querySelector(`.bc-${field}`);
+    if (!input) continue;
+    input.addEventListener("input", () => {
+      job[field] = input.value === "" ? null : input.value;
+    });
+  }
+
+  return div;
+}
+
+async function setBatchCardBackground(job, file, cardEl) {
+  job.bgFile = file;
+  job.bgUnsupportedCodec = null;
+  job.bgTranscoded = null;
+  if (job.bgUrl) URL.revokeObjectURL(job.bgUrl);
+  job.bgUrl = URL.createObjectURL(file);
+  const area = cardEl.querySelector(".bc-upload-area");
+  area.textContent = file.name;
+  area.classList.add("uploaded");
+  const codec = await sniffUnsupportedVideoCodec(file);
+  job.bgUnsupportedCodec = codec;
+  if (codec) {
+    showToast(`This video is ${codec}-encoded — it'll be auto-converted to H.264 the first time this job renders.`, 6000);
+  }
+}
+
+async function getIdeasForCard(job, btn, ta) {
+  btn.textContent = "Loading...";
+  btn.disabled = true;
+  ta.value = "";
+  try {
+    await streamChat(
+      [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
+       { role: "user", content: ideasPrompt() }],
+      (chunk) => { ta.value += chunk; job.premise = ta.value; autoGrow(ta); }
+    );
+  } catch (e) { alert("Failed: " + e.message); }
+  btn.textContent = "Suggest Ideas";
+  btn.disabled = false;
+}
+
+async function generateStoryForCard(job, btn, ta) {
+  btn.textContent = "Generating...";
+  btn.disabled = true;
+  ta.value = "";
+  const system = storySystemPrompt();
+  const user = storyUserPrompt(job.premise || "a dramatic family conflict");
+  try {
+    await streamChat(
+      [{ role: "system", content: system }, { role: "user", content: user }],
+      (chunk) => { ta.value += chunk; job.story = ta.value; autoGrow(ta); }
+    );
+    showToast("Story generated!");
+  } catch (e) { alert("Generation failed: " + e.message); }
+  btn.textContent = "Generate Story";
+  btn.disabled = false;
+}
+
+// Renders every draft/errored job through the pool at once — each job's own
+// runJob() call queues on ffmpegPool.submit() internally, so this naturally
+// gets "N at a time, rest wait" behavior for free from the pool, no extra
+// scheduling logic needed here.
+async function renderAllBatch() {
+  const jobsToRun = batchJobs.filter(j => j.status === "draft" || j.status === "error");
+  if (!jobsToRun.length) { showToast("Nothing to render — add a video or fix a failed one first."); return; }
+
+  const btn = $("#renderAllBtn");
+  btn.textContent = "Rendering...";
+  btn.disabled = true;
+
+  const parallelism = parseInt($("#batchParallelism").value) || 1;
+  const globalSettings = getGlobalSettings();
+  const grid = $("#resultsGrid");
+
+  try {
+    await ensureFFmpeg(parallelism);
+    jobsToRun.forEach(j => { j.status = "queued"; j.progressLabel = "Queued..."; renderResultCard(j, grid); });
+    await Promise.all(jobsToRun.map(job => runJob(job, globalSettings, (j) => renderResultCard(j, grid))));
+    const failed = jobsToRun.filter(j => j.status === "error").length;
+    showToast(failed ? `Batch done — ${failed} of ${jobsToRun.length} failed.` : "Batch complete!");
+  } catch (e) {
+    console.error(e);
+    alert("Batch failed to start: " + (e && e.message ? e.message : String(e)));
+  }
+
+  btn.textContent = "Generate All";
+  btn.disabled = false;
+}
+
+// Re-submits one failed batch job without touching the others.
+async function retryBatchJob(job) {
+  job.status = "queued";
+  job.error = null;
+  renderResultCard(job, $("#resultsGrid"));
+  await ensureFFmpeg(parseInt($("#batchParallelism").value) || 1);
+  await runJob(job, getGlobalSettings(), (j) => renderResultCard(j, $("#resultsGrid")));
 }
 
 // ---------- Prompts (mirror prompts.txt) ----------

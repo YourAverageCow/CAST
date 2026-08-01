@@ -214,6 +214,19 @@ class FFmpegWorkerPool {
       next(worker);
     }
   }
+
+  // Terminates every underlying Worker. Only safe to call once nothing is
+  // mid-flight on this pool — the caller (ensureFFmpeg in app.js) only does
+  // this when growing to a larger pool size than currently allocated, which
+  // otherwise would silently leak the smaller pool's Workers running forever
+  // in the background.
+  destroy() {
+    for (const worker of this._slots) {
+      if (worker && worker._worker) worker._worker.terminate();
+    }
+    this._slots = [];
+    this._waiters = [];
+  }
 }
 
 if (typeof module !== "undefined" && module.exports) {

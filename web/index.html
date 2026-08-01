@@ -124,6 +124,43 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .progress-bar-track { width: 100%; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
 .progress-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s ease; }
 
+/* ---- Single/Batch flow toggle ---- */
+.flow-toggle { display: flex; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px; margin-bottom: 20px; width: max-content; }
+.flow-toggle-btn { background: transparent; border: none; color: var(--muted); padding: 6px 18px; border-radius: 6px; font-size: 0.85rem; cursor: pointer; }
+.flow-toggle-btn.active { background: var(--accent); color: #fff; }
+.flow-toggle-btn:not(.active):hover { color: var(--text); }
+
+/* ---- Batch composer ---- */
+#batchFlow { width: 100%; max-width: 900px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+#batchComposer { width: 100%; max-width: 700px; display: flex; flex-direction: column; gap: 12px; }
+#batchCardList { display: flex; flex-direction: column; gap: 14px; }
+.batch-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.batch-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.batch-card-index { font-size: 0.8rem; color: var(--muted); font-weight: 600; }
+.batch-card-remove { background: transparent; border: 1px solid var(--border); color: var(--muted); width: 26px; height: 26px; border-radius: 6px; cursor: pointer; padding: 0; font-size: 0.9rem; }
+.batch-card-remove:hover { color: var(--danger); border-color: var(--danger); }
+.batch-card label { font-size: 0.75rem; color: var(--muted); display: block; margin: 8px 0 4px; }
+.batch-card textarea { min-height: 60px; }
+.batch-card .row { display: flex; gap: 8px; margin-top: 6px; }
+.batch-card .row button { flex: 1; padding: 8px; font-size: 0.8rem; }
+.bc-upload-area { border: 2px dashed var(--border); border-radius: 8px; padding: 12px; text-align: center; cursor: pointer; font-size: 0.8rem; color: var(--muted); }
+.bc-upload-area.uploaded { border-color: var(--green); border-style: solid; color: var(--text); }
+.bc-customize-toggle { background: transparent; border: none; color: var(--accent); font-size: 0.78rem; cursor: pointer; padding: 4px 0; margin-top: 6px; width: 100%; text-align: left; }
+.bc-customize { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+.bc-customize .field-full { grid-column: 1 / -1; }
+.bc-customize label { margin: 0 0 3px; }
+
+.batch-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.batch-parallelism-label { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); }
+.batch-parallelism-label select { width: auto; padding: 6px 10px; }
+.batch-hint { font-size: 0.72rem; color: var(--muted); margin: 0; }
+
+#resultsGrid { width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+#resultsGrid .video-result { margin-bottom: 0; }
+.result-card-title { font-size: 0.78rem; color: var(--text); margin-bottom: 8px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.result-retry-btn { width: 100%; margin-top: 8px; padding: 8px; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; }
+.result-retry-btn:hover { border-color: var(--accent); color: var(--accent); }
+
 .toast { position: fixed; bottom: 20px; right: 20px; background: #238636; color: #fff; padding: 10px 18px; border-radius: 6px; font-size: 0.8rem; opacity: 0; transition: opacity 0.3s; z-index: 200; }
 .toast.show { opacity: 1; }
 
@@ -294,18 +331,41 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <div class="main">
   <button class="gear-btn app-gear" onclick="toggleSettings()" title="Settings">&#9881;</button>
   <span class="version app-version" id="versionBadge">v0</span>
-  <div class="preview-wrapper" id="previewContainer">
-    <video id="videoPreview" loop muted playsinline style="display:none"></video>
-    <div id="previewPlaceholder">Upload a background video</div>
-    <div id="captionOverlay"><span id="captionText"></span><div id="captionResizeHandle"></div></div>
+
+  <div class="flow-toggle" id="flowToggle">
+    <button class="flow-toggle-btn active" data-flow="single" onclick="setFlow('single')">Single</button>
+    <button class="flow-toggle-btn" data-flow="batch" onclick="setFlow('batch')">Batch</button>
   </div>
-  <div id="captionEditHint" style="display:none">Drag the caption up/down to move it, drag the dot to resize</div>
-  <div id="outputContainer"></div>
-  <div id="progressBar" style="display:none;width:100%;max-width:400px;text-align:center;">
-    <div class="progress-bar-track" style="width:100%;">
-      <div class="progress-bar-fill" id="progressFill" style="width:0%;animation:none;margin-left:0;"></div>
+
+  <div id="singleFlow">
+    <div class="preview-wrapper" id="previewContainer">
+      <video id="videoPreview" loop muted playsinline style="display:none"></video>
+      <div id="previewPlaceholder">Upload a background video</div>
+      <div id="captionOverlay"><span id="captionText"></span><div id="captionResizeHandle"></div></div>
     </div>
-    <p id="progressPercent" style="font-size:0.8rem;color:var(--muted);margin-top:4px;">0%</p>
+    <div id="captionEditHint" style="display:none">Drag the caption up/down to move it, drag the dot to resize</div>
+    <div id="outputContainer"></div>
+    <div id="progressBar" style="display:none;width:100%;max-width:400px;text-align:center;">
+      <div class="progress-bar-track" style="width:100%;">
+        <div class="progress-bar-fill" id="progressFill" style="width:0%;animation:none;margin-left:0;"></div>
+      </div>
+      <p id="progressPercent" style="font-size:0.8rem;color:var(--muted);margin-top:4px;">0%</p>
+    </div>
+  </div>
+
+  <div id="batchFlow" style="display:none">
+    <div id="batchComposer">
+      <div id="batchCardList"></div>
+      <button class="accent" id="addBatchCardBtn" onclick="addBatchCard()">+ Add Video</button>
+      <div class="batch-controls">
+        <label class="batch-parallelism-label">Parallel renders
+          <select id="batchParallelism"></select>
+        </label>
+        <button class="primary" onclick="renderAllBatch()" id="renderAllBtn">Generate All</button>
+      </div>
+      <p class="batch-hint" id="batchParallelismHint"></p>
+    </div>
+    <div id="resultsGrid"></div>
   </div>
 </div>
 
