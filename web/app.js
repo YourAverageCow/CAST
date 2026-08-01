@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 46;
+const VERSION = 47;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -44,8 +44,6 @@ const PIPER_VOICES = [
 const DEFAULT_VOICE = PIPER_VOICES[0];
 const PIPER_JS = "./vendor/piper-tts-web.js";
 let piperEngine = null;
-let ffmpeg = null;
-let ffmpegLoaded = false;
 
 // ---------- Tiny helpers ----------
 function showToast(msg, duration) {
@@ -65,16 +63,6 @@ function setProgress(pct, stage) {
 }
 function openSettings() { $("#settingsOverlay").classList.add("show"); $("#settingsPanel").classList.add("open"); }
 function closeSettings() { $("#settingsOverlay").classList.remove("show"); $("#settingsPanel").classList.remove("open"); }
-
-async function loadScript(src) {
-  return new Promise((res, rej) => {
-    const s = document.createElement("script");
-    s.src = src;
-    s.onload = () => res();
-    s.onerror = () => rej(new Error("Failed to load " + src));
-    document.head.appendChild(s);
-  });
-}
 
 // ---------- API config ----------
 const MODELS = {
@@ -598,23 +586,16 @@ function computeWordTimings(text, totalDuration) {
     totalDuration = wordCount * 0.4;
   }
   const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
-  const allWords = [];
-  let offset = 0;
+  const allWords = paragraphs.flatMap(para =>
+    para.split(/\s+/).filter(w => w && !/^[.,!?;:]+$/.test(w))
+  );
 
-  for (const para of paragraphs) {
-    const words = para.split(/\s+/).filter(w => w && !/^[.,!?;:]+$/.test(w));
-    if (!words.length) continue;
-    allWords.push(...words.map(w => ({ w, para: true })));
-  }
-
-  const charTotal = allWords.reduce((s, x) => s + x.w.length + 1, 0) || 1;
+  const charTotal = allWords.reduce((s, w) => s + w.length + 1, 0) || 1;
   const perChar = totalDuration / charTotal;
 
-  // Small fixed pause between paragraphs (~0.6s) is subtracted from total
-  // but since totalDuration already includes it, we just let timing flow.
   const times = [];
   let t = 0;
-  for (const { w } of allWords) {
+  for (const w of allWords) {
     const dur = (w.length + 1) * perChar;
     times.push({ text: w, start: t, end: t + dur });
     t += dur;
@@ -688,10 +669,9 @@ function ensureFFmpeg() {
   const base = new URL("./", document.baseURI).href;
   ffmpegWorker = new Worker(BASE + "ffmpeg-worker.js");
   ffmpegWorkerReady = (async () => {
-    // The subtitles filter (libass) has no fonts to draw with inside the WASM
-    // sandbox — there's no OS font store in there. Without one, captions
-    // burn in as nothing: ffmpeg exits 0, the video looks fine, just silently
-    // caption-free. Ship one bundled font so libass always has something.
+    // Captions are burned in via drawtext, which needs an exact font FILE
+    // (there's no OS font store inside the WASM sandbox) — ship one bundled
+    // font once here so every render has it in the worker's virtual FS.
     const fontBuf = await (await fetch(BASE + "vendor/fonts/DejaVuSans.ttf")).arrayBuffer();
     return new Promise((resolve, reject) => {
       ffmpegWorker.onmessage = (e) => {
@@ -756,24 +736,6 @@ function renderVideoInWorker(payload, onProgress) {
     resetStallTimer();
     ffmpegWorker.postMessage(payload, [payload.bg.buffer, payload.audio.buffer]);
   });
-}
-
-// Safe UTF-8 encoder that never throws — replaces lone surrogates with U+FFFD
-// instead of crashing like TextEncoder does.
-function safeUtf8(str) {
-  const bytes = [];
-  for (const ch of str) {
-    let cp = ch.codePointAt(0);
-    if (cp === 0xFFFD) { bytes.push(0xEF, 0xBF, 0xBD); continue; }
-    const isLoneHigh = cp >= 0xD800 && cp <= 0xDBFF;
-    const isLoneLow = cp >= 0xDC00 && cp <= 0xDFFF;
-    if (isLoneHigh || isLoneLow) { bytes.push(0xEF, 0xBF, 0xBD); continue; }
-    if (cp <= 0x7F) bytes.push(cp);
-    else if (cp <= 0x7FF) bytes.push(0xC0 | (cp >> 6), 0x80 | (cp & 0x3F));
-    else if (cp <= 0xFFFF) bytes.push(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F));
-    else bytes.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3F), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F));
-  }
-  return new Uint8Array(bytes);
 }
 
 async function exportVideo() {
