@@ -65,15 +65,20 @@ function safeColor(c, fallback) {
   return fallback;
 }
 
-// Build a chained drawtext filter graph, one filter per caption cue, each
-// gated by enable='between(t,start,end)'. drawtext uses FreeType directly
-// against an exact font file — unlike the `subtitles` (libass) filter, it
-// doesn't need a font *provider* (fontconfig/CoreText/DirectWrite), which
-// this WASM build doesn't have, so this is what actually renders visible
-// glyphs. Each cue's text goes in its own file (FS.writeFile) rather than
-// inline in the filter string, since ffmpeg's filter-graph string parser has
-// its own comma/colon/quote escaping rules that arbitrary story text would
-// easily break.
+// One drawtext instance, driven by sendcmd swapping its `textfile` at each
+// cue's start/end timestamp (both are runtime-settable AVOptions on
+// drawtext). Previously this chained a *separate* drawtext filter per cue
+// (each gated by enable='between(t,...)') — for a full story that's
+// routinely 100+ filter nodes every single output frame has to pass
+// through, which is the dominant cost in render time. sendcmd collapses
+// that to two filter nodes total, independent of caption count, with the
+// same visual result. drawtext uses FreeType directly against an exact
+// font file — unlike the `subtitles` (libass) filter, it doesn't need a
+// font *provider* (fontconfig/CoreText/DirectWrite), which this WASM build
+// doesn't have, so this is what actually renders visible glyphs. Cue text
+// goes in its own file rather than inline in the command script, since
+// arbitrary story text would easily break the sendcmd/filter-graph string
+// parsers' own comma/colon/quote escaping rules.
 function buildCaptionFilter(subs, style, w, h) {
   const fontSize = parseInt(style.fontSize) || 68;
   const textColor = safeColor(style.textColor, "white");
@@ -81,9 +86,10 @@ function buildCaptionFilter(subs, style, w, h) {
   const strokeWidth = Math.max(0, Math.min(10, parseInt(style.strokeWidth) || 3));
   const positionY = Math.max(0.05, Math.min(0.95, parseFloat(style.positionY) || 0.55));
 
-  const chain = [`[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}[base0]`];
-  const writtenFiles = [];
-  let prev = "base0";
+  const writtenFiles = ["capempty.txt"];
+  ffmpeg.FS.writeFile("capempty.txt", new Uint8Array(0));
+
+  const events = []; // {time, file}
   let i = 0;
   for (const s of subs) {
     if (s.end - s.start < 0.04) continue;
@@ -92,17 +98,28 @@ function buildCaptionFilter(subs, style, w, h) {
     const fname = "cap" + String(i).padStart(5, "0") + ".txt";
     ffmpeg.FS.writeFile(fname, new TextEncoder().encode(text));
     writtenFiles.push(fname);
-    const next = "v" + i;
-    chain.push(
-      `[${prev}]drawtext=fontfile=fonts/DejaVuSans.ttf:textfile=${fname}:fontsize=${fontSize}` +
-      `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
-      `:x=(w-text_w)/2:y=h*${positionY}-text_h/2` +
-      `:enable='between(t,${s.start.toFixed(3)},${s.end.toFixed(3)})'[${next}]`
-    );
-    prev = next;
+    events.push({ time: s.start, file: fname });
+    events.push({ time: s.end, file: "capempty.txt" });
     i++;
   }
-  return { filterComplex: chain.join(";"), outLabel: prev, writtenFiles };
+  // Stable sort: for two events at the identical timestamp (a cue's end
+  // exactly meeting the next cue's start), insertion order is preserved,
+  // and since each cue pushes [start, end] in that order across cues
+  // processed chronologically, "show next cue" always lands after
+  // "clear this cue" at a tie — text wins over a blank gap, as intended.
+  events.sort((a, b) => a.time - b.time);
+  const cmds = events.map(e => `${e.time.toFixed(3)} drawtext@cap textfile '${e.file}';`).join("\n");
+  ffmpeg.FS.writeFile("cmds.txt", new TextEncoder().encode(cmds));
+  writtenFiles.push("cmds.txt");
+
+  const vf =
+    `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},` +
+    `sendcmd=f=cmds.txt,` +
+    `drawtext@cap=fontfile=fonts/DejaVuSans.ttf:textfile=capempty.txt:fontsize=${fontSize}` +
+    `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
+    `:x=(w-text_w)/2:y=h*${positionY}-text_h/2`;
+
+  return { filterComplex: `[0:v]${vf}[vout]`, outLabel: "vout", writtenFiles };
 }
 
 self.onmessage = async (e) => {
