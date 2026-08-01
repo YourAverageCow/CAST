@@ -100,8 +100,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .preview-wrapper { position: relative; width: 100%; max-width: 400px; aspect-ratio: 9/16; background: #000; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
 .preview-wrapper video { width: 100%; height: 100%; object-fit: cover; }
 #previewPlaceholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.9rem; }
-#captionOverlay { position: absolute; left: 5%; width: 90%; text-align: center; padding: 8px 12px; border-radius: 6px; pointer-events: none; display: none; line-height: 1.3; }
+#captionOverlay { position: absolute; max-width: 80%; width: max-content; text-align: center; padding: 8px 12px; border-radius: 6px; pointer-events: none; display: none; line-height: 1.3; cursor: move; touch-action: none; user-select: none; }
 #captionOverlay.show { display: block; }
+#captionOverlay.editable { pointer-events: auto; outline: 1px dashed rgba(255,255,255,0.5); }
+#captionResizeHandle { position: absolute; right: -9px; bottom: -9px; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 2px solid #fff; cursor: nwse-resize; touch-action: none; display: none; }
+#captionOverlay.editable #captionResizeHandle { display: block; }
+#captionEditHint { text-align: center; font-size: 0.75rem; color: var(--muted); margin-top: 6px; }
 
 #outputContainer { width: 100%; max-width: 600px; }
 .video-result { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.3); margin-bottom: 16px; }
@@ -222,7 +226,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <div class="caption-grid">
       <div><label>Font</label><input type="text" id="font" value="Arial"></div>
       <div><label>Font Size</label><input type="number" id="fontSize" value="68" min="24" max="120"></div>
-      <div><label>Position Y</label><input type="number" id="positionY" value="0.55" min="0.1" max="0.95" step="0.01"></div>
+      <div><label>Position X</label><input type="number" id="positionX" value="0.5" min="0.05" max="0.95" step="0.01"></div>
+      <div><label>Position Y</label><input type="number" id="positionY" value="0.55" min="0.05" max="0.95" step="0.01"></div>
       <div><label>Text Color</label><input type="text" id="textColor" value="white"></div>
       <div><label>Stroke Color</label><input type="text" id="strokeColor" value="black"></div>
       <div><label>Stroke Width</label><input type="number" id="strokeWidth" value="3" min="0" max="10"></div>
@@ -283,8 +288,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   <div class="preview-wrapper" id="previewContainer">
     <video id="videoPreview" loop muted playsinline style="display:none"></video>
     <div id="previewPlaceholder">Upload a background video</div>
-    <div id="captionOverlay"></div>
+    <div id="captionOverlay"><span id="captionText"></span><div id="captionResizeHandle"></div></div>
   </div>
+  <div id="captionEditHint" style="display:none">Drag the caption to move it, drag the dot to resize</div>
   <div id="outputContainer"></div>
   <div id="progressBar" style="display:none;width:100%;max-width:400px;text-align:center;">
     <div class="progress-bar-track" style="width:100%;">

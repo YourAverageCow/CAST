@@ -79,6 +79,7 @@ function buildCaptionFilter(subs, style, w, h) {
   const textColor = safeColor(style.textColor, "white");
   const strokeColor = safeColor(style.strokeColor, "black");
   const strokeWidth = Math.max(0, Math.min(10, parseInt(style.strokeWidth) || 3));
+  const positionX = Math.max(0.05, Math.min(0.95, parseFloat(style.positionX) || 0.5));
   const positionY = Math.max(0.05, Math.min(0.95, parseFloat(style.positionY) || 0.55));
 
   const chain = [`[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}[base0]`];
@@ -96,7 +97,7 @@ function buildCaptionFilter(subs, style, w, h) {
     chain.push(
       `[${prev}]drawtext=fontfile=fonts/DejaVuSans.ttf:textfile=${fname}:fontsize=${fontSize}` +
       `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
-      `:x=(w-text_w)/2:y=h*${positionY}-text_h/2` +
+      `:x=w*${positionX}-text_w/2:y=h*${positionY}-text_h/2` +
       `:enable='between(t,${s.start.toFixed(3)},${s.end.toFixed(3)})'[${next}]`
     );
     prev = next;

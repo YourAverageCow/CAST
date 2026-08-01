@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 42;
+const VERSION = 43;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -92,7 +92,7 @@ function getApiKey() {
 const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "storyLength",
   "resW", "resH", "fps",
-  "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
+  "font", "fontSize", "positionX", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice",
 ];
 function saveSettings() {
@@ -142,6 +142,12 @@ async function init() {
     if (el) el.addEventListener("input", saveSettings);
     if (el && el.tagName === "SELECT") el.addEventListener("change", saveSettings);
   }
+  // Keep the caption preview live when style fields are edited by hand
+  for (const id of ["font", "fontSize", "positionX", "positionY", "textColor", "strokeColor", "strokeWidth"]) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", updateCaptionStyle);
+  }
+  initCaptionDrag();
 }
 
 function populateModels() {
@@ -362,6 +368,8 @@ async function setBackground(file, label) {
   area.querySelector(".icon").textContent = "✓";
   $("#uploadStatus").textContent = label;
 
+  showCaptionSample();
+
   const codec = await sniffUnsupportedVideoCodec(file);
   currentVideoUnsupportedCodec = codec;
   if (codec) {
@@ -378,19 +386,30 @@ function updateCaptionStyle() {
   const sw = parseInt($("#strokeWidth").value) || 0;
   const sc = $("#strokeColor").value;
   el.style.textShadow = sw ? `-${sw}px -${sw}px 0 ${sc}, ${sw}px -${sw}px 0 ${sc}, -${sw}px ${sw}px 0 ${sc}, ${sw}px ${sw}px 0 ${sc}` : "none";
-  el.style.top = ($("#positionY").value * 100) + "%";
-  el.style.transform = "translateY(-50%)";
+  const x = parseFloat($("#positionX").value);
+  const y = parseFloat($("#positionY").value);
+  el.style.left = ((isFinite(x) ? x : 0.5) * 100) + "%";
+  el.style.top = ((isFinite(y) ? y : 0.55) * 100) + "%";
+  el.style.transform = "translate(-50%, -50%)";
 }
 function renderCaption(time) {
   const cap = subtitles.find(s => time >= s.start && time <= s.end);
-  const el = $("#captionOverlay");
-  if (cap) { el.textContent = cap.text; el.classList.add("show"); }
-  else el.classList.remove("show");
+  if (cap) { $("#captionText").textContent = cap.text; $("#captionOverlay").classList.add("show"); }
+  else { $("#captionText").textContent = ""; $("#captionOverlay").classList.remove("show"); }
 }
 function captionsLoop() {
   if (!previewActive) return;
   if (ttsAudio && !ttsAudio.paused) renderCaption(ttsAudio.currentTime);
   previewRAF = requestAnimationFrame(captionsLoop);
+}
+// Shows a static, draggable sample caption whenever nothing is actively
+// narrating — lets the user position/size captions without needing a
+// generated story or a running preview first.
+function showCaptionSample() {
+  if (!currentVideo) return;
+  $("#captionText").textContent = "Your Caption Here";
+  $("#captionOverlay").classList.add("show");
+  updateCaptionStyle();
 }
 function stopPreview() {
   previewActive = false;
@@ -398,9 +417,66 @@ function stopPreview() {
   if (ttsAudio) { ttsAudio.pause(); ttsAudio.currentTime = 0; ttsAudio = null; }
   const vid = $("#videoPreview");
   vid.pause(); vid.currentTime = 0;
-  $("#captionOverlay").classList.remove("show");
-  $("#captionOverlay").textContent = "";
   $("#previewBtn").textContent = "Preview";
+  showCaptionSample();
+}
+
+// ---------- Caption drag-to-position / drag-to-resize ----------
+let captionDragState = null;
+function initCaptionDrag() {
+  const el = $("#captionOverlay");
+  const handle = $("#captionResizeHandle");
+  const container = $("#previewContainer");
+
+  el.classList.add("editable");
+  $("#captionEditHint").style.display = "block";
+
+  el.addEventListener("pointerdown", (e) => {
+    if (e.target === handle) return;
+    e.preventDefault();
+    captionDragState = {
+      mode: "move", pointerId: e.pointerId,
+      startX: e.clientX, startY: e.clientY,
+      startCX: parseFloat($("#positionX").value) || 0.5,
+      startCY: parseFloat($("#positionY").value) || 0.55,
+    };
+    el.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    captionDragState = {
+      mode: "resize", pointerId: e.pointerId,
+      startY: e.clientY,
+      startSize: parseInt($("#fontSize").value) || 68,
+    };
+    handle.setPointerCapture(e.pointerId);
+  });
+
+  function onMove(e) {
+    if (!captionDragState || e.pointerId !== captionDragState.pointerId) return;
+    if (captionDragState.mode === "move") {
+      const rect = container.getBoundingClientRect();
+      const dx = (e.clientX - captionDragState.startX) / rect.width;
+      const dy = (e.clientY - captionDragState.startY) / rect.height;
+      $("#positionX").value = Math.min(0.95, Math.max(0.05, captionDragState.startCX + dx)).toFixed(3);
+      $("#positionY").value = Math.min(0.95, Math.max(0.05, captionDragState.startCY + dy)).toFixed(3);
+    } else {
+      const dy = e.clientY - captionDragState.startY;
+      $("#fontSize").value = Math.min(120, Math.max(24, Math.round(captionDragState.startSize + dy)));
+    }
+    updateCaptionStyle();
+  }
+  function onUp(e) {
+    if (!captionDragState || e.pointerId !== captionDragState.pointerId) return;
+    captionDragState = null;
+    saveSettings();
+  }
+  el.addEventListener("pointermove", onMove);
+  handle.addEventListener("pointermove", onMove);
+  el.addEventListener("pointerup", onUp);
+  handle.addEventListener("pointerup", onUp);
+  el.addEventListener("pointercancel", onUp);
+  handle.addEventListener("pointercancel", onUp);
 }
 
 function showDownloadToast(msg) {
@@ -725,6 +801,7 @@ async function exportVideo() {
       textColor: $("#textColor").value,
       strokeColor: $("#strokeColor").value,
       strokeWidth: parseInt($("#strokeWidth").value) || 3,
+      positionX: parseFloat($("#positionX").value) || 0.5,
       positionY: parseFloat($("#positionY").value) || 0.55,
     };
 
