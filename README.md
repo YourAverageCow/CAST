@@ -21,10 +21,10 @@ The whole thing runs in your browser: Piper TTS for the voice, ffmpeg.wasm for r
 ## Running it
 
 ```bash
-python3 serve_web.py
+node server.js
 ```
 
-Then open http://localhost:8123.
+Then open http://localhost:8123. Or double-click `Open AITAH Creator Web.command`, which does the same thing and opens the browser for you.
 
 Or just use the deployed version: https://youraveragecow.github.io/Slopdaddy/
 
