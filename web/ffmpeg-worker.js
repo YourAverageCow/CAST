@@ -1,18 +1,37 @@
 // ffmpeg worker — runs rendering off the main thread so the UI never freezes.
-importScripts("./vendor/ffmpeg/ffmpeg-core.js");
-
+// The multi-threaded core (vendor/ffmpeg/mt/) lets libx264 use every core
+// instead of one, but it needs SharedArrayBuffer, which only exists when
+// this worker is itself cross-origin isolated (same prerequisite Piper's
+// threaded ONNX runtime already relies on, via coi-serviceworker.js). We
+// pick the core to load lazily, once, based on that — no static
+// importScripts at module load time like before.
 let ffmpeg = null;
 let loaded = false;
+let usingMT = false;
 
 async function ensureLoaded(base, font) {
   if (loaded) return;
-  const coreURL = base + "vendor/ffmpeg/ffmpeg-core.js";
-  const wasmURL = base + "vendor/ffmpeg/ffmpeg-core.wasm";
-  const payload = btoa(JSON.stringify({ wasmURL, workerURL: coreURL }));
-  const result = self.createFFmpegCore({
-    mainScriptUrlOrBlob: coreURL + "#" + payload,
-  });
-  ffmpeg = await result;
+  usingMT = self.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
+  const dir = usingMT ? "vendor/ffmpeg/mt/" : "vendor/ffmpeg/";
+  const coreURL = base + dir + "ffmpeg-core.js";
+  const wasmURL = base + dir + "ffmpeg-core.wasm";
+  // For the mt core, workerURL must point at its ffmpeg-core.worker.js (each
+  // pthread is a real Worker); the st core has no such file, so pointing it
+  // at coreURL itself is harmless (locateFile only consults it for .wasm/.worker.js).
+  const workerURL = usingMT ? base + dir + "ffmpeg-core.worker.js" : coreURL;
+  importScripts(coreURL);
+  const payload = btoa(JSON.stringify({ wasmURL, workerURL }));
+  try {
+    ffmpeg = await self.createFFmpegCore({ mainScriptUrlOrBlob: coreURL + "#" + payload });
+  } catch (e) {
+    if (!usingMT) throw e;
+    // Shouldn't happen given the crossOriginIsolated gate above, but don't
+    // leave the user stuck on a core that failed to even start loading —
+    // fall back to the single-thread core instead of a hard failure.
+    self.createFFmpegCore = undefined;
+    usingMT = false;
+    return ensureLoaded(base, font);
+  }
   if (!ffmpeg || !ffmpeg.FS || typeof ffmpeg.FS.writeFile !== "function") {
     throw new Error("ffmpeg module did not expose FS");
   }
@@ -79,7 +98,7 @@ function safeColor(c, fallback) {
 // goes in its own file rather than inline in the command script, since
 // arbitrary story text would easily break the sendcmd/filter-graph string
 // parsers' own comma/colon/quote escaping rules.
-function buildCaptionFilter(subs, style, w, h) {
+function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
   const fontSize = parseInt(style.fontSize) || 68;
   const textColor = safeColor(style.textColor, "white");
   const strokeColor = safeColor(style.strokeColor, "black");
@@ -112,8 +131,12 @@ function buildCaptionFilter(subs, style, w, h) {
   ffmpeg.FS.writeFile("cmds.txt", new TextEncoder().encode(cmds));
   writtenFiles.push("cmds.txt");
 
+  // Background is already at the target resolution (the common case for a
+  // purpose-shot/pre-cropped clip) — skip scale+crop entirely rather than
+  // running that per-frame work for a no-op.
+  const needsScale = !(bgW && bgH && bgW === w && bgH === h);
   const vf =
-    `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},` +
+    (needsScale ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},` : "") +
     `sendcmd=f=cmds.txt,` +
     `drawtext@cap=fontfile=fonts/DejaVuSans.ttf:textfile=capempty.txt:fontsize=${fontSize}` +
     `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
@@ -131,7 +154,13 @@ self.onmessage = async (e) => {
       ffmpeg.FS.writeFile("audio.wav", new Uint8Array(msg.audio));
 
       const { filterComplex, outLabel, writtenFiles } =
-        buildCaptionFilter(msg.subs || [], msg.style || {}, msg.w, msg.h);
+        buildCaptionFilter(msg.subs || [], msg.style || {}, msg.w, msg.h, msg.bgW, msg.bgH);
+
+      // Only the mt core has real OS threads for libx264 to use — on the st
+      // core this would be a silent no-op, but there's no reason to ask.
+      const threadArgs = usingMT
+        ? ["-threads", String(Math.max(1, Math.min(8, self.navigator.hardwareConcurrency || 4)))]
+        : [];
 
       runFFmpeg([
         "-stream_loop", "-1",
@@ -139,7 +168,7 @@ self.onmessage = async (e) => {
         "-i", "audio.wav",
         "-filter_complex", filterComplex,
         "-map", `[${outLabel}]`, "-map", "1:a",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", ...threadArgs,
         "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
         "-r", String(msg.fps),
         "-shortest", "-y", "out.mp4",
@@ -152,7 +181,7 @@ self.onmessage = async (e) => {
       writtenFiles.forEach(safeUnlink);
     } else if (msg.type === "ready") {
       await ensureLoaded(msg.base, msg.font);
-      self.postMessage({ type: "ready" });
+      self.postMessage({ type: "ready", mt: usingMT });
 
     // ---- Frame-sequence conversion path: used to re-encode codecs (AV1,
     // VP9, VP8) ffmpeg.wasm can't decode into H.264. The main thread decodes

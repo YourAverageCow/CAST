@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 49;
+const VERSION = 50;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -385,6 +385,22 @@ async function autoTranscodeToH264(file, onProgress) {
   }
 }
 
+// Cheap metadata-only probe (no frame decode) — used to skip the ffmpeg
+// scale/crop filter when the background is already at the export resolution.
+function probeVideoDimensions(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve({ w: video.videoWidth || 0, h: video.videoHeight || 0 });
+    };
+    video.onerror = () => { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); };
+    video.src = url;
+  });
+}
+
 async function handleVideoUpload(input) {
   const file = input.files[0];
   if (!file) return;
@@ -721,6 +737,14 @@ function ensureFFmpeg() {
       ffmpegWorker.onmessage = (e) => {
         if (e.data.type === "ready") {
           hideDownloadToast();
+          if (!e.data.mt) {
+            showToast(
+              "Fast multi-core video encoding isn't available here (usually Private Browsing, " +
+              "which blocks the Service Worker it needs) — exports will be slower. " +
+              "Use a normal browser window for faster exports.",
+              8000
+            );
+          }
           resolve();
         } else if (e.data.type === "error") {
           hideDownloadToast();
@@ -831,11 +855,14 @@ async function exportVideo() {
       strokeWidth: parseInt($("#strokeWidth").value) || 3,
       positionY: parseFloat($("#positionY").value) || 0.55,
     };
+    // Lets the worker skip the scale/crop filter entirely when the
+    // background is already at the export resolution.
+    const { w: bgW, h: bgH } = await probeVideoDimensions(bgFile);
 
     const outBytes = await renderVideoInWorker({
       type: "render",
       base: new URL("./", document.baseURI).href,
-      bg, audio: audioData, subs, style, w, h, fps,
+      bg, audio: audioData, subs, style, w, h, fps, bgW, bgH,
     }, (pct) => setProgress(pct, "Rendering..."));
 
     const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
