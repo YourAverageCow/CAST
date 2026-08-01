@@ -85,8 +85,14 @@ function safeColor(c, fallback) {
 }
 
 // One drawtext instance, driven by sendcmd swapping its `textfile` at each
-// cue's start/end timestamp (both are runtime-settable AVOptions on
-// drawtext). Previously this chained a *separate* drawtext filter per cue
+// cue's start/end timestamp via the `reinit` command. drawtext's own AVOption
+// table only flags `text` as directly runtime-settable — `textfile` is not,
+// so sending it as a bare command (as this used to) is silently rejected by
+// ffmpeg and the on-screen text never advances past the initial empty file.
+// `reinit` (documented, always supported) re-applies a `key=value` option
+// string on top of the filter's current options, so `textfile=<file>` here
+// swaps just that one option while leaving fontsize/color/etc. untouched.
+// Previously this chained a *separate* drawtext filter per cue
 // (each gated by enable='between(t,...)') — for a full story that's
 // routinely 100+ filter nodes every single output frame has to pass
 // through, which is the dominant cost in render time. sendcmd collapses
@@ -127,7 +133,7 @@ function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
   // processed chronologically, "show next cue" always lands after
   // "clear this cue" at a tie — text wins over a blank gap, as intended.
   events.sort((a, b) => a.time - b.time);
-  const cmds = events.map(e => `${e.time.toFixed(3)} drawtext@cap textfile '${e.file}';`).join("\n");
+  const cmds = events.map(e => `${e.time.toFixed(3)} drawtext@cap reinit 'textfile=${e.file}';`).join("\n");
   ffmpeg.FS.writeFile("cmds.txt", new TextEncoder().encode(cmds));
   writtenFiles.push("cmds.txt");
 
