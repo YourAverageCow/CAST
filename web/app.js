@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 53;
+const VERSION = 54;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -351,27 +351,20 @@ async function autoTranscodeToH264(file, onProgress) {
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext("2d", { alpha: false });
 
-    for (let i = 0; i < frameCount; i++) {
-      await seekVideo(video, Math.min(i / CONVERT_FPS, video.duration || 0));
-      ctx.drawImage(video, 0, 0, w, h);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-      const bin = atob(dataUrl.split(",")[1]);
-      const bytes = new Uint8Array(bin.length);
-      for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
-      ffmpegWorker.postMessage({ type: "convertFrame", index: i, data: bytes.buffer }, [bytes.buffer]);
-      if (onProgress) onProgress(Math.min(90, Math.round(((i + 1) / frameCount) * 90)));
-    }
-
-    return await new Promise((resolve, reject) => {
-      ffmpegWorker.onmessage = (e) => {
-        if (e.data.type === "convertDone") {
-          if (onProgress) onProgress(100);
-          resolve(new Blob([e.data.data], { type: "video/mp4" }));
-        } else if (e.data.type === "error") {
-          reject(new Error(e.data.message));
-        }
-      };
-      ffmpegWorker.postMessage({ type: "convertFinish", fps: CONVERT_FPS, frameCount });
+    return await ffmpegPool.submit(async (worker) => {
+      for (let i = 0; i < frameCount; i++) {
+        await seekVideo(video, Math.min(i / CONVERT_FPS, video.duration || 0));
+        ctx.drawImage(video, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        const bin = atob(dataUrl.split(",")[1]);
+        const bytes = new Uint8Array(bin.length);
+        for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+        worker.postFrame(i, bytes);
+        if (onProgress) onProgress(Math.min(90, Math.round(((i + 1) / frameCount) * 90)));
+      }
+      const result = await worker.transcodeFinish(CONVERT_FPS, frameCount);
+      if (onProgress) onProgress(100);
+      return result;
     });
   } finally {
     URL.revokeObjectURL(url);
@@ -676,91 +669,61 @@ async function startPreview() {
 }
 // ---------- Export (ffmpeg.wasm via core directly) ----------
 
-let ffmpegWorker = null;
-let ffmpegWorkerReady = null;
+// The pool (web/worker-pool.js) manages however many independent
+// ffmpeg-worker.js instances are needed — 1 for today's single-video flow,
+// more once batch rendering is wired up. Resizing is just creating a new
+// pool; only the render/transcode call sites needed to change to route
+// through `ffmpegPool.submit(...)` instead of talking to a single global
+// worker directly.
+let ffmpegPool = null;
+let ffmpegPoolReady = null;
+let ffmpegPoolSize = 0;
 
-// Run ffmpeg in a Web Worker so the UI never freezes during rendering.
-function ensureFFmpeg() {
-  if (ffmpegWorker) return ffmpegWorkerReady;
-  showDownloadToast("Preparing video engine (first time only, ~25MB)...");
+function ensureFFmpeg(poolSize) {
+  poolSize = poolSize || 1;
+  if (ffmpegPool && ffmpegPoolSize >= poolSize) return ffmpegPoolReady;
+  ffmpegPoolSize = poolSize;
+  showDownloadToast(
+    poolSize > 1
+      ? `Preparing video engine (first time only, ~25MB × ${poolSize})...`
+      : "Preparing video engine (first time only, ~25MB)..."
+  );
   const base = new URL("./", document.baseURI).href;
-  ffmpegWorker = new Worker(BASE + "ffmpeg-worker.js");
-  ffmpegWorkerReady = (async () => {
+  ffmpegPoolReady = (async () => {
     // Captions are burned in via drawtext, which needs an exact font FILE
     // (there's no OS font store inside the WASM sandbox) — ship one bundled
-    // font once here so every render has it in the worker's virtual FS.
+    // font once here so every worker has it in its virtual FS.
     const fontBuf = await (await fetch(BASE + "vendor/fonts/DejaVuSans.ttf")).arrayBuffer();
-    return new Promise((resolve, reject) => {
-      ffmpegWorker.onmessage = (e) => {
-        if (e.data.type === "ready") {
-          hideDownloadToast();
-          if (!e.data.mt) {
-            showToast(
-              "Fast multi-core video encoding isn't available here (usually Private Browsing, " +
-              "which blocks the Service Worker it needs) — exports will be slower. " +
-              "Use a normal browser window for faster exports.",
-              8000
-            );
-          }
-          resolve();
-        } else if (e.data.type === "error") {
-          hideDownloadToast();
-          reject(new Error(e.data.message));
-        }
-      };
-      ffmpegWorker.onerror = (e) => {
-        hideDownloadToast();
-        reject(new Error("video worker failed: " + (e.message || "unknown")));
-      };
-      ffmpegWorker.postMessage({ type: "ready", base, font: fontBuf }, [fontBuf]);
-    });
+    ffmpegPool = new FFmpegWorkerPool(poolSize, base, fontBuf);
+    try {
+      let readyCount = 0;
+      await ffmpegPool.warmUp(() => {
+        readyCount++;
+        if (poolSize > 1) showDownloadToast(`Preparing video engine (${readyCount}/${poolSize} ready)...`);
+      });
+    } catch (e) {
+      hideDownloadToast();
+      throw e;
+    }
+    hideDownloadToast();
+    if (!ffmpegPool.usingMT) {
+      showToast(
+        poolSize > 1
+          ? "Running multiple renders at once uses the single-core video engine to avoid " +
+            "overloading your CPU — each render is a bit slower, but they run in parallel."
+          : "Fast multi-core video encoding isn't available here (usually Private Browsing, " +
+            "which blocks the Service Worker it needs) — exports will be slower. " +
+            "Use a normal browser window for faster exports.",
+        8000
+      );
+    }
   })();
-  return ffmpegWorkerReady;
+  return ffmpegPoolReady;
 }
 
-// Render via the worker; resolves to an ArrayBuffer of the MP4.
-// ffmpeg.exec() runs synchronously inside the worker, so if it's fed a codec
-// it has no decoder for (see UNSUPPORTED_VIDEO_CODECS), it hangs forever with
-// no progress tick, no error, nothing. Watch for a stall and bail out rather
-// than leaving the user staring at a frozen progress bar indefinitely.
-const RENDER_STALL_TIMEOUT_MS = 45000;
+// Renders one job's video via the pool; resolves to a Uint8Array of the MP4.
 function renderVideoInWorker(payload, onProgress) {
-  return new Promise((resolve, reject) => {
-    let stallTimer = null;
-    const resetStallTimer = () => {
-      clearTimeout(stallTimer);
-      stallTimer = setTimeout(() => {
-        // The worker is unrecoverably stuck mid-exec (synchronous WASM call) —
-        // terminate it outright and force a fresh worker on the next attempt.
-        ffmpegWorker.terminate();
-        ffmpegWorker = null;
-        ffmpegWorkerReady = null;
-        reject(new Error(
-          "Rendering stalled with no progress for " + (RENDER_STALL_TIMEOUT_MS / 1000) +
-          "s. This almost always means the background video's codec (e.g. AV1/VP9) " +
-          "isn't supported by the in-browser renderer — re-encode it to H.264 and try again."
-        ));
-      }, RENDER_STALL_TIMEOUT_MS);
-    };
-    ffmpegWorker.onmessage = (e) => {
-      if (e.data.type === "done") {
-        clearTimeout(stallTimer);
-        resolve(new Uint8Array(e.data.data));
-      } else if (e.data.type === "progress") {
-        resetStallTimer();
-        if (onProgress) {
-          // ffmpeg progress is 0..1; map to 30%..95% (final 100 on completion)
-          const pct = Math.min(95, Math.round(30 + (e.data.progress || 0) * 65));
-          onProgress(pct);
-        }
-      } else if (e.data.type === "error") {
-        clearTimeout(stallTimer);
-        reject(new Error(e.data.message));
-      }
-    };
-    resetStallTimer();
-    ffmpegWorker.postMessage(payload, [payload.bg.buffer, payload.audio.buffer]);
-  });
+  return ffmpegPool.submit((worker) => worker.render(payload, onProgress));
 }
 
 async function exportVideo() {

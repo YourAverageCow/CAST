@@ -11,9 +11,15 @@ let ffmpeg = null;
 let loaded = false;
 let usingMT = false;
 
-async function ensureLoaded(base, font) {
+async function ensureLoaded(base, font, forceST) {
   if (loaded) return;
-  usingMT = self.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
+  // Set by the worker pool whenever more than one ffmpeg-worker.js instance
+  // is running at once — the mt core's own pthread pool (sized to
+  // hardwareConcurrency) would oversubscribe the CPU badly if N instances
+  // each spun one up, so parallel batches force every instance onto the
+  // single-thread core instead. A lone worker (forceST falsy) still prefers
+  // mt when available, unchanged from before.
+  usingMT = !forceST && self.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
   const dir = usingMT ? "vendor/ffmpeg/mt/" : "vendor/ffmpeg/";
   const coreURL = base + dir + "ffmpeg-core.js";
   const wasmURL = base + dir + "ffmpeg-core.wasm";
@@ -32,7 +38,7 @@ async function ensureLoaded(base, font) {
     // fall back to the single-thread core instead of a hard failure.
     self.createFFmpegCore = undefined;
     usingMT = false;
-    return ensureLoaded(base, font);
+    return ensureLoaded(base, font, true);
   }
   if (!ffmpeg || !ffmpeg.FS || typeof ffmpeg.FS.writeFile !== "function") {
     throw new Error("ffmpeg module did not expose FS");
@@ -113,7 +119,7 @@ self.onmessage = async (e) => {
   const msg = e.data;
   try {
     if (msg.type === "render") {
-      await ensureLoaded(msg.base, msg.font);
+      await ensureLoaded(msg.base, msg.font, msg.forceST);
       ffmpeg.FS.writeFile("bg.mp4", new Uint8Array(msg.bg));
       ffmpeg.FS.writeFile("audio.wav", new Uint8Array(msg.audio));
 
@@ -144,7 +150,7 @@ self.onmessage = async (e) => {
       safeUnlink("bg.mp4"); safeUnlink("audio.wav"); safeUnlink("out.mp4");
       writtenFiles.forEach(safeUnlink);
     } else if (msg.type === "ready") {
-      await ensureLoaded(msg.base, msg.font);
+      await ensureLoaded(msg.base, msg.font, msg.forceST);
       self.postMessage({ type: "ready", mt: usingMT });
 
     // ---- Frame-sequence conversion path: used to re-encode codecs (AV1,
