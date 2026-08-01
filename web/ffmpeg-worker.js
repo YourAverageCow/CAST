@@ -130,10 +130,7 @@ self.onmessage = async (e) => {
 
       const data = ffmpeg.FS.readFile("out.mp4");
       const out = new Uint8Array(data);
-      self.postMessage({
-        type: "done", data: out.buffer,
-        debug: { filterComplex, cueCount: writtenFiles.length, log: self.__log.slice(-30) },
-      }, [out.buffer]);
+      self.postMessage({ type: "done", data: out.buffer }, [out.buffer]);
       safeUnlink("bg.mp4"); safeUnlink("audio.wav"); safeUnlink("out.mp4");
       writtenFiles.forEach(safeUnlink);
     } else if (msg.type === "ready") {

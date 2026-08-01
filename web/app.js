@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 41;
+const VERSION = 42;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -17,7 +17,27 @@ let ttsAudio = null;
 let lastVideoUrl = null;
 
 // ---------- TTS & video engine state ----------
-const DEFAULT_VOICE = "en_US-libritts_r-medium";
+// libritts_r is audiobook-trained and reads flat/monotone. These are more
+// expressive/energetic Piper voices, verified to actually exist in the
+// rhasspy/piper-voices HuggingFace repo.
+const PIPER_VOICES = [
+  "en_US-ryan-high",
+  "en_US-ryan-medium",
+  "en_US-lessac-medium",
+  "en_US-amy-medium",
+  "en_US-hfc_female-medium",
+  "en_US-hfc_male-medium",
+  "en_US-joe-medium",
+  "en_US-kristin-medium",
+  "en_US-danny-low",
+  "en_US-norman-medium",
+  "en_US-libritts_r-medium",
+  "en_GB-alan-medium",
+  "en_GB-alba-medium",
+  "en_GB-jenny_dioco-medium",
+  "en_GB-northern_english_male-medium",
+];
+const DEFAULT_VOICE = PIPER_VOICES[0];
 const PIPER_JS = "./vendor/piper-tts-web.js";
 let piperEngine = null;
 let ffmpeg = null;
@@ -113,7 +133,7 @@ function loadSettings() {
 // ---------- Init ----------
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  populateVoices([DEFAULT_VOICE]);
+  populateVoices(PIPER_VOICES);
   loadSettings();
   populateModels();
   // Save on any settings change
@@ -130,8 +150,25 @@ function populateModels() {
 }
 $("#provider").addEventListener("change", populateModels);
 
+const VOICE_LABELS = {
+  "en_US-ryan-high": "Ryan (US male, energetic)",
+  "en_US-ryan-medium": "Ryan (US male)",
+  "en_US-lessac-medium": "Lessac (US male, clear)",
+  "en_US-amy-medium": "Amy (US female)",
+  "en_US-hfc_female-medium": "HFC Female (US)",
+  "en_US-hfc_male-medium": "HFC Male (US)",
+  "en_US-joe-medium": "Joe (US male)",
+  "en_US-kristin-medium": "Kristin (US female)",
+  "en_US-danny-low": "Danny (US male, casual)",
+  "en_US-norman-medium": "Norman (US male, dramatic)",
+  "en_US-libritts_r-medium": "LibriTTS (US, flat/audiobook)",
+  "en_GB-alan-medium": "Alan (UK male)",
+  "en_GB-alba-medium": "Alba (UK female)",
+  "en_GB-jenny_dioco-medium": "Jenny (UK female)",
+  "en_GB-northern_english_male-medium": "Northern English (UK male)",
+};
 function populateVoices(list) {
-  const opts = list.map(v => `<option value="${v}">${v}</option>`).join("");
+  const opts = list.map(v => `<option value="${v}">${VOICE_LABELS[v] || v}</option>`).join("");
   $("#voice").innerHTML = opts;
   $("#voiceQuick").innerHTML = '<option value="">Use settings voice</option>' + opts;
 }
@@ -605,7 +642,6 @@ function renderVideoInWorker(payload, onProgress) {
     ffmpegWorker.onmessage = (e) => {
       if (e.data.type === "done") {
         clearTimeout(stallTimer);
-        if (e.data.debug) console.warn("RENDER DEBUG", JSON.stringify(e.data.debug));
         resolve(new Uint8Array(e.data.data));
       } else if (e.data.type === "progress") {
         resetStallTimer();
