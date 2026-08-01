@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 35;
+const VERSION = 36;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -474,11 +474,17 @@ function ensureFFmpeg() {
 }
 
 // Render via the worker; resolves to an ArrayBuffer of the MP4.
-function renderVideoInWorker(payload) {
+function renderVideoInWorker(payload, onProgress) {
   return new Promise((resolve, reject) => {
     ffmpegWorker.onmessage = (e) => {
       if (e.data.type === "done") {
         resolve(new Uint8Array(e.data.data));
+      } else if (e.data.type === "progress") {
+        if (onProgress) {
+          // ffmpeg progress is 0..1; map to 30%..95% (final 100 on completion)
+          const pct = Math.min(95, Math.round(30 + (e.data.progress || 0) * 65));
+          onProgress(pct);
+        }
       } else if (e.data.type === "error") {
         reject(new Error(e.data.message));
       }
@@ -534,7 +540,7 @@ async function exportVideo() {
       type: "render",
       base: new URL("./", document.baseURI).href,
       bg, audio: audioData, ass: assText, w, h, fps,
-    });
+    }, (pct) => setProgress(pct, "Rendering..."));
 
     const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
     if (lastVideoUrl) URL.revokeObjectURL(lastVideoUrl);

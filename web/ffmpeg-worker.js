@@ -16,6 +16,12 @@ async function ensureLoaded(base) {
   if (!ffmpeg || !ffmpeg.FS || typeof ffmpeg.FS.writeFile !== "function") {
     throw new Error("ffmpeg module did not expose FS");
   }
+  // Wire ffmpeg's own progress reporting (progress 0..1, time in seconds).
+  if (typeof ffmpeg.setProgress === "function") {
+    ffmpeg.setProgress(({ progress, time }) => {
+      self.postMessage({ type: "progress", progress: progress || 0, time: time || 0 });
+    });
+  }
   loaded = true;
 }
 
