@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 33;
+const VERSION = 34;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -522,7 +522,7 @@ async function exportVideo() {
     const fps = parseInt($("#fps").value) || 30;
 
     // Load background video + audio into ffmpeg's virtual FS
-    ffmpeg.FS.writeFile("bg.mp4", await currentVideo.arrayBuffer());
+    ffmpeg.FS.writeFile("bg.mp4", new Uint8Array(await currentVideo.arrayBuffer()));
     const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
     ffmpeg.FS.writeFile("audio.wav", audioData);
     const assText = buildASS(subtitles, $("#font").value, parseInt($("#fontSize").value) || 68, $("#textColor").value, $("#strokeColor").value, parseInt($("#strokeWidth").value) || 3, parseFloat($("#positionY").value) || 0.55, w, h);
