@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 30;
+const VERSION = 31;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -348,7 +348,9 @@ async function generateSpeech(text) {
     return { audioUrl, words };
   } catch (e) {
     hideDownloadToast();
-    throw e;
+    console.error("generateSpeech failed:", e);
+    const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
+    throw new Error((e && e.message ? e.message : "TTS failed") + detail);
   }
 }
 
@@ -540,7 +542,8 @@ async function exportVideo() {
     setProgress(100);
   } catch (e) {
     console.error(e);
-    alert("Export failed: " + e.message);
+    const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
+    alert("Export failed: " + (e && e.message ? e.message : String(e)) + detail);
   }
   btn.textContent = "Export Video";
   btn.disabled = false;
