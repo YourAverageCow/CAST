@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 48;
+const VERSION = 49;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -63,6 +63,10 @@ function setProgress(pct, stage) {
 }
 function openSettings() { $("#settingsOverlay").classList.add("show"); $("#settingsPanel").classList.add("open"); }
 function closeSettings() { $("#settingsOverlay").classList.remove("show"); $("#settingsPanel").classList.remove("open"); }
+function toggleSettings() {
+  if ($("#settingsPanel").classList.contains("open")) closeSettings();
+  else openSettings();
+}
 
 // ---------- API config ----------
 const MODELS = {
@@ -140,9 +144,49 @@ async function init() {
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
   initCaptionDrag();
+  initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
+  initPanelResize("settingsPanel", "settingsResizeHandle", -1, "slopdaddy_settingsWidth");
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
   new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
+}
+
+// Drag-to-resize for the left sidebar and the right settings panel. `sign`
+// is +1 when the handle sits on the panel's right edge (dragging right
+// grows it) or -1 when it sits on the left edge of a right-anchored panel
+// (dragging left grows it, since the panel's own right edge stays pinned).
+function initPanelResize(panelId, handleId, sign, storageKey) {
+  const panel = document.getElementById(panelId);
+  const handle = document.getElementById(handleId);
+  if (!panel || !handle) return;
+
+  const saved = parseInt(localStorage.getItem(storageKey));
+  if (saved) panel.style.width = saved + "px";
+
+  let startX = 0, startW = 0, dragging = false;
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    dragging = true;
+    startX = e.clientX;
+    startW = panel.getBoundingClientRect().width;
+    handle.classList.add("dragging");
+    panel.classList.add("dragging-resize");
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const newW = startW + (e.clientX - startX) * sign;
+    panel.style.width = newW + "px"; // CSS min/max-width clamps the actual value
+  });
+  function stop() {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("dragging");
+    panel.classList.remove("dragging-resize");
+    localStorage.setItem(storageKey, Math.round(panel.getBoundingClientRect().width));
+  }
+  handle.addEventListener("pointerup", stop);
+  handle.addEventListener("pointercancel", stop);
 }
 
 function populateModels() {

@@ -41,6 +41,10 @@ body {
   scrollbar-width: none;
 }
 .sidebar::-webkit-scrollbar, .sidebar-inner::-webkit-scrollbar, .main::-webkit-scrollbar { display: none; }
+.panel-resize-handle { position: absolute; top: 0; width: 6px; height: 100%; cursor: ew-resize; z-index: 15; touch-action: none; }
+.panel-resize-handle:hover, .panel-resize-handle.dragging { background: rgba(88,166,255,0.35); }
+#sidebarResizeHandle { right: -3px; }
+#settingsResizeHandle { left: -3px; }
 .sidebar-inner { flex: 1; overflow-y: auto; -ms-overflow-style: none; scrollbar-width: none; }
 .sidebar-footer { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 12px; font-size: 0.7rem; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
 .sidebar-footer .version { font-family: 'SF Mono', Menlo, monospace; color: var(--accent); background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); padding: 2px 8px; border-radius: 4px; }
@@ -161,7 +165,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 /* Settings panel (right slide-in) */
 #settingsOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 90; }
 #settingsOverlay.show { display: block; }
-#settingsPanel { position: fixed; top: 0; right: 0; width: 380px; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 91; padding: 20px; overflow-y: auto; transform: translateX(100%); transition: transform 0.2s ease; }
+#settingsPanel { position: fixed; top: 0; right: 0; width: 380px; min-width: 300px; max-width: 640px; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 91; padding: 20px; overflow-y: auto; transform: translateX(100%); transition: transform 0.2s ease; }
+#settingsPanel.dragging-resize { transition: none; }
 #settingsPanel.open { transform: translateX(0); }
 .settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .settings-header h2 { margin: 0; font-size: 1rem; color: var(--text); text-transform: none; letter-spacing: 0; }
@@ -191,6 +196,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <!-- Settings panel -->
 <div id="settingsOverlay" onclick="closeSettings()"></div>
 <div id="settingsPanel">
+  <div class="panel-resize-handle" id="settingsResizeHandle"></div>
   <div class="settings-header">
     <h2>Settings</h2>
     <button class="close-btn" onclick="closeSettings()">X</button>
@@ -241,6 +247,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 <!-- Main -->
 <div class="sidebar" id="sidebar">
+  <div class="panel-resize-handle" id="sidebarResizeHandle"></div>
   <div class="sidebar-inner">
   <div class="sidebar-header">
     <h1>Video Creator</h1>
@@ -283,7 +290,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 </div>
 
 <div class="main">
-  <button class="gear-btn app-gear" onclick="openSettings()" title="Settings">&#9881;</button>
+  <button class="gear-btn app-gear" onclick="toggleSettings()" title="Settings">&#9881;</button>
   <span class="version app-version" id="versionBadge">v0</span>
   <div class="preview-wrapper" id="previewContainer">
     <video id="videoPreview" loop muted playsinline style="display:none"></video>
