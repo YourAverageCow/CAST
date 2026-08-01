@@ -54,9 +54,12 @@ if (typeof window === 'undefined') {
             : r;
 
         const cacheable = r.method === "GET" && isCacheableAsset(new URL(r.url));
+        // Opened at most once per request and reused for both match/put below
+        // — same named cache either way, no need to reopen it a second time.
+        const cachePromise = cacheable ? caches.open(CACHE_NAME) : null;
 
         event.respondWith(
-            (cacheable ? caches.open(CACHE_NAME).then((cache) => cache.match(request)) : Promise.resolve(undefined))
+            (cachePromise ? cachePromise.then((cache) => cache.match(request)) : Promise.resolve(undefined))
                 .then((cached) => cached || fetch(request)
                     .then((response) => {
                         if (response.status === 0) {
@@ -82,8 +85,8 @@ if (typeof window === 'undefined') {
                         // hits carry the right COOP/COEP headers with no extra work.
                         // Clone first — a Response body can only be read/consumed once,
                         // and finalResponse itself still needs to go back to the page.
-                        if (cacheable && response.ok) {
-                            caches.open(CACHE_NAME).then((cache) => cache.put(request, finalResponse.clone()));
+                        if (cachePromise && response.ok) {
+                            cachePromise.then((cache) => cache.put(request, finalResponse.clone()));
                         }
                         return finalResponse;
                     })

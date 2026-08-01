@@ -92,9 +92,11 @@ function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
 
   const events = buildCaptionEvents(subs);
   for (const e of events) {
-    if (e.text !== undefined) ffmpeg.FS.writeFile(e.file, new TextEncoder().encode(e.text));
+    if (e.text !== undefined) {
+      ffmpeg.FS.writeFile(e.file, new TextEncoder().encode(e.text));
+      writtenFiles.push(e.file);
+    }
   }
-  writtenFiles.push(...events.filter(e => e.text !== undefined).map(e => e.file));
 
   const cmds = buildSendcmdScript(events);
   ffmpeg.FS.writeFile("cmds.txt", new TextEncoder().encode(cmds));
