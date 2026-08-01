@@ -81,11 +81,11 @@ function safeUnlink(name) {
   try { ffmpeg.FS.unlink(name); } catch (e) { /* ignore */ }
 }
 
-// Writes the caption cue/empty files and cmds.txt to ffmpeg's virtual FS and
-// returns the filter-graph string for the render. The actual event-list,
-// sendcmd-script, and filter-string logic lives in lib/ffmpeg-filters.js
-// (pure, no ffmpeg.FS dependency, unit-tested in web/lib/*.test.js) — this
-// is just the thin FS-writing wrapper around it.
+// Writes each cue's text file to ffmpeg's virtual FS and returns the
+// filter-graph string for the render. The cue list and filter-chain string
+// building live in lib/ffmpeg-filters.js (pure, no ffmpeg.FS dependency,
+// unit-tested in web/lib/*.test.js) — this is just the thin FS-writing
+// wrapper around it.
 function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
   const fontSize = parseInt(style.fontSize) || 68;
   const textColor = safeColor(style.textColor, "white");
@@ -93,23 +93,15 @@ function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
   const strokeWidth = Math.max(0, Math.min(10, parseInt(style.strokeWidth) || 3));
   const positionY = Math.max(0.05, Math.min(0.95, parseFloat(style.positionY) || 0.55));
 
-  const writtenFiles = ["capempty.txt"];
-  ffmpeg.FS.writeFile("capempty.txt", new Uint8Array(0));
-
-  const events = buildCaptionEvents(subs);
-  for (const e of events) {
-    if (e.text !== undefined) {
-      ffmpeg.FS.writeFile(e.file, new TextEncoder().encode(e.text));
-      writtenFiles.push(e.file);
-    }
+  const cues = buildCaptionCues(subs);
+  const writtenFiles = [];
+  for (const cue of cues) {
+    ffmpeg.FS.writeFile(cue.file, new TextEncoder().encode(cue.text));
+    writtenFiles.push(cue.file);
   }
 
-  const cmds = buildSendcmdScript(events);
-  ffmpeg.FS.writeFile("cmds.txt", new TextEncoder().encode(cmds));
-  writtenFiles.push("cmds.txt");
-
-  const { filterComplex, outLabel } = buildDrawtextFilterString({
-    w, h, bgW, bgH, fontSize, textColor, strokeColor, strokeWidth, positionY,
+  const { filterComplex, outLabel } = buildDrawtextFilterChain({
+    w, h, bgW, bgH, fontSize, textColor, strokeColor, strokeWidth, positionY, cues,
   });
 
   return { filterComplex, outLabel, writtenFiles };
