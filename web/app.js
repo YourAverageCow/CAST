@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 37;
+const VERSION = 38;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -9,6 +9,7 @@ const BASE = document.currentScript ? new URL('.', document.currentScript.src).p
 let currentVideo = null;      // File / Blob of background
 let currentVideoUrl = null;
 let currentVideoUnsupportedCodec = null; // e.g. "AV1" if sniffed as unsupported
+let currentVideoTranscoded = null;       // cached H.264 Blob once auto-converted
 let subtitles = [];           // [{start, end, text}]
 let previewActive = false;
 let previewRAF = null;
@@ -216,10 +217,10 @@ async function getIdeas() {
 }
 
 // ---------- Video upload ----------
-// The bundled ffmpeg.wasm core only has H.264/HEVC decoders — no AV1, VP8, or
-// VP9. Feeding it those hangs forever with zero output (no error, no timeout).
-// Sniff the MP4 sample-entry fourcc so we can warn before the user wastes
-// minutes waiting on an export that will never finish.
+// The bundled ffmpeg.wasm core has no usable AV1/VP8/VP9 decode path — feeding
+// it those hangs forever with zero output (no error, no timeout). Sniff the
+// MP4 sample-entry fourcc so we know to auto-convert before export instead of
+// letting the user wait on a render that will never finish.
 const UNSUPPORTED_VIDEO_CODECS = {
   av01: "AV1", vp09: "VP9", vp08: "VP8",
 };
@@ -234,6 +235,58 @@ async function sniffUnsupportedVideoCodec(file) {
   return null;
 }
 
+// Re-encode an unsupported-codec video to H.264 entirely client-side: play it
+// in a hidden <video> (the browser's own decoder handles AV1/VP9 fine), draw
+// each frame to a <canvas>, and re-record that canvas via MediaRecorder with
+// an H.264 target — something ffmpeg.wasm CAN decode. Runs at real-time
+// (as long as the source video's duration) since captureStream is wall-clock.
+const TRANSCODE_MIME = "video/mp4;codecs=avc1.42E01E";
+function canAutoTranscode() {
+  return typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(TRANSCODE_MIME);
+}
+function autoTranscodeToH264(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.src = url;
+    video.muted = true;
+    video.playsInline = true;
+
+    let rec, drawing = false;
+    const cleanup = () => { drawing = false; URL.revokeObjectURL(url); };
+
+    function drawLoop() {
+      if (!drawing) return;
+      ctx.drawImage(video, 0, 0, w, h);
+      if (onProgress && isFinite(video.duration) && video.duration > 0) {
+        onProgress(Math.min(99, Math.round((video.currentTime / video.duration) * 100)));
+      }
+      if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(drawLoop);
+      else requestAnimationFrame(drawLoop);
+    }
+
+    let w, h, ctx;
+    video.onloadedmetadata = () => {
+      w = video.videoWidth; h = video.videoHeight;
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      ctx = canvas.getContext("2d", { alpha: false });
+
+      rec = new MediaRecorder(canvas.captureStream(30), { mimeType: TRANSCODE_MIME, videoBitsPerSecond: 8_000_000 });
+      const chunks = [];
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = () => { cleanup(); resolve(new Blob(chunks, { type: "video/mp4" })); };
+      video.onended = () => { drawing = false; rec.stop(); };
+      video.onerror = () => { cleanup(); try { rec.stop(); } catch (e) {} reject(new Error("video playback failed during conversion")); };
+
+      rec.start(250);
+      drawing = true;
+      video.play().then(drawLoop).catch((e) => { cleanup(); reject(e); });
+    };
+    video.onerror = () => { cleanup(); reject(new Error("couldn't load video for conversion")); };
+  });
+}
+
 async function handleVideoUpload(input) {
   const file = input.files[0];
   if (!file) return;
@@ -242,6 +295,7 @@ async function handleVideoUpload(input) {
 async function setBackground(file, label) {
   currentVideo = file;
   currentVideoUnsupportedCodec = null;
+  currentVideoTranscoded = null;
   if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
   currentVideoUrl = URL.createObjectURL(file);
   const vid = $("#videoPreview");
@@ -256,7 +310,11 @@ async function setBackground(file, label) {
   const codec = await sniffUnsupportedVideoCodec(file);
   currentVideoUnsupportedCodec = codec;
   if (codec) {
-    showToast(`Heads up: this video looks like it's ${codec}-encoded, which the in-browser renderer can't decode. Export will fail — re-encode it to H.264 first (e.g. HandBrake or "ffmpeg -c:v libx264").`, 8000);
+    if (canAutoTranscode()) {
+      showToast(`This video is ${codec}-encoded — the in-browser renderer can't read that directly. It'll be auto-converted to H.264 the first time you export (takes about as long as the video itself).`, 8000);
+    } else {
+      showToast(`This video is ${codec}-encoded and your browser can't auto-convert it. Re-encode it to H.264 first, e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`, 8000);
+    }
   }
 }
 
@@ -566,11 +624,11 @@ async function exportVideo() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
   const story = sanitizeText($("#storyText").value.trim());
   if (!story) { alert("Generate or paste a story first."); return; }
-  if (currentVideoUnsupportedCodec) {
+  if (currentVideoUnsupportedCodec && !currentVideoTranscoded && !canAutoTranscode()) {
     alert(
       `This video looks like it's ${currentVideoUnsupportedCodec}-encoded, which the ` +
-      `in-browser renderer can't decode (it only supports H.264). Re-encode it first, ` +
-      `e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`
+      `in-browser renderer can't decode and your browser can't auto-convert. Re-encode ` +
+      `it manually, e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`
     );
     return;
   }
@@ -579,9 +637,27 @@ async function exportVideo() {
   const btn = $("#exportBtn");
   btn.textContent = "Exporting...";
   btn.disabled = true;
-  setProgress(0, "Generating voice...");
 
   try {
+    let bgFile = currentVideo;
+    if (currentVideoUnsupportedCodec) {
+      if (!currentVideoTranscoded) {
+        const codec = currentVideoUnsupportedCodec;
+        setProgress(0, `Converting ${codec} video to H.264...`);
+        try {
+          currentVideoTranscoded = await autoTranscodeToH264(currentVideo,
+            (pct) => setProgress(pct, `Converting ${codec} video to H.264...`));
+        } catch (convErr) {
+          throw new Error(
+            `Couldn't auto-convert this ${codec} video in your browser (${convErr.message}). ` +
+            `Re-encode it manually, e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`
+          );
+        }
+      }
+      bgFile = currentVideoTranscoded;
+    }
+
+    setProgress(0, "Generating voice...");
     const { audioUrl, words } = await generateSpeech(story);
     subtitles = buildSubsFromWords(words);
 
@@ -591,7 +667,7 @@ async function exportVideo() {
     const fps = parseInt($("#fps").value) || 30;
 
     setProgress(30, "Rendering...");
-    const bg = new Uint8Array(await currentVideo.arrayBuffer());
+    const bg = new Uint8Array(await bgFile.arrayBuffer());
     const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
     const assText = buildASS(subtitles, $("#font").value, parseInt($("#fontSize").value) || 68, $("#textColor").value, $("#strokeColor").value, parseInt($("#strokeWidth").value) || 3, parseFloat($("#positionY").value) || 0.55, w, h);
 
