@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 45;
+const VERSION = 46;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -19,9 +19,14 @@ let lastVideoUrl = null;
 // ---------- TTS & video engine state ----------
 // libritts_r is audiobook-trained and reads flat/monotone. These are more
 // expressive/energetic Piper voices, verified to actually exist in the
-// rhasspy/piper-voices HuggingFace repo.
+// rhasspy/piper-voices HuggingFace repo AND to use the standard 256-symbol
+// phoneme table. Our phonemizeRuntime always encodes phonemes with that
+// fixed 256-slot table internally (it doesn't read each voice's own
+// phoneme_id_map), so any voice trained with a different-sized vocabulary
+// (e.g. en_US-ryan-high and en_US-danny-low, both 130 symbols — legacy
+// voices) throws an ONNX Gather out-of-bounds error mid-generation.
+// Deliberately excluded here rather than merely undocumented.
 const PIPER_VOICES = [
-  "en_US-ryan-high",
   "en_US-ryan-medium",
   "en_US-lessac-medium",
   "en_US-amy-medium",
@@ -29,7 +34,6 @@ const PIPER_VOICES = [
   "en_US-hfc_male-medium",
   "en_US-joe-medium",
   "en_US-kristin-medium",
-  "en_US-danny-low",
   "en_US-norman-medium",
   "en_US-libritts_r-medium",
   "en_GB-alan-medium",
@@ -160,7 +164,6 @@ function populateModels() {
 $("#provider").addEventListener("change", populateModels);
 
 const VOICE_LABELS = {
-  "en_US-ryan-high": "Ryan (US male, energetic)",
   "en_US-ryan-medium": "Ryan (US male)",
   "en_US-lessac-medium": "Lessac (US male, clear)",
   "en_US-amy-medium": "Amy (US female)",
@@ -168,7 +171,6 @@ const VOICE_LABELS = {
   "en_US-hfc_male-medium": "HFC Male (US)",
   "en_US-joe-medium": "Joe (US male)",
   "en_US-kristin-medium": "Kristin (US female)",
-  "en_US-danny-low": "Danny (US male, casual)",
   "en_US-norman-medium": "Norman (US male, dramatic)",
   "en_US-libritts_r-medium": "LibriTTS (US, flat/audiobook)",
   "en_GB-alan-medium": "Alan (UK male)",
