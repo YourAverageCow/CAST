@@ -29,6 +29,29 @@ async function ensureLoaded(base) {
   loaded = true;
 }
 
+// Runs an ffmpeg CLI invocation synchronously and returns its exit code.
+function runFFmpeg(args) {
+  self.__log.length = 0;
+  if (ffmpeg.setTimeout) ffmpeg.setTimeout(-1);
+  let ret;
+  if (typeof ffmpeg.exec === "function") {
+    ffmpeg.exec(...args);
+    ret = ffmpeg.ret;
+    if (ffmpeg.reset) ffmpeg.reset();
+  } else if (typeof ffmpeg.callMain === "function") {
+    ret = ffmpeg.callMain(args);
+  } else {
+    throw new Error("ffmpeg has no exec/callMain");
+  }
+  if (ret !== 0) throw new Error("ffmpeg exited with code " + ret + " | log=" + self.__log.slice(-20).join(" || "));
+}
+
+// Best-effort FS cleanup — never let a missing/already-gone file surface as
+// an "error" postMessage after we've already sent a "done"/"convertDone".
+function safeUnlink(name) {
+  try { ffmpeg.FS.unlink(name); } catch (e) { /* ignore */ }
+}
+
 self.onmessage = async (e) => {
   const msg = e.data;
   try {
@@ -42,7 +65,7 @@ self.onmessage = async (e) => {
       ffmpeg.FS.writeFile("subs.ass", assBytes);
 
       const vf = `scale=${msg.w}:${msg.h}:force_original_aspect_ratio=increase,crop=${msg.w}:${msg.h},subtitles=subs.ass`;
-      const args = [
+      runFFmpeg([
         "-stream_loop", "-1",
         "-i", "bg.mp4",
         "-i", "audio.wav",
@@ -52,28 +75,39 @@ self.onmessage = async (e) => {
         "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
         "-r", String(msg.fps),
         "-shortest", "-y", "out.mp4",
-      ];
-
-      self.__log.length = 0;
-      if (ffmpeg.setTimeout) ffmpeg.setTimeout(-1);
-      if (typeof ffmpeg.exec === "function") {
-        ffmpeg.exec(...args);
-        const ret = ffmpeg.ret;
-        if (ffmpeg.reset) ffmpeg.reset();
-        if (ret !== 0) throw new Error("ffmpeg exited with code " + ret + " | log=" + self.__log.slice(-20).join(" || "));
-      } else if (typeof ffmpeg.callMain === "function") {
-        const ret = ffmpeg.callMain(args);
-        if (ret !== 0) throw new Error("ffmpeg exited with code " + ret + " | log=" + self.__log.slice(-20).join(" || "));
-      } else {
-        throw new Error("ffmpeg has no exec/callMain");
-      }
+      ]);
 
       const data = ffmpeg.FS.readFile("out.mp4");
       const out = new Uint8Array(data);
       self.postMessage({ type: "done", data: out.buffer }, [out.buffer]);
+      safeUnlink("bg.mp4"); safeUnlink("audio.wav");
+      safeUnlink("subs.ass"); safeUnlink("out.mp4");
     } else if (msg.type === "ready") {
       await ensureLoaded(msg.base);
       self.postMessage({ type: "ready" });
+
+    // ---- Frame-sequence conversion path: used to re-encode codecs (AV1,
+    // VP9, VP8) ffmpeg.wasm can't decode into H.264. The main thread decodes
+    // via the browser's own <video> element (works everywhere, unlike
+    // MediaRecorder's H.264 *encode* support, which Firefox lacks) and ships
+    // JPEG frames here one at a time; we assemble + encode them ourselves.
+    } else if (msg.type === "convertFrame") {
+      const name = "conv_" + String(msg.index).padStart(6, "0") + ".jpg";
+      ffmpeg.FS.writeFile(name, new Uint8Array(msg.data));
+    } else if (msg.type === "convertFinish") {
+      const fps = msg.fps || 12;
+      runFFmpeg([
+        "-framerate", String(fps), "-i", "conv_%06d.jpg",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-y", "converted.mp4",
+      ]);
+      const data = ffmpeg.FS.readFile("converted.mp4");
+      const out = new Uint8Array(data);
+      self.postMessage({ type: "convertDone", data: out.buffer }, [out.buffer]);
+      for (let i = 0; i < msg.frameCount; i++) {
+        safeUnlink("conv_" + String(i).padStart(6, "0") + ".jpg");
+      }
+      safeUnlink("converted.mp4");
     }
   } catch (err) {
     self.postMessage({ type: "error", message: (err && err.message) || String(err) });

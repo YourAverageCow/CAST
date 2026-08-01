@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 38;
+const VERSION = 39;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -235,56 +235,74 @@ async function sniffUnsupportedVideoCodec(file) {
   return null;
 }
 
-// Re-encode an unsupported-codec video to H.264 entirely client-side: play it
-// in a hidden <video> (the browser's own decoder handles AV1/VP9 fine), draw
-// each frame to a <canvas>, and re-record that canvas via MediaRecorder with
-// an H.264 target — something ffmpeg.wasm CAN decode. Runs at real-time
-// (as long as the source video's duration) since captureStream is wall-clock.
-const TRANSCODE_MIME = "video/mp4;codecs=avc1.42E01E";
-function canAutoTranscode() {
-  return typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(TRANSCODE_MIME);
+// Re-encode an unsupported-codec video to H.264 entirely client-side, using
+// only APIs that work identically in every browser (unlike MediaRecorder,
+// whose H.264 *encode* support Firefox lacks — it only ever emits WebM,
+// which ffmpeg.wasm can't decode either). Seek through the video frame by
+// frame (the browser's own decoder handles AV1/VP9 fine for playback), draw
+// each frame to a <canvas>, and JPEG-encode it (canvas.toDataURL is
+// synchronous and universally supported). The JPEG sequence is streamed to
+// the ffmpeg worker, which assembles + encodes it to H.264 with its own
+// already-proven libx264 path. Since the background loops during render
+// anyway (-stream_loop -1), only the first CONVERT_MAX_SECONDS are needed.
+const CONVERT_FPS = 12;
+const CONVERT_MAX_SECONDS = 20;
+function seekVideo(video, t) {
+  return new Promise((resolve) => {
+    const onSeeked = () => { video.removeEventListener("seeked", onSeeked); resolve(); };
+    video.addEventListener("seeked", onSeeked);
+    video.currentTime = t;
+  });
 }
-function autoTranscodeToH264(file, onProgress) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const video = document.createElement("video");
-    video.src = url;
-    video.muted = true;
-    video.playsInline = true;
+async function autoTranscodeToH264(file, onProgress) {
+  await ensureFFmpeg();
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+  try {
+    await new Promise((resolve, reject) => {
+      video.onloadedmetadata = resolve;
+      video.onerror = () => reject(new Error("couldn't load video for conversion"));
+    });
+    // libx264 requires even dimensions; some browsers report odd intrinsic
+    // sizes for anamorphic (non-square-pixel) sources, so round down.
+    const w = video.videoWidth - (video.videoWidth % 2);
+    const h = video.videoHeight - (video.videoHeight % 2);
+    if (!w || !h) throw new Error("video has no readable frames");
+    const duration = Math.min(isFinite(video.duration) ? video.duration : CONVERT_MAX_SECONDS, CONVERT_MAX_SECONDS);
+    const frameCount = Math.max(1, Math.round(duration * CONVERT_FPS));
 
-    let rec, drawing = false;
-    const cleanup = () => { drawing = false; URL.revokeObjectURL(url); };
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d", { alpha: false });
 
-    function drawLoop() {
-      if (!drawing) return;
+    for (let i = 0; i < frameCount; i++) {
+      await seekVideo(video, Math.min(i / CONVERT_FPS, video.duration || 0));
       ctx.drawImage(video, 0, 0, w, h);
-      if (onProgress && isFinite(video.duration) && video.duration > 0) {
-        onProgress(Math.min(99, Math.round((video.currentTime / video.duration) * 100)));
-      }
-      if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(drawLoop);
-      else requestAnimationFrame(drawLoop);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      const bin = atob(dataUrl.split(",")[1]);
+      const bytes = new Uint8Array(bin.length);
+      for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+      ffmpegWorker.postMessage({ type: "convertFrame", index: i, data: bytes.buffer }, [bytes.buffer]);
+      if (onProgress) onProgress(Math.min(90, Math.round(((i + 1) / frameCount) * 90)));
     }
 
-    let w, h, ctx;
-    video.onloadedmetadata = () => {
-      w = video.videoWidth; h = video.videoHeight;
-      const canvas = document.createElement("canvas");
-      canvas.width = w; canvas.height = h;
-      ctx = canvas.getContext("2d", { alpha: false });
-
-      rec = new MediaRecorder(canvas.captureStream(30), { mimeType: TRANSCODE_MIME, videoBitsPerSecond: 8_000_000 });
-      const chunks = [];
-      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-      rec.onstop = () => { cleanup(); resolve(new Blob(chunks, { type: "video/mp4" })); };
-      video.onended = () => { drawing = false; rec.stop(); };
-      video.onerror = () => { cleanup(); try { rec.stop(); } catch (e) {} reject(new Error("video playback failed during conversion")); };
-
-      rec.start(250);
-      drawing = true;
-      video.play().then(drawLoop).catch((e) => { cleanup(); reject(e); });
-    };
-    video.onerror = () => { cleanup(); reject(new Error("couldn't load video for conversion")); };
-  });
+    return await new Promise((resolve, reject) => {
+      ffmpegWorker.onmessage = (e) => {
+        if (e.data.type === "convertDone") {
+          if (onProgress) onProgress(100);
+          resolve(new Blob([e.data.data], { type: "video/mp4" }));
+        } else if (e.data.type === "error") {
+          reject(new Error(e.data.message));
+        }
+      };
+      ffmpegWorker.postMessage({ type: "convertFinish", fps: CONVERT_FPS, frameCount });
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 async function handleVideoUpload(input) {
@@ -310,11 +328,7 @@ async function setBackground(file, label) {
   const codec = await sniffUnsupportedVideoCodec(file);
   currentVideoUnsupportedCodec = codec;
   if (codec) {
-    if (canAutoTranscode()) {
-      showToast(`This video is ${codec}-encoded — the in-browser renderer can't read that directly. It'll be auto-converted to H.264 the first time you export (takes about as long as the video itself).`, 8000);
-    } else {
-      showToast(`This video is ${codec}-encoded and your browser can't auto-convert it. Re-encode it to H.264 first, e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`, 8000);
-    }
+    showToast(`This video is ${codec}-encoded — the in-browser renderer can't read that directly. It'll be auto-converted to H.264 the first time you export.`, 8000);
   }
 }
 
@@ -624,14 +638,6 @@ async function exportVideo() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
   const story = sanitizeText($("#storyText").value.trim());
   if (!story) { alert("Generate or paste a story first."); return; }
-  if (currentVideoUnsupportedCodec && !currentVideoTranscoded && !canAutoTranscode()) {
-    alert(
-      `This video looks like it's ${currentVideoUnsupportedCodec}-encoded, which the ` +
-      `in-browser renderer can't decode and your browser can't auto-convert. Re-encode ` +
-      `it manually, e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`
-    );
-    return;
-  }
 
   stopPreview();
   const btn = $("#exportBtn");
