@@ -72,7 +72,7 @@ select, input, textarea {
   font-family: inherit;
 }
 select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(88,166,255,0.12); }
-textarea { resize: vertical; min-height: 120px; line-height: 1.5; }
+textarea { resize: vertical; min-height: 120px; line-height: 1.5; overflow-y: hidden; }
 textarea.valid { border-color: var(--green) !important; }
 button {
   padding: 8px 0;
@@ -127,7 +127,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 #downloadToast {
   position: fixed;
-  top: 16px; right: 16px;
+  top: 16px; right: 64px;
   background: var(--surface);
   color: var(--text);
   padding: 10px 14px;

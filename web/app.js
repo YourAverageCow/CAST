@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 50;
+const VERSION = 51;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -449,7 +449,17 @@ function updateCaptionStyle() {
   el.style.color = $("#textColor").value;
   const sw = (parseInt($("#strokeWidth").value) || 0) * scale;
   const sc = $("#strokeColor").value;
-  el.style.textShadow = sw ? `-${sw}px -${sw}px 0 ${sc}, ${sw}px -${sw}px 0 ${sc}, -${sw}px ${sw}px 0 ${sc}, ${sw}px ${sw}px 0 ${sc}` : "none";
+  // 8-direction shadow (4 corners + 4 edges) so the outline fully surrounds
+  // each glyph — 4 corners alone leaves visible gaps at the top/bottom/
+  // left/right of the strokes, which is what looked "broken" in the preview.
+  el.style.textShadow = sw
+    ? [
+        `-${sw}px -${sw}px 0 ${sc}`, `0 -${sw}px 0 ${sc}`, `${sw}px -${sw}px 0 ${sc}`,
+        `${sw}px 0 0 ${sc}`,
+        `${sw}px ${sw}px 0 ${sc}`, `0 ${sw}px 0 ${sc}`, `-${sw}px ${sw}px 0 ${sc}`,
+        `-${sw}px 0 0 ${sc}`,
+      ].join(", ")
+    : "none";
   const y = parseFloat($("#positionY").value);
   el.style.left = "50%";
   el.style.top = ((isFinite(y) ? y : 0.55) * 100) + "%";
