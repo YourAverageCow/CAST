@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 44;
+const VERSION = 45;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -143,11 +143,14 @@ async function init() {
     if (el && el.tagName === "SELECT") el.addEventListener("change", saveSettings);
   }
   // Keep the caption preview live when style fields are edited by hand
-  for (const id of ["font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth"]) {
+  for (const id of ["font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth", "resW"]) {
     const el = document.getElementById(id);
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
   initCaptionDrag();
+  // The sidebar (and with it the preview box) can be resized by dragging its
+  // edge — recompute the preview's pixel-to-output scale when that happens.
+  new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
 }
 
 function populateModels() {
@@ -378,12 +381,23 @@ async function setBackground(file, label) {
 }
 
 // ---------- Preview (realtime captions) ----------
+// The preview box renders at whatever CSS width fits the sidebar (~400px),
+// but captions are exported into a 1080px+-wide frame. Without correcting
+// for that ratio, "68px" in the preview looks nothing like 68px in the
+// actual output. Scale every pixel value (font size, stroke) by the same
+// factor so the preview is a true-to-scale mockup of the real export.
+function getPreviewScale() {
+  const container = $("#previewContainer");
+  const outputW = parseInt($("#resW").value) || 1080;
+  return (container.clientWidth || 400) / outputW;
+}
 function updateCaptionStyle() {
   const el = $("#captionOverlay");
+  const scale = getPreviewScale();
   el.style.fontFamily = $("#font").value + ", sans-serif";
-  el.style.fontSize = $("#fontSize").value + "px";
+  el.style.fontSize = ((parseInt($("#fontSize").value) || 68) * scale) + "px";
   el.style.color = $("#textColor").value;
-  const sw = parseInt($("#strokeWidth").value) || 0;
+  const sw = (parseInt($("#strokeWidth").value) || 0) * scale;
   const sc = $("#strokeColor").value;
   el.style.textShadow = sw ? `-${sw}px -${sw}px 0 ${sc}, ${sw}px -${sw}px 0 ${sc}, -${sw}px ${sw}px 0 ${sc}, ${sw}px ${sw}px 0 ${sc}` : "none";
   const y = parseFloat($("#positionY").value);
@@ -442,10 +456,15 @@ function initCaptionDrag() {
   });
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault(); e.stopPropagation();
+    const startSize = parseInt($("#fontSize").value) || 68;
+    const startStroke = parseInt($("#strokeWidth").value) || 0;
     captionDragState = {
       mode: "resize", pointerId: e.pointerId,
       startY: e.clientY,
-      startSize: parseInt($("#fontSize").value) || 68,
+      startSize,
+      // Keep the outline in proportion as the text grows/shrinks, instead
+      // of it staying visually fixed while the glyphs scale around it.
+      strokeRatio: startSize ? startStroke / startSize : 0,
     };
     handle.setPointerCapture(e.pointerId);
   });
@@ -457,8 +476,13 @@ function initCaptionDrag() {
       const dy = (e.clientY - captionDragState.startY) / rect.height;
       $("#positionY").value = Math.min(0.95, Math.max(0.05, captionDragState.startCY + dy)).toFixed(3);
     } else {
-      const dy = e.clientY - captionDragState.startY;
-      $("#fontSize").value = Math.min(120, Math.max(24, Math.round(captionDragState.startSize + dy)));
+      // Drag distance is in on-screen pixels; fontSize is in output-frame
+      // pixels, which are larger by 1/scale — convert so a screen-drag of
+      // N px visually grows the on-screen text by ~N px, not N * scale.
+      const dy = (e.clientY - captionDragState.startY) / getPreviewScale();
+      const newSize = Math.min(120, Math.max(24, Math.round(captionDragState.startSize + dy)));
+      $("#fontSize").value = newSize;
+      $("#strokeWidth").value = Math.min(10, Math.max(0, Math.round(newSize * captionDragState.strokeRatio)));
     }
     updateCaptionStyle();
   }
