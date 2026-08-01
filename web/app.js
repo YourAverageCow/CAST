@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 54;
+const VERSION = 55;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -14,7 +14,6 @@ let subtitles = [];           // [{start, end, text}]
 let previewActive = false;
 let previewRAF = null;
 let ttsAudio = null;
-let lastVideoUrl = null;
 
 // ---------- TTS & video engine state ----------
 // libritts_r is audiobook-trained and reads flat/monotone. These are more
@@ -606,29 +605,47 @@ async function ensurePiper() {
   return piperEngine;
 }
 
-async function generateSpeech(text) {
-  const engine = await ensurePiper();
-  const voice = getVoice();
+// Piper runs on a single shared engine instance; concurrent-call safety
+// isn't guaranteed (unverified, and the ONNX session inside it is stateful),
+// so every generateSpeech call funnels through this one-at-a-time queue —
+// including from parallel batch jobs, whose video rendering is otherwise
+// fully concurrent. TTS is fast relative to rendering, so serializing it
+// costs little even under a large batch.
+let ttsQueueTail = Promise.resolve();
+function queueTTS(fn) {
+  const run = ttsQueueTail.then(fn, fn);
+  // Swallow rejections here so one failed job doesn't wedge the queue for
+  // everything queued after it — the caller still sees the real rejection
+  // via `run`, this is only to keep ttsQueueTail chainable.
+  ttsQueueTail = run.catch(() => {});
+  return run;
+}
+
+async function generateSpeech(text, voice) {
+  voice = voice || getVoice();
   // Sanitize again here as a safety net — piper's tokenizer uses TextEncoder
   // and throws "String contains an invalid character" on any lone surrogate.
   text = sanitizeText(text);
   if (!text) throw new Error("Story text is empty after cleaning.");
-  showDownloadToast(`Generating voice...`);
-  try {
-    const response = await engine.generate(text, voice, 0);
-    hideDownloadToast();
-    const audioUrl = URL.createObjectURL(response.file);
-    // Piper phoneme data doesn't expose per-word timestamps directly;
-    // estimate word timings from the audio duration.
-    const durationSec = (response.duration || 0) / 1000;
-    const words = computeWordTimings(text, durationSec);
-    return { audioUrl, words };
-  } catch (e) {
-    hideDownloadToast();
-    console.error("generateSpeech failed:", e);
-    const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
-    throw new Error((e && e.message ? e.message : "TTS failed") + detail);
-  }
+  return queueTTS(async () => {
+    const engine = await ensurePiper();
+    showDownloadToast(`Generating voice...`);
+    try {
+      const response = await engine.generate(text, voice, 0);
+      hideDownloadToast();
+      const audioUrl = URL.createObjectURL(response.file);
+      // Piper phoneme data doesn't expose per-word timestamps directly;
+      // estimate word timings from the audio duration.
+      const durationSec = (response.duration || 0) / 1000;
+      const words = computeWordTimings(text, durationSec);
+      return { audioUrl, words };
+    } catch (e) {
+      hideDownloadToast();
+      console.error("generateSpeech failed:", e);
+      const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
+      throw new Error((e && e.message ? e.message : "TTS failed") + detail);
+    }
+  });
 }
 
 // computeWordTimings / buildSubsFromWords live in lib/captions.js (pure,
@@ -726,6 +743,135 @@ function renderVideoInWorker(payload, onProgress) {
   return ffmpegPool.submit((worker) => worker.render(payload, onProgress));
 }
 
+// Snapshot of the global settings panel, in the same shape resolveJobSettings
+// (lib/job-model.js) expects — the fallback values a job's own overrides
+// are merged on top of.
+function getGlobalSettings() {
+  return {
+    voice: getVoice(),
+    resW: parseInt($("#resW").value) || 1080,
+    resH: parseInt($("#resH").value) || 1920,
+    fps: parseInt($("#fps").value) || 30,
+    font: $("#font").value,
+    fontSize: parseInt($("#fontSize").value) || 68,
+    positionY: parseFloat($("#positionY").value) || 0.55,
+    textColor: $("#textColor").value,
+    strokeColor: $("#strokeColor").value,
+    strokeWidth: parseInt($("#strokeWidth").value) || 3,
+  };
+}
+
+// Runs one job end-to-end: transcode (if needed) -> voice -> render. Mutates
+// `job` in place and calls onUpdate(job) after every state change instead of
+// touching the DOM directly, so this is equally usable from the single-video
+// sidebar (a "batch of one") and the batch composer. Never throws — check
+// job.status/job.error after it resolves.
+async function runJob(job, globalSettings, onUpdate) {
+  const update = (patch) => { Object.assign(job, patch); if (onUpdate) onUpdate(job); };
+  try {
+    if (!job.bgFile) throw new Error("No background video.");
+    const story = sanitizeText((job.story || "").trim());
+    if (!story) throw new Error("No story text.");
+
+    const settings = resolveJobSettings(job, globalSettings);
+
+    let bgFile = job.bgFile;
+    if (job.bgUnsupportedCodec) {
+      if (!job.bgTranscoded) {
+        const codec = job.bgUnsupportedCodec;
+        update({ status: "transcode", progressPct: 0, progressLabel: `Converting ${codec} video to H.264...` });
+        try {
+          job.bgTranscoded = await autoTranscodeToH264(job.bgFile,
+            (pct) => update({ progressPct: pct, progressLabel: `Converting ${codec} video to H.264...` }));
+        } catch (convErr) {
+          throw new Error(
+            `Couldn't auto-convert this ${codec} video in your browser (${convErr.message}). ` +
+            `Re-encode it manually, e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`
+          );
+        }
+      }
+      bgFile = job.bgTranscoded;
+    }
+
+    update({ status: "voice", progressPct: 0, progressLabel: "Generating voice..." });
+    const { audioUrl, words } = await generateSpeech(story, settings.voice);
+    const subs = buildSubsFromWords(words).map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
+
+    const w = parseInt(settings.resW) || 1080;
+    const h = parseInt(settings.resH) || 1920;
+    const fps = parseInt(settings.fps) || 30;
+
+    update({ status: "render", progressPct: 30, progressLabel: "Rendering..." });
+    const bg = new Uint8Array(await bgFile.arrayBuffer());
+    const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
+    const style = {
+      fontSize: parseInt(settings.fontSize) || 68,
+      textColor: settings.textColor,
+      strokeColor: settings.strokeColor,
+      strokeWidth: parseInt(settings.strokeWidth) || 3,
+      positionY: parseFloat(settings.positionY) || 0.55,
+    };
+    // Lets the worker skip the scale/crop filter entirely when the
+    // background is already at the export resolution.
+    const { w: bgW, h: bgH } = await probeVideoDimensions(bgFile);
+
+    const outBytes = await renderVideoInWorker({
+      type: "render",
+      base: new URL("./", document.baseURI).href,
+      bg, audio: audioData, subs, style, w, h, fps, bgW, bgH,
+    }, (pct) => update({ progressPct: pct, progressLabel: "Rendering..." }));
+
+    const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
+    if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+    job.resultBlob = blob;
+    update({ status: "done", progressPct: 100, progressLabel: "Done", resultUrl: URL.createObjectURL(blob) });
+  } catch (e) {
+    console.error(e);
+    update({ status: "error", error: (e && e.message) || String(e) });
+  }
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+// Renders (or updates in place, keyed by job.id) one result card. Buttons
+// are bound directly to this job's own resultUrl instead of a shared global
+// — each card is independent, so multiple can be live at once (batch mode).
+function renderResultCard(job, container, opts) {
+  opts = opts || {};
+  let div = container.querySelector(`[data-job-id="${job.id}"]`);
+  if (!div) {
+    div = document.createElement("div");
+    div.className = "video-result";
+    div.dataset.jobId = job.id;
+    if (opts.prepend) container.prepend(div); else container.appendChild(div);
+  }
+  if (job.status === "done") {
+    div.innerHTML = `
+      <div class="actions">
+        <button data-action="preview">Preview</button>
+        <button data-action="download">Download</button>
+        <button data-action="copy">Copy Link</button>
+      </div>`;
+    div.querySelector('[data-action="preview"]').onclick = () => previewExported(job.resultUrl);
+    div.querySelector('[data-action="download"]').onclick = () => downloadVideo(job.resultUrl);
+    div.querySelector('[data-action="copy"]').onclick = () => copyVideoLink(job.resultUrl);
+  } else if (job.status === "error") {
+    div.innerHTML = `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>`;
+  } else {
+    div.innerHTML = `
+      <div class="result-status">${escapeHtml(job.progressLabel || job.status)}</div>
+      <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${job.progressPct || 0}%"></div></div>`;
+  }
+  return div;
+}
+
+// The sidebar's "quick single export" — builds one job from the current
+// sidebar/settings state and runs it through the same runJob() path batch
+// jobs use, so there's exactly one render pipeline, not two.
 async function exportVideo() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
   const story = sanitizeText($("#storyText").value.trim());
@@ -736,75 +882,30 @@ async function exportVideo() {
   btn.textContent = "Exporting...";
   btn.disabled = true;
 
-  try {
-    let bgFile = currentVideo;
-    if (currentVideoUnsupportedCodec) {
-      if (!currentVideoTranscoded) {
-        const codec = currentVideoUnsupportedCodec;
-        setProgress(0, `Converting ${codec} video to H.264...`);
-        try {
-          currentVideoTranscoded = await autoTranscodeToH264(currentVideo,
-            (pct) => setProgress(pct, `Converting ${codec} video to H.264...`));
-        } catch (convErr) {
-          throw new Error(
-            `Couldn't auto-convert this ${codec} video in your browser (${convErr.message}). ` +
-            `Re-encode it manually, e.g.: ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4`
-          );
-        }
-      }
-      bgFile = currentVideoTranscoded;
-    }
+  const job = createJob({
+    story,
+    bgFile: currentVideo,
+    bgUnsupportedCodec: currentVideoUnsupportedCodec,
+    bgTranscoded: currentVideoTranscoded,
+  });
 
-    setProgress(0, "Generating voice...");
-    const { audioUrl, words } = await generateSpeech(story);
-    subtitles = buildSubsFromWords(words);
+  await ensureFFmpeg(1);
+  const globalSettings = getGlobalSettings();
+  await runJob(job, globalSettings, (j) => {
+    setProgress(j.progressPct, j.progressLabel);
+    renderResultCard(j, $("#outputContainer"), { prepend: true });
+  });
 
-    await ensureFFmpeg();
-    const w = parseInt($("#resW").value) || 1080;
-    const h = parseInt($("#resH").value) || 1920;
-    const fps = parseInt($("#fps").value) || 30;
+  // Cache the transcoded background back onto the singleton so re-exporting
+  // the same video doesn't re-transcode it, matching the old behavior.
+  if (job.bgTranscoded) currentVideoTranscoded = job.bgTranscoded;
 
-    setProgress(30, "Rendering...");
-    const bg = new Uint8Array(await bgFile.arrayBuffer());
-    const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
-    const subs = subtitles.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
-    const style = {
-      fontSize: parseInt($("#fontSize").value) || 68,
-      textColor: $("#textColor").value,
-      strokeColor: $("#strokeColor").value,
-      strokeWidth: parseInt($("#strokeWidth").value) || 3,
-      positionY: parseFloat($("#positionY").value) || 0.55,
-    };
-    // Lets the worker skip the scale/crop filter entirely when the
-    // background is already at the export resolution.
-    const { w: bgW, h: bgH } = await probeVideoDimensions(bgFile);
-
-    const outBytes = await renderVideoInWorker({
-      type: "render",
-      base: new URL("./", document.baseURI).href,
-      bg, audio: audioData, subs, style, w, h, fps, bgW, bgH,
-    }, (pct) => setProgress(pct, "Rendering..."));
-
-    const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
-    if (lastVideoUrl) URL.revokeObjectURL(lastVideoUrl);
-    lastVideoUrl = URL.createObjectURL(blob);
-
-    const div = document.createElement("div");
-    div.className = "video-result";
-    div.innerHTML = `
-      <div class="actions">
-        <button onclick="previewExported(lastVideoUrl)">Preview</button>
-        <button onclick="downloadVideo(lastVideoUrl)">Download</button>
-        <button onclick="copyVideoLink(lastVideoUrl)">Copy Link</button>
-      </div>`;
-    $("#outputContainer").prepend(div);
+  if (job.status === "done") {
     showToast("Video exported!");
-    setProgress(100);
-  } catch (e) {
-    console.error(e);
-    const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
-    alert("Export failed: " + (e && e.message ? e.message : String(e)) + detail);
+  } else {
+    alert("Export failed: " + job.error);
   }
+
   btn.textContent = "Export Video";
   btn.disabled = false;
 }
