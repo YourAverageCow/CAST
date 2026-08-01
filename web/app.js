@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 32;
+const VERSION = 33;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -462,9 +462,19 @@ async function ensureFFmpeg() {
       wasmURL,
       workerURL: base + "vendor/ffmpeg/ffmpeg-core.js",
     }));
-    ffmpeg = await window.createFFmpegCore({
+    const result = window.createFFmpegCore({
       mainScriptUrlOrBlob: coreURL + "#" + payload,
     });
+    // createFFmpegCore returns the module's ready promise; await it.
+    const resolved = await result;
+    // In all known builds the resolved value IS the module with FS + exec.
+    ffmpeg = resolved;
+    if (ffmpeg && typeof ffmpeg.FS !== "object" && ffmpeg.FS && typeof ffmpeg.FS.writeFile !== "function") {
+      throw new Error("ffmpeg module did not expose FS object");
+    }
+    if (!ffmpeg || !ffmpeg.FS || typeof ffmpeg.FS.writeFile !== "function") {
+      throw new Error("ffmpeg module did not expose FS object");
+    }
     ffmpegLoaded = true;
     hideDownloadToast();
   } catch (e) {
@@ -512,14 +522,14 @@ async function exportVideo() {
     const fps = parseInt($("#fps").value) || 30;
 
     // Load background video + audio into ffmpeg's virtual FS
-    ffmpeg.FS("writeFile", "bg.mp4", await currentVideo.arrayBuffer());
+    ffmpeg.FS.writeFile("bg.mp4", await currentVideo.arrayBuffer());
     const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
-    ffmpeg.FS("writeFile", "audio.wav", audioData);
+    ffmpeg.FS.writeFile("audio.wav", audioData);
     const assText = buildASS(subtitles, $("#font").value, parseInt($("#fontSize").value) || 68, $("#textColor").value, $("#strokeColor").value, parseInt($("#strokeWidth").value) || 3, parseFloat($("#positionY").value) || 0.55, w, h);
-    ffmpeg.FS("writeFile", "subs.ass", safeUtf8(assText));
+    ffmpeg.FS.writeFile("subs.ass", safeUtf8(assText));
 
     const vf = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},subtitles=subs.ass`;
-    const ret = await ffmpeg.callMain([
+    const args = [
       "-stream_loop", "-1",
       "-i", "bg.mp4",
       "-i", "audio.wav",
@@ -529,11 +539,23 @@ async function exportVideo() {
       "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
       "-r", String(fps),
       "-shortest", "-y", "out.mp4",
-    ]);
+    ];
+    let ret;
+    if (typeof ffmpeg.exec === "function") {
+      // 0.12 core: exec(...args) then read ffmpeg.ret
+      ffmpeg.setTimeout && ffmpeg.setTimeout(-1);
+      ffmpeg.exec(...args);
+      ret = ffmpeg.ret;
+      ffmpeg.reset && ffmpeg.reset();
+    } else if (typeof ffmpeg.callMain === "function") {
+      ret = await ffmpeg.callMain(args);
+    } else {
+      throw new Error("ffmpeg has no exec/callMain");
+    }
     if (ret !== 0) throw new Error("ffmpeg exited with code " + ret);
 
     setProgress(50, "Rendering...");
-    const data = ffmpeg.FS("readFile", "out.mp4");
+    const data = ffmpeg.FS.readFile("out.mp4");
     const blob = new Blob([data.buffer], { type: "video/mp4" });
     if (lastVideoUrl) URL.revokeObjectURL(lastVideoUrl);
     lastVideoUrl = URL.createObjectURL(blob);
