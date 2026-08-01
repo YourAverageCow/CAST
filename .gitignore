@@ -8,11 +8,6 @@ __pycache__/
 # Env
 .env
 
-# Runtime data
-desktop/uploads/
-desktop/outputs/
-desktop/__pycache__/
-
 # Editor
 .vscode/
 .idea/
