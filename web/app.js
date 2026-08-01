@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 29;
+const VERSION = 30;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -332,6 +332,10 @@ async function ensurePiper() {
 async function generateSpeech(text) {
   const engine = await ensurePiper();
   const voice = getVoice();
+  // Sanitize again here as a safety net — piper's tokenizer uses TextEncoder
+  // and throws "String contains an invalid character" on any lone surrogate.
+  text = sanitizeText(text);
+  if (!text) throw new Error("Story text is empty after cleaning.");
   showDownloadToast(`Generating voice...`);
   try {
     const response = await engine.generate(text, voice, 0);
@@ -458,6 +462,24 @@ async function ensureFFmpeg() {
   }
 }
 
+// Safe UTF-8 encoder that never throws — replaces lone surrogates with U+FFFD
+// instead of crashing like TextEncoder does.
+function safeUtf8(str) {
+  const bytes = [];
+  for (const ch of str) {
+    let cp = ch.codePointAt(0);
+    if (cp === 0xFFFD) { bytes.push(0xEF, 0xBF, 0xBD); continue; }
+    const isLoneHigh = cp >= 0xD800 && cp <= 0xDBFF;
+    const isLoneLow = cp >= 0xDC00 && cp <= 0xDFFF;
+    if (isLoneHigh || isLoneLow) { bytes.push(0xEF, 0xBF, 0xBD); continue; }
+    if (cp <= 0x7F) bytes.push(cp);
+    else if (cp <= 0x7FF) bytes.push(0xC0 | (cp >> 6), 0x80 | (cp & 0x3F));
+    else if (cp <= 0xFFFF) bytes.push(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F));
+    else bytes.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3F), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F));
+  }
+  return new Uint8Array(bytes);
+}
+
 async function exportVideo() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
   const story = sanitizeText($("#storyText").value.trim());
@@ -483,7 +505,7 @@ async function exportVideo() {
     const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
     ffmpeg.FS("writeFile", "audio.wav", audioData);
     const assText = buildASS(subtitles, $("#font").value, parseInt($("#fontSize").value) || 68, $("#textColor").value, $("#strokeColor").value, parseInt($("#strokeWidth").value) || 3, parseFloat($("#positionY").value) || 0.55, w, h);
-    ffmpeg.FS("writeFile", "subs.ass", new TextEncoder().encode(assText));
+    ffmpeg.FS("writeFile", "subs.ass", safeUtf8(assText));
 
     const vf = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},subtitles=subs.ass`;
     const ret = await ffmpeg.callMain([
