@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 34;
+const VERSION = 35;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -445,42 +445,46 @@ async function startPreview() {
 }
 // ---------- Export (ffmpeg.wasm via core directly) ----------
 
-async function ensureFFmpeg() {
-  if (ffmpegLoaded) return;
-  showDownloadToast("Loading video engine (first time only, ~25MB)...");
-  try {
-    await loadScript("./vendor/ffmpeg/ffmpeg-core.js");
-    if (typeof window.createFFmpegCore !== "function") {
-      throw new Error("ffmpeg core failed to load (createFFmpegCore not found)");
-    }
-    const base = new URL("./", document.baseURI).href;
-    const coreURL = base + "vendor/ffmpeg/ffmpeg-core.js";
-    const wasmURL = base + "vendor/ffmpeg/ffmpeg-core.wasm";
-    // The core's _locateFile expects mainScriptUrlOrBlob to be
-    // `<core-url>#base64({wasmURL, workerURL})`.
-    const payload = btoa(JSON.stringify({
-      wasmURL,
-      workerURL: base + "vendor/ffmpeg/ffmpeg-core.js",
-    }));
-    const result = window.createFFmpegCore({
-      mainScriptUrlOrBlob: coreURL + "#" + payload,
-    });
-    // createFFmpegCore returns the module's ready promise; await it.
-    const resolved = await result;
-    // In all known builds the resolved value IS the module with FS + exec.
-    ffmpeg = resolved;
-    if (ffmpeg && typeof ffmpeg.FS !== "object" && ffmpeg.FS && typeof ffmpeg.FS.writeFile !== "function") {
-      throw new Error("ffmpeg module did not expose FS object");
-    }
-    if (!ffmpeg || !ffmpeg.FS || typeof ffmpeg.FS.writeFile !== "function") {
-      throw new Error("ffmpeg module did not expose FS object");
-    }
-    ffmpegLoaded = true;
-    hideDownloadToast();
-  } catch (e) {
-    hideDownloadToast();
-    throw e;
-  }
+let ffmpegWorker = null;
+let ffmpegWorkerReady = null;
+
+// Run ffmpeg in a Web Worker so the UI never freezes during rendering.
+function ensureFFmpeg() {
+  if (ffmpegWorker) return ffmpegWorkerReady;
+  showDownloadToast("Preparing video engine (first time only, ~25MB)...");
+  const base = new URL("./", document.baseURI).href;
+  ffmpegWorker = new Worker(BASE + "ffmpeg-worker.js");
+  ffmpegWorkerReady = new Promise((resolve, reject) => {
+    ffmpegWorker.onmessage = (e) => {
+      if (e.data.type === "ready") {
+        hideDownloadToast();
+        resolve();
+      } else if (e.data.type === "error") {
+        hideDownloadToast();
+        reject(new Error(e.data.message));
+      }
+    };
+    ffmpegWorker.onerror = (e) => {
+      hideDownloadToast();
+      reject(new Error("video worker failed: " + (e.message || "unknown")));
+    };
+    ffmpegWorker.postMessage({ type: "ready", base });
+  });
+  return ffmpegWorkerReady;
+}
+
+// Render via the worker; resolves to an ArrayBuffer of the MP4.
+function renderVideoInWorker(payload) {
+  return new Promise((resolve, reject) => {
+    ffmpegWorker.onmessage = (e) => {
+      if (e.data.type === "done") {
+        resolve(new Uint8Array(e.data.data));
+      } else if (e.data.type === "error") {
+        reject(new Error(e.data.message));
+      }
+    };
+    ffmpegWorker.postMessage(payload, [payload.bg.buffer, payload.audio.buffer]);
+  });
 }
 
 // Safe UTF-8 encoder that never throws — replaces lone surrogates with U+FFFD
@@ -521,42 +525,18 @@ async function exportVideo() {
     const h = parseInt($("#resH").value) || 1920;
     const fps = parseInt($("#fps").value) || 30;
 
-    // Load background video + audio into ffmpeg's virtual FS
-    ffmpeg.FS.writeFile("bg.mp4", new Uint8Array(await currentVideo.arrayBuffer()));
+    setProgress(30, "Rendering...");
+    const bg = new Uint8Array(await currentVideo.arrayBuffer());
     const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
-    ffmpeg.FS.writeFile("audio.wav", audioData);
     const assText = buildASS(subtitles, $("#font").value, parseInt($("#fontSize").value) || 68, $("#textColor").value, $("#strokeColor").value, parseInt($("#strokeWidth").value) || 3, parseFloat($("#positionY").value) || 0.55, w, h);
-    ffmpeg.FS.writeFile("subs.ass", safeUtf8(assText));
 
-    const vf = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},subtitles=subs.ass`;
-    const args = [
-      "-stream_loop", "-1",
-      "-i", "bg.mp4",
-      "-i", "audio.wav",
-      "-filter_complex", `[0:v]${vf}[v]`,
-      "-map", "[v]", "-map", "1:a",
-      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-      "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
-      "-r", String(fps),
-      "-shortest", "-y", "out.mp4",
-    ];
-    let ret;
-    if (typeof ffmpeg.exec === "function") {
-      // 0.12 core: exec(...args) then read ffmpeg.ret
-      ffmpeg.setTimeout && ffmpeg.setTimeout(-1);
-      ffmpeg.exec(...args);
-      ret = ffmpeg.ret;
-      ffmpeg.reset && ffmpeg.reset();
-    } else if (typeof ffmpeg.callMain === "function") {
-      ret = await ffmpeg.callMain(args);
-    } else {
-      throw new Error("ffmpeg has no exec/callMain");
-    }
-    if (ret !== 0) throw new Error("ffmpeg exited with code " + ret);
+    const outBytes = await renderVideoInWorker({
+      type: "render",
+      base: new URL("./", document.baseURI).href,
+      bg, audio: audioData, ass: assText, w, h, fps,
+    });
 
-    setProgress(50, "Rendering...");
-    const data = ffmpeg.FS.readFile("out.mp4");
-    const blob = new Blob([data.buffer], { type: "video/mp4" });
+    const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
     if (lastVideoUrl) URL.revokeObjectURL(lastVideoUrl);
     lastVideoUrl = URL.createObjectURL(blob);
 
