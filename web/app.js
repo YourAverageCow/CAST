@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 39;
+const VERSION = 40;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -552,22 +552,29 @@ function ensureFFmpeg() {
   showDownloadToast("Preparing video engine (first time only, ~25MB)...");
   const base = new URL("./", document.baseURI).href;
   ffmpegWorker = new Worker(BASE + "ffmpeg-worker.js");
-  ffmpegWorkerReady = new Promise((resolve, reject) => {
-    ffmpegWorker.onmessage = (e) => {
-      if (e.data.type === "ready") {
+  ffmpegWorkerReady = (async () => {
+    // The subtitles filter (libass) has no fonts to draw with inside the WASM
+    // sandbox — there's no OS font store in there. Without one, captions
+    // burn in as nothing: ffmpeg exits 0, the video looks fine, just silently
+    // caption-free. Ship one bundled font so libass always has something.
+    const fontBuf = await (await fetch(BASE + "vendor/fonts/DejaVuSans.ttf")).arrayBuffer();
+    return new Promise((resolve, reject) => {
+      ffmpegWorker.onmessage = (e) => {
+        if (e.data.type === "ready") {
+          hideDownloadToast();
+          resolve();
+        } else if (e.data.type === "error") {
+          hideDownloadToast();
+          reject(new Error(e.data.message));
+        }
+      };
+      ffmpegWorker.onerror = (e) => {
         hideDownloadToast();
-        resolve();
-      } else if (e.data.type === "error") {
-        hideDownloadToast();
-        reject(new Error(e.data.message));
-      }
-    };
-    ffmpegWorker.onerror = (e) => {
-      hideDownloadToast();
-      reject(new Error("video worker failed: " + (e.message || "unknown")));
-    };
-    ffmpegWorker.postMessage({ type: "ready", base });
-  });
+        reject(new Error("video worker failed: " + (e.message || "unknown")));
+      };
+      ffmpegWorker.postMessage({ type: "ready", base, font: fontBuf }, [fontBuf]);
+    });
+  })();
   return ffmpegWorkerReady;
 }
 
@@ -598,6 +605,7 @@ function renderVideoInWorker(payload, onProgress) {
     ffmpegWorker.onmessage = (e) => {
       if (e.data.type === "done") {
         clearTimeout(stallTimer);
+        if (e.data.debug) console.warn("RENDER DEBUG", JSON.stringify(e.data.debug));
         resolve(new Uint8Array(e.data.data));
       } else if (e.data.type === "progress") {
         resetStallTimer();
@@ -675,12 +683,19 @@ async function exportVideo() {
     setProgress(30, "Rendering...");
     const bg = new Uint8Array(await bgFile.arrayBuffer());
     const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
-    const assText = buildASS(subtitles, $("#font").value, parseInt($("#fontSize").value) || 68, $("#textColor").value, $("#strokeColor").value, parseInt($("#strokeWidth").value) || 3, parseFloat($("#positionY").value) || 0.55, w, h);
+    const subs = subtitles.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
+    const style = {
+      fontSize: parseInt($("#fontSize").value) || 68,
+      textColor: $("#textColor").value,
+      strokeColor: $("#strokeColor").value,
+      strokeWidth: parseInt($("#strokeWidth").value) || 3,
+      positionY: parseFloat($("#positionY").value) || 0.55,
+    };
 
     const outBytes = await renderVideoInWorker({
       type: "render",
       base: new URL("./", document.baseURI).href,
-      bg, audio: audioData, ass: assText, w, h, fps,
+      bg, audio: audioData, subs, style, w, h, fps,
     }, (pct) => setProgress(pct, "Rendering..."));
 
     const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
@@ -707,7 +722,6 @@ async function exportVideo() {
   btn.disabled = false;
 }
 
-// ---------- ASS building ----------
 // Remove characters TextEncoder/ffmpeg choke on (lone surrogates, control chars).
 function sanitizeText(s) {
   if (typeof s !== "string") return "";
@@ -715,38 +729,6 @@ function sanitizeText(s) {
     .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")   // lone high surrogates
     .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "$1") // lone low surrogates
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ""); // control chars
-}
-
-function buildASS(subs, font, size, textColor, strokeColor, strokeWidth, positionY, w, h) {
-  const colorMap = { white: "&H00FFFFFF", black: "&H00000000", red: "&H000000FF", yellow: "&H0000FFFF", green: "&H0000FF00", blue: "&H00FF0000" };
-  function pc(c) {
-    c = (c || "").toLowerCase().trim();
-    if (c.startsWith("#")) c = c.slice(1);
-    if (colorMap[c]) return colorMap[c];
-    if (/^[0-9a-f]{6}$/.test(c)) return "&H00" + c.slice(4,6) + c.slice(2,4) + c.slice(0,2);
-    return "&H00FFFFFF";
-  }
-  const primary = pc(textColor), outline = pc(strokeColor);
-  const marginV = Math.round((positionY - 0.5) * h);
-  const lines = [
-    "[Script Info]", "Title: Captions", "ScriptType: v4.00+", "WrapStyle: 0",
-    `PlayResX: ${w}`, `PlayResY: ${h}`, "ScaledBorderAndShadow: yes", "",
-    "[V4+ Styles]",
-    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: Default,${sanitizeText(font)},${size},${primary},&H00000000,${outline},&H00000000,-1,0,0,0,100,100,0,0,1,${strokeWidth},0,5,20,20,${marginV},1`,
-    "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-  ];
-  function fmt(t) {
-    const H = Math.floor(t/3600), M = Math.floor((t%3600)/60), S = t % 60;
-    return `${H}:${String(M).padStart(2,"0")}:${S.toFixed(2).padStart(5,"0")}`;
-  }
-  for (const s of subs) {
-    if (s.end - s.start < 0.04) continue;
-    const text = sanitizeText(s.text);
-    if (!text) continue;
-    lines.push(`Dialogue: 0,${fmt(s.start)},${fmt(s.end)},Default,,0,0,0,,${text.replace(/\n/g,"\\N")}`);
-  }
-  return lines.join("\n");
 }
 
 // ---------- Player / download ----------

@@ -4,7 +4,7 @@ importScripts("./vendor/ffmpeg/ffmpeg-core.js");
 let ffmpeg = null;
 let loaded = false;
 
-async function ensureLoaded(base) {
+async function ensureLoaded(base, font) {
   if (loaded) return;
   const coreURL = base + "vendor/ffmpeg/ffmpeg-core.js";
   const wasmURL = base + "vendor/ffmpeg/ffmpeg-core.wasm";
@@ -16,6 +16,8 @@ async function ensureLoaded(base) {
   if (!ffmpeg || !ffmpeg.FS || typeof ffmpeg.FS.writeFile !== "function") {
     throw new Error("ffmpeg module did not expose FS");
   }
+  ffmpeg.FS.mkdir("fonts");
+  if (font) ffmpeg.FS.writeFile("fonts/DejaVuSans.ttf", new Uint8Array(font));
   // Wire ffmpeg's own progress reporting (progress 0..1, time in seconds).
   if (typeof ffmpeg.setProgress === "function") {
     ffmpeg.setProgress(({ progress, time }) => {
@@ -52,25 +54,78 @@ function safeUnlink(name) {
   try { ffmpeg.FS.unlink(name); } catch (e) { /* ignore */ }
 }
 
+// Only allow plain color names or hex, since this gets interpolated straight
+// into an ffmpeg filter-graph string.
+function safeColor(c, fallback) {
+  if (typeof c !== "string") return fallback;
+  c = c.trim();
+  if (/^[a-zA-Z]+$/.test(c)) return c;
+  if (/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(c)) return c;
+  if (/^0x[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(c)) return c;
+  return fallback;
+}
+
+// Build a chained drawtext filter graph, one filter per caption cue, each
+// gated by enable='between(t,start,end)'. drawtext uses FreeType directly
+// against an exact font file — unlike the `subtitles` (libass) filter, it
+// doesn't need a font *provider* (fontconfig/CoreText/DirectWrite), which
+// this WASM build doesn't have, so this is what actually renders visible
+// glyphs. Each cue's text goes in its own file (FS.writeFile) rather than
+// inline in the filter string, since ffmpeg's filter-graph string parser has
+// its own comma/colon/quote escaping rules that arbitrary story text would
+// easily break.
+function buildCaptionFilter(subs, style, w, h) {
+  const fontSize = parseInt(style.fontSize) || 68;
+  const textColor = safeColor(style.textColor, "white");
+  const strokeColor = safeColor(style.strokeColor, "black");
+  const strokeWidth = Math.max(0, Math.min(10, parseInt(style.strokeWidth) || 3));
+  const positionY = Math.max(0.05, Math.min(0.95, parseFloat(style.positionY) || 0.55));
+
+  // Loop inside the filter graph (not via -stream_loop on the input) so frame
+  // timestamps stay continuous across loop cycles — -stream_loop restarts the
+  // demuxer each cycle, and depending on the input's own timestamps that can
+  // reset `t` back near 0, which would make enable='between(t,...)' never
+  // fire for any caption past the first loop.
+  const chain = [`[0:v]loop=loop=-1:size=32767:start=0,scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}[base0]`];
+  const writtenFiles = [];
+  let prev = "base0";
+  let i = 0;
+  for (const s of subs) {
+    if (s.end - s.start < 0.04) continue;
+    const text = (s.text || "").trim();
+    if (!text) continue;
+    const fname = "cap" + String(i).padStart(5, "0") + ".txt";
+    ffmpeg.FS.writeFile(fname, new TextEncoder().encode(text));
+    writtenFiles.push(fname);
+    const next = "v" + i;
+    chain.push(
+      `[${prev}]drawtext=fontfile=fonts/DejaVuSans.ttf:textfile=${fname}:fontsize=${fontSize}` +
+      `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
+      `:x=(w-text_w)/2:y=h*${positionY}-text_h/2` +
+      `:enable='between(t,${s.start.toFixed(3)},${s.end.toFixed(3)})'[${next}]`
+    );
+    prev = next;
+    i++;
+  }
+  return { filterComplex: chain.join(";"), outLabel: prev, writtenFiles };
+}
+
 self.onmessage = async (e) => {
   const msg = e.data;
   try {
     if (msg.type === "render") {
-      await ensureLoaded(msg.base);
+      await ensureLoaded(msg.base, msg.font);
       ffmpeg.FS.writeFile("bg.mp4", new Uint8Array(msg.bg));
       ffmpeg.FS.writeFile("audio.wav", new Uint8Array(msg.audio));
-      const assBytes = typeof msg.ass === "string"
-        ? new TextEncoder().encode(msg.ass)
-        : new Uint8Array(msg.ass);
-      ffmpeg.FS.writeFile("subs.ass", assBytes);
 
-      const vf = `scale=${msg.w}:${msg.h}:force_original_aspect_ratio=increase,crop=${msg.w}:${msg.h},subtitles=subs.ass`;
+      const { filterComplex, outLabel, writtenFiles } =
+        buildCaptionFilter(msg.subs || [], msg.style || {}, msg.w, msg.h);
+
       runFFmpeg([
-        "-stream_loop", "-1",
         "-i", "bg.mp4",
         "-i", "audio.wav",
-        "-filter_complex", `[0:v]${vf}[v]`,
-        "-map", "[v]", "-map", "1:a",
+        "-filter_complex", filterComplex,
+        "-map", `[${outLabel}]`, "-map", "1:a",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
         "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
         "-r", String(msg.fps),
@@ -79,11 +134,14 @@ self.onmessage = async (e) => {
 
       const data = ffmpeg.FS.readFile("out.mp4");
       const out = new Uint8Array(data);
-      self.postMessage({ type: "done", data: out.buffer }, [out.buffer]);
-      safeUnlink("bg.mp4"); safeUnlink("audio.wav");
-      safeUnlink("subs.ass"); safeUnlink("out.mp4");
+      self.postMessage({
+        type: "done", data: out.buffer,
+        debug: { filterComplex, cueCount: writtenFiles.length, log: self.__log.slice(-30) },
+      }, [out.buffer]);
+      safeUnlink("bg.mp4"); safeUnlink("audio.wav"); safeUnlink("out.mp4");
+      writtenFiles.forEach(safeUnlink);
     } else if (msg.type === "ready") {
-      await ensureLoaded(msg.base);
+      await ensureLoaded(msg.base, msg.font);
       self.postMessage({ type: "ready" });
 
     // ---- Frame-sequence conversion path: used to re-encode codecs (AV1,
