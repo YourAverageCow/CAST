@@ -24,7 +24,7 @@ test("createJob has sane defaults", () => {
   assert.equal(job.ttsEngine, null);
   assert.equal(job.musicFile, null);
   assert.equal(job.musicVolume, 0.25);
-  assert.equal(job.titleCardEnabled, false);
+  assert.equal(job.titleCardEnabled, true);
   assert.equal(job.titleCardText, null);
   assert.deepEqual(job.publish, { targets: [], scheduledAt: null, status: "none" });
   assert.ok(job.id);

@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 63;
+const VERSION = 64;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1146,9 +1146,15 @@ function closePlayer() {
   overlay.classList.remove("show");
 }
 function downloadVideo(url) {
+  if (!url) { alert("Nothing to download yet."); return; }
   const a = document.createElement("a");
   a.href = url; a.download = "aitah-story.mp4";
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  document.body.appendChild(a);
+  a.click();
+  // Some browsers (notably Firefox) can drop a programmatic download if the
+  // triggering element is removed from the DOM in the same synchronous
+  // tick as the click — deferring the removal is the standard workaround.
+  setTimeout(() => document.body.removeChild(a), 0);
 }
 function copyVideoLink(url) {
   navigator.clipboard.writeText(url).then(() => showToast("Link copied!"));
@@ -1659,7 +1665,7 @@ function buildBatchCardElement(job) {
       <div class="field-full"><label>Stroke Width</label><input type="number" class="bc-strokeWidth" min="0" max="10"></div>
       <div class="field-full">
         <label style="display:flex;align-items:center;gap:6px;">
-          <input type="checkbox" class="bc-titleCard" style="width:auto;"> Title card
+          <input type="checkbox" class="bc-titleCard" style="width:auto;" ${job.titleCardEnabled ? "checked" : ""}> Title card
         </label>
         <input type="text" class="bc-titleCardText" placeholder="Auto title from story (or type your own)" style="margin-top:6px;">
       </div>

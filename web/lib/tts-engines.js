@@ -119,7 +119,14 @@ const KokoroEngine = {
     const audio = await tts.generate(text, { voice });
     const wavBuffer = audio.toWav();
     const audioBlob = new Blob([wavBuffer], { type: "audio/wav" });
-    const durationSec = await probeAudioDuration(audioBlob);
+    // Parse the WAV header directly (same parseWavDurationSec the ffmpeg
+    // worker later uses on these exact bytes for the render's own duration
+    // bound) instead of probing via <audio>.duration — the DOM probe was
+    // observed to resolve a too-short duration for Kokoro's WAV output,
+    // compressing every word timing and (via the title-card's dynamic
+    // duration calc) cutting the final render short before the real audio
+    // finished. Falls back to the DOM probe only if header parsing fails.
+    const durationSec = parseWavDurationSec(new Uint8Array(wavBuffer)) || await probeAudioDuration(audioBlob);
     return { audioBlob, durationSec };
   },
 };

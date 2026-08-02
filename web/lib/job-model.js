@@ -66,7 +66,7 @@ function createJob(overrides) {
     // doesn't; there's no "global music track" to fall back to.
     musicFile: null,
     musicVolume: 0.25, // 0..1, mixed under the narration track
-    titleCardEnabled: false,
+    titleCardEnabled: true,
     titleCardText: null, // null = auto-extract from the story's first line
 
     resultBlob: null,
