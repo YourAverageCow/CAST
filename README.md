@@ -1,5 +1,7 @@
 # Slopdaddy (Name Pending)
 
+> This is the actively-developed `main` branch, moving toward a standalone local app. The `web` branch is the frozen, zero-install "click a link" browser-only version — the [deployed GitHub Pages site](https://youraveragecow.github.io/Slopdaddy/) builds from `web`, not `main`.
+
 An AI slop video factory for making AITAH story videos. 
 
 ## About
