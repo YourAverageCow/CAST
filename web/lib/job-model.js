@@ -11,7 +11,7 @@
 const JOB_OVERRIDE_FIELDS = [
   "voice", "resW", "resH", "fps",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
-  "captionPreset",
+  "captionPreset", "ttsEngine",
 ];
 
 // Inert today — reserved so a future scheduled-upload feature doesn't need
@@ -58,6 +58,7 @@ function createJob(overrides) {
     strokeColor: null,
     strokeWidth: null,
     captionPreset: null, // "capcut" (one word at a time) | "classic" (grouped phrases)
+    ttsEngine: null, // "piper" | "kokoro" | "openaiTts" | "elevenlabs" | "browserSpeech"
 
     // Music and title card aren't simple scalar overrides (files, booleans)
     // so they don't go through resolveJobSettings' null-means-inherit

@@ -286,7 +286,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     </div>
   </div>
   <div class="settings-section">
-    <h3>Voice</h3>
+    <h3>Narration Voice</h3>
+    <label>TTS Engine</label>
+    <select id="ttsEngine" onchange="onEngineChangeUI()"></select>
+    <p id="engineNote" style="font-size:0.72rem;color:var(--muted);margin:6px 0;"></p>
+    <div id="ttsOpenaiKeyRow" style="display:none;">
+      <label>OpenAI TTS API Key</label>
+      <input type="text" id="ttsOpenaiKey" placeholder="sk-...">
+    </div>
+    <div id="ttsElevenlabsKeyRow" style="display:none;">
+      <label>ElevenLabs API Key</label>
+      <input type="text" id="ttsElevenlabsKey" placeholder="Your ElevenLabs API key">
+    </div>
+    <label style="margin-top:8px;">Voice</label>
     <select id="voice"></select>
   </div>
   <div class="settings-section">
@@ -307,6 +319,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Check how captions/title card actually look without generating a full story or waiting on TTS.</p>
     <label>Sample caption text</label>
     <textarea id="debugSampleText" rows="2">This is a test caption line for checking timing and style.</textarea>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+      <input type="checkbox" id="debugAlsoTestTts" style="width:auto;"> Also test TTS generation (uses the selected engine/voice above)
+    </label>
     <div class="row" style="margin-top:8px;">
       <button class="accent" onclick="previewTitleCard()">Preview Title Card</button>
       <button class="primary" onclick="runDebugTestRender()" id="debugRenderBtn">Test Render (real, ~3s clip)</button>
@@ -446,6 +461,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <script src="lib/captions.js"></script>
 <script src="lib/video-utils.js"></script>
 <script src="lib/job-model.js"></script>
+<script src="lib/tts-engines.js"></script>
 <script src="worker-pool.js"></script>
 <script src="app.js"></script>
 </body>

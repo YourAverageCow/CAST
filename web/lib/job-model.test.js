@@ -5,7 +5,7 @@ const { createJob, resolveJobSettings, makeJobId } = require("./job-model.js");
 const GLOBAL_SETTINGS = {
   voice: "en_US-ryan-medium", resW: 1080, resH: 1920, fps: 30, font: "Arial",
   fontSize: 68, positionY: 0.55, textColor: "white", strokeColor: "black",
-  strokeWidth: 3, captionPreset: "capcut",
+  strokeWidth: 3, captionPreset: "capcut", ttsEngine: "piper",
 };
 
 test("makeJobId returns unique, non-empty ids", () => {
@@ -21,6 +21,7 @@ test("createJob has sane defaults", () => {
   assert.equal(job.bgFile, null);
   assert.equal(job.voice, null);
   assert.equal(job.captionPreset, null);
+  assert.equal(job.ttsEngine, null);
   assert.equal(job.musicFile, null);
   assert.equal(job.musicVolume, 0.25);
   assert.equal(job.titleCardEnabled, false);

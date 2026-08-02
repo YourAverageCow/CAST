@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 58;
+const VERSION = 59;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -17,33 +17,14 @@ let ttsAudio = null;
 let sidebarMusicFile = null; // background music for the sidebar's single-export flow
 
 // ---------- TTS & video engine state ----------
-// libritts_r is audiobook-trained and reads flat/monotone. These are more
-// expressive/energetic Piper voices, verified to actually exist in the
-// rhasspy/piper-voices HuggingFace repo AND to use the standard 256-symbol
-// phoneme table. Our phonemizeRuntime always encodes phonemes with that
-// fixed 256-slot table internally (it doesn't read each voice's own
-// phoneme_id_map), so any voice trained with a different-sized vocabulary
-// (e.g. en_US-ryan-high and en_US-danny-low, both 130 symbols — legacy
-// voices) throws an ONNX Gather out-of-bounds error mid-generation.
-// Deliberately excluded here rather than merely undocumented.
-const PIPER_VOICES = [
-  "en_US-ryan-medium",
-  "en_US-lessac-medium",
-  "en_US-amy-medium",
-  "en_US-hfc_female-medium",
-  "en_US-hfc_male-medium",
-  "en_US-joe-medium",
-  "en_US-kristin-medium",
-  "en_US-norman-medium",
-  "en_US-libritts_r-medium",
-  "en_GB-alan-medium",
-  "en_GB-alba-medium",
-  "en_GB-jenny_dioco-medium",
-  "en_GB-northern_english_male-medium",
-];
-const DEFAULT_VOICE = PIPER_VOICES[0];
+// Piper/Kokoro voice lists and the TTS_ENGINES registry live in
+// web/lib/tts-engines.js — this section just holds the per-engine runtime
+// instances (lazily created, one per engine that needs local init).
 const PIPER_JS = "./vendor/piper-tts-web.js";
+const KOKORO_JS = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/dist/kokoro.web.js";
+const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 let piperEngine = null;
+let kokoroEngine = null;
 
 // ---------- Tiny helpers ----------
 function showToast(msg, duration) {
@@ -91,6 +72,7 @@ const SETTINGS_FIELDS = [
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset",
   "channelName",
+  "ttsEngine", "ttsOpenaiKey", "ttsElevenlabsKey",
 ];
 function saveSettings() {
   try {
@@ -103,36 +85,47 @@ function saveSettings() {
   } catch (e) {}
 }
 
+// Returns the parsed saved-settings object (or null) so init() can restore
+// `voice` after populateVoices() has built that engine's option list —
+// can't set a <select>'s value to an option that doesn't exist yet.
 function loadSettings() {
   try {
     const raw = localStorage.getItem("slopdaddy_settings");
-    if (!raw) return;
+    if (!raw) return null;
     const data = JSON.parse(raw);
-    // Restore everything except model (model dropdown is rebuilt by provider),
-    // then restore model after populateModels runs.
+    // Restore everything except model (rebuilt per-provider) and voice
+    // (rebuilt per-engine) — both restored once their options exist.
     for (const id of SETTINGS_FIELDS) {
       const el = document.getElementById(id);
-      if (el && data[id] !== undefined && id !== "model") el.value = data[id];
+      if (el && data[id] !== undefined && id !== "model" && id !== "voice") el.value = data[id];
     }
     populateModels();
     if (data["model"]) {
       const m = document.getElementById("model");
       if (m && [...m.options].some(o => o.value === data["model"])) m.value = data["model"];
     }
-    // Keep the quick voice selector in sync
-    if (data["voice"]) {
-      const vq = document.getElementById("voiceQuick");
-      if (vq) vq.value = data["voice"];
-    }
-  } catch (e) {}
+    return data;
+  } catch (e) { return null; }
 }
 
 // ---------- Init ----------
+function buildEngineSelect() {
+  const opts = Object.values(TTS_ENGINES).map(e =>
+    `<option value="${e.id}">${escapeHtml(e.label)}</option>`
+  ).join("");
+  $("#ttsEngine").innerHTML = opts;
+}
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  populateVoices(PIPER_VOICES);
-  loadSettings();
+  buildEngineSelect();
+  const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
   populateModels();
+  await populateVoices(getEngine());
+  if (savedData && savedData.voice) {
+    const hasOption = [...$("#voice").options].some(o => o.value === savedData.voice);
+    if (hasOption) { $("#voice").value = savedData.voice; $("#voiceQuick").value = savedData.voice; }
+  }
+  onEngineChangeUI();
   // Save on any settings change
   for (const id of SETTINGS_FIELDS) {
     const el = document.getElementById(id);
@@ -198,28 +191,24 @@ function populateModels() {
 }
 $("#provider").addEventListener("change", populateModels);
 
-const VOICE_LABELS = {
-  "en_US-ryan-medium": "Ryan (US male)",
-  "en_US-lessac-medium": "Lessac (US male, clear)",
-  "en_US-amy-medium": "Amy (US female)",
-  "en_US-hfc_female-medium": "HFC Female (US)",
-  "en_US-hfc_male-medium": "HFC Male (US)",
-  "en_US-joe-medium": "Joe (US male)",
-  "en_US-kristin-medium": "Kristin (US female)",
-  "en_US-norman-medium": "Norman (US male, dramatic)",
-  "en_US-libritts_r-medium": "LibriTTS (US, flat/audiobook)",
-  "en_GB-alan-medium": "Alan (UK male)",
-  "en_GB-alba-medium": "Alba (UK female)",
-  "en_GB-jenny_dioco-medium": "Jenny (UK female)",
-  "en_GB-northern_english_male-medium": "Northern English (UK male)",
-};
-function populateVoices(list) {
-  const opts = list.map(v => `<option value="${v}">${VOICE_LABELS[v] || v}</option>`).join("");
+// Rebuilds #voice/#voiceQuick from the given engine's own voice list —
+// engines have entirely different voices, so this runs on init and every
+// engine change. Async because Browser Speech's list comes from
+// speechSynthesis.getVoices(), which some browsers populate lazily.
+async function populateVoices(engineId) {
+  engineId = engineId || DEFAULT_TTS_ENGINE;
+  const engine = TTS_ENGINES[engineId];
+  const list = await engine.listVoices();
+  const opts = list.map(v => `<option value="${v.id}">${escapeHtml(v.label)}</option>`).join("");
   $("#voice").innerHTML = opts;
   $("#voiceQuick").innerHTML = '<option value="">Use settings voice</option>' + opts;
 }
 function syncVoiceQuick() { const v = $("#voiceQuick").value; if (v) $("#voice").value = v; }
-function getVoice() { syncVoiceQuick(); return $("#voice").value || DEFAULT_VOICE; }
+function getEngine() { return $("#ttsEngine").value || DEFAULT_TTS_ENGINE; }
+function getVoice() {
+  syncVoiceQuick();
+  return $("#voice").value || TTS_ENGINES[getEngine()].defaultVoice() || "";
+}
 
 // ---------- DeepSeek story generation (streaming, client-side) ----------
 async function streamChat(messages, onChunk) {
@@ -625,12 +614,33 @@ async function ensurePiper() {
   return piperEngine;
 }
 
-// Piper runs on a single shared engine instance; concurrent-call safety
-// isn't guaranteed (unverified, and the ONNX session inside it is stateful),
-// so every generateSpeech call funnels through this one-at-a-time queue —
-// including from parallel batch jobs, whose video rendering is otherwise
-// fully concurrent. TTS is fast relative to rendering, so serializing it
-// costs little even under a large batch.
+// Kokoro (kokoro-js) mirrors Piper's lazy-singleton pattern: one shared
+// engine instance, model weights fetched from HuggingFace by the library
+// itself on first use and cached by the browser (same "don't vendor large
+// binaries that already have a good CDN/HF home" approach Piper's own voice
+// files use). dtype "q8" is the quantized variant — ~86MB vs. ~326MB fp32,
+// no meaningful quality loss per the model's own documentation.
+async function ensureKokoro() {
+  if (kokoroEngine) return kokoroEngine;
+  showDownloadToast("Preparing Kokoro TTS engine (first time only, ~90MB)...");
+  try {
+    const mod = await import(KOKORO_JS);
+    const { KokoroTTS } = mod;
+    kokoroEngine = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, { dtype: "q8" });
+  } catch (e) {
+    hideDownloadToast();
+    throw e;
+  }
+  hideDownloadToast();
+  return kokoroEngine;
+}
+
+// Every engine's ONNX/network session gets funneled through this one-at-a-
+// time queue — Piper/Kokoro's shared instances aren't verified concurrency-
+// safe, cloud engines benefit from not hammering rate limits, and Browser
+// Speech literally can't speak two utterances at once through one
+// speechSynthesis instance. TTS is fast relative to rendering, so
+// serializing it costs little even under a large parallel batch.
 let ttsQueueTail = Promise.resolve();
 function queueTTS(fn) {
   const run = ttsQueueTail.then(fn, fn);
@@ -641,22 +651,26 @@ function queueTTS(fn) {
   return run;
 }
 
-async function generateSpeech(text, voice) {
+async function generateSpeech(text, voice, engineId) {
+  engineId = engineId || getEngine();
+  const engine = TTS_ENGINES[engineId];
+  if (!engine) throw new Error("Unknown TTS engine: " + engineId);
   voice = voice || getVoice();
-  // Sanitize again here as a safety net — piper's tokenizer uses TextEncoder
-  // and throws "String contains an invalid character" on any lone surrogate.
+  // Sanitize again here as a safety net — most engines' tokenizers use
+  // TextEncoder and throw "String contains an invalid character" on any
+  // lone surrogate.
   text = sanitizeText(text);
   if (!text) throw new Error("Story text is empty after cleaning.");
+  const config = getEngineConfig(engineId);
+  if (engine.needsApiKey && !config) return Promise.reject(new Error("Missing API key for " + engine.label));
   return queueTTS(async () => {
-    const engine = await ensurePiper();
-    showDownloadToast(`Generating voice...`);
+    showDownloadToast(`Generating voice (${engine.label})...`);
     try {
-      const response = await engine.generate(text, voice, 0);
+      const { audioBlob, durationSec } = await engine.generate(text, voice, config);
       hideDownloadToast();
-      const audioUrl = URL.createObjectURL(response.file);
-      // Piper phoneme data doesn't expose per-word timestamps directly;
-      // estimate word timings from the audio duration.
-      const durationSec = (response.duration || 0) / 1000;
+      const audioUrl = URL.createObjectURL(audioBlob);
+      // Real per-word timestamps aren't available from any of these engines
+      // — estimate word timings from the total audio duration instead.
       const words = computeWordTimings(text, durationSec);
       return { audioUrl, words };
     } catch (e) {
@@ -783,7 +797,45 @@ function getGlobalSettings() {
     strokeWidth: parseInt($("#strokeWidth").value) || 3,
     captionPreset: $("#captionPreset").value || "capcut",
     channelName: $("#channelName").value.trim() || "Anonymous",
+    ttsEngine: getEngine(),
   };
+}
+
+// API-key/config bundle a TTS engine's generate() needs, per-engine. Kept
+// fully separate from the story-gen #apiKey/#provider fields — a user might
+// use DeepSeek for stories and OpenAI for narration at the same time.
+function getEngineConfig(engineId) {
+  if (engineId === "openaiTts") {
+    const key = $("#ttsOpenaiKey").value.trim();
+    if (!key) { alert("Enter an OpenAI API key in Settings → Narration Voice first."); return null; }
+    return { apiKey: key };
+  }
+  if (engineId === "elevenlabs") {
+    const key = $("#ttsElevenlabsKey").value.trim();
+    if (!key) { alert("Enter an ElevenLabs API key in Settings → Narration Voice first."); return null; }
+    return { apiKey: key };
+  }
+  return {};
+}
+
+// Shows/hides the API key fields for whichever engine is selected, updates
+// the reliability note, and rebuilds the voice list — call whenever the
+// engine changes (init, settings #ttsEngine change, or a batch card's own
+// engine override).
+async function onEngineChangeUI() {
+  const engineId = getEngine();
+  const engine = TTS_ENGINES[engineId];
+  $("#ttsOpenaiKeyRow").style.display = engineId === "openaiTts" ? "" : "none";
+  $("#ttsElevenlabsKeyRow").style.display = engineId === "elevenlabs" ? "" : "none";
+  const notes = {
+    piper: "Runs fully offline in your browser. Free, no API key.",
+    kokoro: "Runs fully offline in your browser, higher quality than Piper. Free, no API key — first use downloads a ~90MB model.",
+    openaiTts: "Cloud API — costs money per character generated.",
+    elevenlabs: "Cloud API — free tier (~10k characters/month, requires attribution, no commercial use) then paid.",
+    browserSpeech: "Uses your OS's built-in voices. Needs a one-time \"share tab audio\" permission prompt to record narration — less reliable in Firefox than Chrome, and quality varies a lot by OS.",
+  };
+  $("#engineNote").textContent = notes[engineId] || "";
+  await populateVoices(engineId);
 }
 
 // Runs one job end-to-end: transcode (if needed) -> voice -> render. Mutates
@@ -819,7 +871,7 @@ async function runJob(job, globalSettings, onUpdate) {
     }
 
     update({ status: "voice", progressPct: 0, progressLabel: "Generating voice..." });
-    const { audioUrl, words } = await generateSpeech(story, settings.voice);
+    const { audioUrl, words } = await generateSpeech(story, settings.voice, settings.ttsEngine);
     // "capcut" = one bold word at a time; "classic" = grouped phrases
     // (the original style). Both feed the same per-cue drawtext+enable()
     // render path — this only changes how cues are grouped, not how
@@ -1305,8 +1357,16 @@ async function runDebugTestRender() {
   statusEl.textContent = "Rendering test clip...";
   try {
     const sampleText = sanitizeText($("#debugSampleText").value.trim()) || "Debug test caption.";
-    const words = computeWordTimings(sampleText, 0); // ~150wpm fallback timing, no TTS needed
     const globalSettings = getGlobalSettings();
+
+    let words, audioUrl = null;
+    if ($("#debugAlsoTestTts").checked) {
+      statusEl.textContent = `Testing TTS (${TTS_ENGINES[globalSettings.ttsEngine].label})...`;
+      ({ audioUrl, words } = await generateSpeech(sampleText, globalSettings.voice, globalSettings.ttsEngine));
+      statusEl.textContent = "TTS ok — rendering test clip...";
+    } else {
+      words = computeWordTimings(sampleText, 0); // ~150wpm fallback timing, no TTS needed
+    }
     const rawSubs = globalSettings.captionPreset === "classic" ? buildSubsFromWords(words) : buildWordCues(words);
     let subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
     const narrationSec = Math.max(1, (subs.length ? subs[subs.length - 1].end : 3) + 0.5);
@@ -1335,7 +1395,9 @@ async function runDebugTestRender() {
     }
 
     const bg = new Uint8Array(await bgFile.arrayBuffer());
-    const audio = makeSilentWavBytes(narrationSec);
+    const audio = audioUrl
+      ? new Uint8Array(await (await fetch(audioUrl)).arrayBuffer())
+      : makeSilentWavBytes(narrationSec);
     const style = {
       fontSize: parseInt(globalSettings.fontSize) || 68,
       textColor: globalSettings.textColor,
@@ -1425,10 +1487,22 @@ function reindexBatchCards() {
 // Builds one batch card's DOM once and wires all events directly to the
 // job object — inputs write straight into `job.*` on every keystroke rather
 // than going through a render/diff cycle, so typing never loses focus.
-function buildBatchCardElement(job) {
-  const voiceOpts = ['<option value="">Use settings voice</option>']
-    .concat(PIPER_VOICES.map(v => `<option value="${v}">${VOICE_LABELS[v] || v}</option>`))
+// Rebuilds one batch card's own voice <select> for whichever engine it's
+// currently using (its own override, or the global default) — same
+// async-listVoices() reality as the settings panel's populateVoices().
+async function populateBatchCardVoices(engineId, selectEl) {
+  const engine = TTS_ENGINES[engineId] || TTS_ENGINES[DEFAULT_TTS_ENGINE];
+  const list = await engine.listVoices();
+  const opts = ['<option value="">Use settings voice</option>']
+    .concat(list.map(v => `<option value="${v.id}">${escapeHtml(v.label)}</option>`))
     .join("");
+  selectEl.innerHTML = opts;
+}
+
+function buildBatchCardElement(job) {
+  const engineOpts = Object.values(TTS_ENGINES).map(e =>
+    `<option value="${e.id}">${escapeHtml(e.label)}</option>`
+  ).join("");
 
   const div = document.createElement("div");
   div.className = "batch-card";
@@ -1450,9 +1524,15 @@ function buildBatchCardElement(job) {
     <div class="bc-upload-area">Click to upload</div>
     <input type="file" class="bc-upload-input" accept="video/*" style="display:none">
     <label>Voice</label>
-    <select class="bc-voice">${voiceOpts}</select>
+    <select class="bc-voice"><option value="">Use settings voice</option></select>
     <button class="bc-customize-toggle">Customize style &#9662;</button>
     <div class="bc-customize" style="display:none">
+      <div class="field-full"><label>TTS engine</label>
+        <select class="bc-ttsEngine">
+          <option value="">Use settings engine</option>
+          ${engineOpts}
+        </select>
+      </div>
       <div class="field-full"><label>Caption preset</label>
         <select class="bc-captionPreset">
           <option value="">Use settings preset</option>
@@ -1513,6 +1593,12 @@ function buildBatchCardElement(job) {
 
   div.querySelector(".bc-voice").addEventListener("change", (e) => { job.voice = e.target.value || null; });
   div.querySelector(".bc-captionPreset").addEventListener("change", (e) => { job.captionPreset = e.target.value || null; });
+  div.querySelector(".bc-ttsEngine").addEventListener("change", (e) => {
+    job.ttsEngine = e.target.value || null;
+    job.voice = null; // stale voice from the old engine's list wouldn't be valid for the new one
+    populateBatchCardVoices(job.ttsEngine || DEFAULT_TTS_ENGINE, div.querySelector(".bc-voice"));
+  });
+  populateBatchCardVoices(job.ttsEngine || DEFAULT_TTS_ENGINE, div.querySelector(".bc-voice"));
 
   div.querySelector(".bc-titleCard").addEventListener("change", (e) => { job.titleCardEnabled = e.target.checked; });
   div.querySelector(".bc-titleCardText").addEventListener("input", (e) => { job.titleCardText = e.target.value || null; });
