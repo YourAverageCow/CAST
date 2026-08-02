@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 60;
+const VERSION = 61;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -127,6 +127,7 @@ async function init() {
     if (hasOption) { $("#voice").value = savedData.voice; $("#voiceQuick").value = savedData.voice; }
   }
   onEngineChangeUI();
+  buildPresetSelects();
   // Save on any settings change
   for (const id of SETTINGS_FIELDS) {
     const el = document.getElementById(id);
@@ -413,6 +414,49 @@ function clearMusic() {
   $("#musicInput").value = "";
   $("#musicStatus").textContent = "No music selected.";
 }
+
+// ---------- Preset assets (repo-hosted videos/music, picked instead of uploaded) ----------
+// Populates the preset <select>s from lib/presets.js's manifest and hides
+// each row entirely when its list is empty, so an unconfigured preset
+// library shows no dead UI. Called once from init(); the manifest is
+// static for the app's lifetime so batch-card templates read the same
+// lists directly rather than re-populating per card.
+function buildPresetSelects() {
+  const videoRow = $("#presetVideoRow");
+  if (videoRow) {
+    videoRow.style.display = PRESET_VIDEOS.length ? "" : "none";
+    const opts = PRESET_VIDEOS.map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
+    $("#presetVideoSelect").innerHTML = '<option value="">Or pick a preset...</option>' + opts;
+  }
+  const musicRow = $("#presetMusicRow");
+  if (musicRow) {
+    musicRow.style.display = PRESET_MUSIC.length ? "" : "none";
+    const opts = PRESET_MUSIC.map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
+    $("#presetMusicSelect").innerHTML = '<option value="">Or pick a preset...</option>' + opts;
+  }
+}
+async function fetchPresetFile(preset, fallbackType) {
+  const blob = await fetch(preset.path).then(r => r.blob());
+  return new File([blob], preset.label, { type: blob.type || fallbackType });
+}
+async function selectPresetVideo(id) {
+  if (!id) return;
+  const preset = PRESET_VIDEOS.find(p => p.id === id);
+  if (!preset) return;
+  showToast(`Loading preset "${preset.label}"...`);
+  const file = await fetchPresetFile(preset, "video/mp4");
+  await setBackground(file, preset.label);
+}
+async function selectPresetMusic(id) {
+  if (!id) return;
+  const preset = PRESET_MUSIC.find(p => p.id === id);
+  if (!preset) return;
+  showToast(`Loading preset "${preset.label}"...`);
+  const file = await fetchPresetFile(preset, "audio/mpeg");
+  sidebarMusicFile = file;
+  $("#musicStatus").textContent = preset.label;
+}
+
 async function setBackground(file, label) {
   currentVideo = file;
   currentVideoUnsupportedCodec = null;
@@ -1516,6 +1560,8 @@ function buildBatchCardElement(job) {
   const engineOpts = Object.values(TTS_ENGINES).map(e =>
     `<option value="${e.id}">${escapeHtml(e.label)}</option>`
   ).join("");
+  const presetVideoOpts = PRESET_VIDEOS.map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
+  const presetMusicOpts = PRESET_MUSIC.map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
 
   const div = document.createElement("div");
   div.className = "batch-card";
@@ -1536,6 +1582,11 @@ function buildBatchCardElement(job) {
     <label>Background video</label>
     <div class="bc-upload-area">Click to upload</div>
     <input type="file" class="bc-upload-input" accept="video/*" style="display:none">
+    ${PRESET_VIDEOS.length ? `
+    <select class="bc-presetVideo" style="margin-top:6px;">
+      <option value="">Or pick a preset...</option>
+      ${presetVideoOpts}
+    </select>` : ""}
     <label>Voice</label>
     <select class="bc-voice"><option value="">Use settings voice</option></select>
     <button class="bc-customize-toggle">Customize style &#9662;</button>
@@ -1576,6 +1627,11 @@ function buildBatchCardElement(job) {
           <button class="bc-music-clear" style="flex:1;">None</button>
         </div>
         <p class="bc-music-status" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
+        ${PRESET_MUSIC.length ? `
+        <select class="bc-presetMusic" style="margin-top:6px;">
+          <option value="">Or pick a preset...</option>
+          ${presetMusicOpts}
+        </select>` : ""}
         <input type="range" class="bc-musicVolume" min="0" max="1" step="0.05" value="0.25">
       </div>
     </div>
@@ -1603,6 +1659,18 @@ function buildBatchCardElement(job) {
     const file = e.dataTransfer.files[0];
     if (file && file.type.startsWith("video/")) setBatchCardBackground(job, file, div);
   });
+  const presetVideoSel = div.querySelector(".bc-presetVideo");
+  if (presetVideoSel) {
+    presetVideoSel.addEventListener("change", async (e) => {
+      const id = e.target.value;
+      if (!id) return;
+      const preset = PRESET_VIDEOS.find(p => p.id === id);
+      if (!preset) return;
+      showToast(`Loading preset "${preset.label}"...`);
+      const file = await fetchPresetFile(preset, "video/mp4");
+      await setBatchCardBackground(job, file, div);
+    });
+  }
 
   div.querySelector(".bc-voice").addEventListener("change", (e) => { job.voice = e.target.value || null; });
   div.querySelector(".bc-captionPreset").addEventListener("change", (e) => { job.captionPreset = e.target.value || null; });
@@ -1630,6 +1698,19 @@ function buildBatchCardElement(job) {
     musicInput.value = "";
     musicStatus.textContent = "No music selected.";
   };
+  const presetMusicSel = div.querySelector(".bc-presetMusic");
+  if (presetMusicSel) {
+    presetMusicSel.addEventListener("change", async (e) => {
+      const id = e.target.value;
+      if (!id) return;
+      const preset = PRESET_MUSIC.find(p => p.id === id);
+      if (!preset) return;
+      showToast(`Loading preset "${preset.label}"...`);
+      const file = await fetchPresetFile(preset, "audio/mpeg");
+      job.musicFile = file;
+      musicStatus.textContent = preset.label;
+    });
+  }
   div.querySelector(".bc-musicVolume").addEventListener("input", (e) => { job.musicVolume = parseFloat(e.target.value); });
 
   const customizeToggle = div.querySelector(".bc-customize-toggle");

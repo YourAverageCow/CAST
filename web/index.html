@@ -346,6 +346,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <p id="uploadStatus">Click to upload background video</p>
   </div>
   <input type="file" id="videoInput" accept="video/*" style="display:none" onchange="handleVideoUpload(this)">
+  <div id="presetVideoRow" style="display:none;margin-top:6px;">
+    <select id="presetVideoSelect" onchange="selectPresetVideo(this.value)">
+      <option value="">Or pick a preset...</option>
+    </select>
+  </div>
 
   <h2><span class="step-num">2</span>Story<span class="step-bar"></span></h2>
   <label>Premise / Idea</label>
@@ -380,6 +385,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <button onclick="clearMusic()" style="flex:1;">None</button>
   </div>
   <p id="musicStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
+  <div id="presetMusicRow" style="display:none;margin-top:6px;">
+    <select id="presetMusicSelect" onchange="selectPresetMusic(this.value)">
+      <option value="">Or pick a preset...</option>
+    </select>
+  </div>
   <label style="margin-top:4px;">Music Volume</label>
   <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25">
 
@@ -465,6 +475,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <script src="lib/video-utils.js"></script>
 <script src="lib/job-model.js"></script>
 <script src="lib/tts-engines.js"></script>
+<script src="lib/presets.js"></script>
 <script src="worker-pool.js"></script>
 <script src="app.js"></script>
 </body>
