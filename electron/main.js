@@ -7,8 +7,17 @@
 // BrowserWindow at.
 const { app, BrowserWindow } = require("electron");
 const path = require("path");
+const fs = require("fs");
 
 const PORT = 8123;
+// Packaged builds get their icon from electron-builder's mac/win/linux
+// config (build/icon.icns|ico|png) automatically — this is only for the
+// window/taskbar icon during unpackaged `npm start` runs, where Electron
+// would otherwise show its own default icon. Guarded with existsSync since
+// icon-loading failures here are purely cosmetic and must never be allowed
+// to block the backend/window from starting.
+const ICON_PATH_CANDIDATE = path.join(__dirname, "..", "build", "icon.png");
+const ICON_PATH = fs.existsSync(ICON_PATH_CANDIDATE) ? ICON_PATH_CANDIDATE : undefined;
 
 function startBackend() {
   // server.js's own `server.on("error", ...)` already treats EADDRINUSE as
@@ -43,6 +52,7 @@ async function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: "Slopdaddy",
+    icon: ICON_PATH,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -59,6 +69,15 @@ async function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // macOS's dock reads BrowserWindow's `icon` option inconsistently for
+  // unpackaged (`npm start`) runs — packaged builds don't need this, since
+  // electron-builder embeds build/icon.icns into the app bundle itself.
+  // Purely cosmetic: never let a missing/unreadable icon file block startup
+  // (confirmed live — an unhandled rejection here previously took down the
+  // whole startup sequence before the backend/window ever got a chance to run).
+  try {
+    if (ICON_PATH && process.platform === "darwin" && app.dock) app.dock.setIcon(ICON_PATH);
+  } catch (e) { /* cosmetic only */ }
   startBackend();
   createWindow();
 
