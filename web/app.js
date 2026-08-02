@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 65;
+const VERSION = 66;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -735,12 +735,15 @@ async function generateSpeech(text, voice, engineId) {
   return queueTTS(async () => {
     showDownloadToast(`Generating voice (${engine.label})...`);
     try {
-      const { audioBlob, durationSec } = await engine.generate(text, voice, config);
+      const { audioBlob, durationSec, wordTimings } = await engine.generate(text, voice, config);
       hideDownloadToast();
       const audioUrl = URL.createObjectURL(audioBlob);
-      // Real per-word timestamps aren't available from any of these engines
-      // — estimate word timings from the total audio duration instead.
-      const words = computeWordTimings(text, durationSec);
+      // Prefer an engine's own real per-word/character alignment (currently
+      // ElevenLabs, and Browser Speech when the browser's boundary events
+      // line up 1:1 with our tokenization) over the proportional-estimate
+      // fallback, which is what desyncs on number-heavy text since it has
+      // no access to the actual audio waveform.
+      const words = (wordTimings && wordTimings.length) ? wordTimings : computeWordTimings(text, durationSec);
       return { audioUrl, words };
     } catch (e) {
       hideDownloadToast();

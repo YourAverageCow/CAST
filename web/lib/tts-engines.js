@@ -9,7 +9,13 @@
 //   { id, label, isFree, needsApiKey, requiresOncePerSessionPermission,
 //     listVoices() -> [{id,label}] | Promise<[{id,label}]>,
 //     defaultVoice() -> id,
-//     async generate(text, voice, config) -> { audioBlob, durationSec } }
+//     async generate(text, voice, config) ->
+//       { audioBlob, durationSec, wordTimings?: [{text,start,end}] } }
+// wordTimings is optional — real per-word/character alignment when an
+// engine can provide it (ElevenLabs' /with-timestamps, Browser Speech's
+// native boundary events), tokenized identically to
+// captions.js's computeWordTimings so it's a drop-in replacement. app.js
+// falls back to computeWordTimings' proportional estimate when absent.
 //
 // Engines that need app.js-level setup (Piper's ensurePiper(), Kokoro's
 // ensureKokoro()) call those as bare globals at CALL time, not parse time —
@@ -182,15 +188,33 @@ const ElevenLabsEngine = {
   defaultVoice() { return ELEVENLABS_VOICES[0].id; },
   async generate(text, voice, config) {
     if (!config || !config.apiKey) throw new Error("ElevenLabs needs an API key (Settings → Narration Voice).");
-    const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}`, {
+    // /with-timestamps (vs. the plain endpoint) returns real character-level
+    // forced alignment alongside the audio — base64 audio + JSON, not raw
+    // bytes — which lets captions land exactly when each word is actually
+    // spoken instead of falling back to computeWordTimings' proportional
+    // estimate.
+    const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "xi-api-key": config.apiKey },
       body: JSON.stringify({ text, model_id: "eleven_multilingual_v2" }),
     });
     if (!resp.ok) throw new Error(`ElevenLabs error: ${resp.status} — check your API key.`);
-    const audioBlob = await resp.blob();
-    const durationSec = await probeAudioDuration(audioBlob);
-    return { audioBlob, durationSec };
+    const data = await resp.json();
+    const audioBytes = Uint8Array.from(atob(data.audio_base64), c => c.charCodeAt(0));
+    const audioBlob = new Blob([audioBytes], { type: "audio/mpeg" });
+
+    let wordTimings = null;
+    let durationSec = 0;
+    const alignment = data.alignment;
+    if (alignment && alignment.characters && alignment.characters.length) {
+      wordTimings = alignWordsFromCharacters(
+        text, alignment.characters,
+        alignment.character_start_times_seconds, alignment.character_end_times_seconds
+      );
+      durationSec = alignment.character_end_times_seconds[alignment.character_end_times_seconds.length - 1] || 0;
+    }
+    if (!durationSec) durationSec = await probeAudioDuration(audioBlob);
+    return { audioBlob, durationSec, wordTimings };
   },
 };
 
@@ -261,12 +285,24 @@ const BrowserSpeechEngine = {
       recorder.onstop = resolve;
       recorder.onerror = (e) => reject(e.error || new Error("MediaRecorder failed"));
     });
+    // SpeechSynthesisUtterance fires a native 'boundary' event per word (in
+    // supporting browsers — Chrome/Edge; not guaranteed everywhere) with a
+    // real elapsed-time offset, for free, during the exact recording window
+    // above — real alignment data instead of computeWordTimings' estimate.
+    // charIndex marks a word's START only; used below (relative to
+    // recording start, which happens right before speak()) to build
+    // {charIndex, elapsedTime} pairs.
+    const boundaries = [];
     recorder.start();
     try {
       const voices = await getSpeechVoicesAsync();
       const utter = new SpeechSynthesisUtterance(text);
       const voice = voices.find(v => v.name === voiceName);
       if (voice) utter.voice = voice;
+      utter.onboundary = (e) => {
+        if (e.name && e.name !== "word") return; // some browsers also fire sentence boundaries
+        boundaries.push({ charIndex: e.charIndex, elapsedTime: e.elapsedTime });
+      };
       const spoken = new Promise((resolve, reject) => {
         utter.onend = resolve;
         utter.onerror = (e) => reject(new Error("Speech synthesis failed: " + (e.error || "unknown")));
@@ -279,7 +315,23 @@ const BrowserSpeechEngine = {
     await stopped;
     const audioBlob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
     const durationSec = await probeAudioDuration(audioBlob);
-    return { audioBlob, durationSec };
+
+    // Only trust the boundary events if there's exactly one per word this
+    // app's own tokenizer would produce — browsers don't guarantee 'word'
+    // boundaries line up 1:1 with whitespace-tokenization (numbers,
+    // contractions, locale quirks), and a mismatched mapping would silently
+    // assign wrong words to wrong times, worse than just estimating.
+    let wordTimings = null;
+    const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
+    const allWords = paragraphs.flatMap(splitParagraphWords);
+    if (boundaries.length === allWords.length) {
+      wordTimings = allWords.map((w, i) => ({
+        text: w,
+        start: boundaries[i].elapsedTime,
+        end: i + 1 < allWords.length ? boundaries[i + 1].elapsedTime : durationSec,
+      }));
+    }
+    return { audioBlob, durationSec, wordTimings };
   },
 };
 

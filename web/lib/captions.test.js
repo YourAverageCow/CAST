@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { computeWordTimings, countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText } = require("./captions.js");
+const { computeWordTimings, alignWordsFromCharacters, countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText } = require("./captions.js");
 
 test("computeWordTimings distributes duration proportionally to word length", () => {
   const times = computeWordTimings("a bb ccc", 6);
@@ -28,6 +28,44 @@ test("computeWordTimings ignores lone punctuation tokens as words", () => {
 test("computeWordTimings respects paragraph breaks (still flattens to one timeline)", () => {
   const times = computeWordTimings("hi there\n\nbye now", 4);
   assert.deepEqual(times.map(t => t.text), ["hi", "there", "bye", "now"]);
+});
+
+test("computeWordTimings gives digit-heavy tokens extra weight over same-length plain words", () => {
+  const times = computeWordTimings("word 15,000", 10);
+  const plain = times[0].end - times[0].start;
+  const digitToken = times[1].end - times[1].start; // same char length as "word" (4) + comma
+  assert.ok(digitToken > plain);
+});
+
+test("computeWordTimings gives sentence-ending words more weight than mid-sentence words of the same length", () => {
+  const times = computeWordTimings("stop. then go", 10);
+  const sentenceEnd = times[0].end - times[0].start; // "stop." (5 chars)
+  const midSentence = times[1].end - times[1].start; // "then" (4 chars) — close in length
+  // "stop." is only 1 char longer than "then" by raw length, but the
+  // sentence-end pause weight should make its share noticeably bigger.
+  assert.ok((sentenceEnd - midSentence) > 0.05 * 10);
+});
+
+test("alignWordsFromCharacters builds real per-word timing from character alignment", () => {
+  const text = "hi there";
+  const characters = [..."hi there"];
+  const startTimes = characters.map((_, i) => i * 0.1);
+  const endTimes = characters.map((_, i) => (i + 1) * 0.1);
+  const words = alignWordsFromCharacters(text, characters, startTimes, endTimes);
+  assert.deepEqual(words.map(w => w.text), ["hi", "there"]);
+  assert.equal(words[0].start, 0);
+  assert.equal(words[0].end, 0.2); // end time of the 2nd char ('i', index 1)
+  assert.ok(Math.abs(words[1].start - 0.3) < 1e-9); // start time of 't' (index 3)
+});
+
+test("alignWordsFromCharacters returns null when a word can't be located in the aligned text", () => {
+  const words = alignWordsFromCharacters("hello world", [..."goodbye"], [0,0,0,0,0,0,0], [1,1,1,1,1,1,1]);
+  assert.equal(words, null);
+});
+
+test("alignWordsFromCharacters returns null on mismatched array lengths", () => {
+  const words = alignWordsFromCharacters("hi", ["h", "i"], [0], [1, 1]);
+  assert.equal(words, null);
 });
 
 test("countFirstParagraphWords counts only the first paragraph", () => {
