@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 61;
+const VERSION = 62;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -435,26 +435,47 @@ function buildPresetSelects() {
     $("#presetMusicSelect").innerHTML = '<option value="">Or pick a preset...</option>' + opts;
   }
 }
+// `preset.path` may be same-origin or a full cross-origin URL (see
+// lib/presets.js) — a cross-origin fetch can fail (CORS/CORP block, network
+// error) far more often than a same-origin one, so this always throws a
+// clear, preset-identifying error rather than letting a raw fetch error
+// (or an opaque failed response) reach the caller.
 async function fetchPresetFile(preset, fallbackType) {
-  const blob = await fetch(preset.path).then(r => r.blob());
-  return new File([blob], preset.label, { type: blob.type || fallbackType });
+  try {
+    const resp = await fetch(preset.path);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    return new File([blob], preset.label, { type: blob.type || fallbackType });
+  } catch (e) {
+    throw new Error(`Failed to load preset "${preset.label}": ${e.message}`);
+  }
 }
-async function selectPresetVideo(id) {
+async function selectPresetVideo(id, selectEl) {
   if (!id) return;
   const preset = PRESET_VIDEOS.find(p => p.id === id);
   if (!preset) return;
   showToast(`Loading preset "${preset.label}"...`);
-  const file = await fetchPresetFile(preset, "video/mp4");
-  await setBackground(file, preset.label);
+  try {
+    const file = await fetchPresetFile(preset, "video/mp4");
+    await setBackground(file, preset.label);
+  } catch (e) {
+    alert(e.message);
+    if (selectEl) selectEl.value = "";
+  }
 }
-async function selectPresetMusic(id) {
+async function selectPresetMusic(id, selectEl) {
   if (!id) return;
   const preset = PRESET_MUSIC.find(p => p.id === id);
   if (!preset) return;
   showToast(`Loading preset "${preset.label}"...`);
-  const file = await fetchPresetFile(preset, "audio/mpeg");
-  sidebarMusicFile = file;
-  $("#musicStatus").textContent = preset.label;
+  try {
+    const file = await fetchPresetFile(preset, "audio/mpeg");
+    sidebarMusicFile = file;
+    $("#musicStatus").textContent = preset.label;
+  } catch (e) {
+    alert(e.message);
+    if (selectEl) selectEl.value = "";
+  }
 }
 
 async function setBackground(file, label) {
@@ -1667,8 +1688,13 @@ function buildBatchCardElement(job) {
       const preset = PRESET_VIDEOS.find(p => p.id === id);
       if (!preset) return;
       showToast(`Loading preset "${preset.label}"...`);
-      const file = await fetchPresetFile(preset, "video/mp4");
-      await setBatchCardBackground(job, file, div);
+      try {
+        const file = await fetchPresetFile(preset, "video/mp4");
+        await setBatchCardBackground(job, file, div);
+      } catch (err) {
+        alert(err.message);
+        e.target.value = "";
+      }
     });
   }
 
@@ -1706,9 +1732,14 @@ function buildBatchCardElement(job) {
       const preset = PRESET_MUSIC.find(p => p.id === id);
       if (!preset) return;
       showToast(`Loading preset "${preset.label}"...`);
-      const file = await fetchPresetFile(preset, "audio/mpeg");
-      job.musicFile = file;
-      musicStatus.textContent = preset.label;
+      try {
+        const file = await fetchPresetFile(preset, "audio/mpeg");
+        job.musicFile = file;
+        musicStatus.textContent = preset.label;
+      } catch (err) {
+        alert(err.message);
+        e.target.value = "";
+      }
     });
   }
   div.querySelector(".bc-musicVolume").addEventListener("input", (e) => { job.musicVolume = parseFloat(e.target.value); });

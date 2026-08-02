@@ -347,7 +347,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   </div>
   <input type="file" id="videoInput" accept="video/*" style="display:none" onchange="handleVideoUpload(this)">
   <div id="presetVideoRow" style="display:none;margin-top:6px;">
-    <select id="presetVideoSelect" onchange="selectPresetVideo(this.value)">
+    <select id="presetVideoSelect" onchange="selectPresetVideo(this.value, this)">
       <option value="">Or pick a preset...</option>
     </select>
   </div>
@@ -386,7 +386,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   </div>
   <p id="musicStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
   <div id="presetMusicRow" style="display:none;margin-top:6px;">
-    <select id="presetMusicSelect" onchange="selectPresetMusic(this.value)">
+    <select id="presetMusicSelect" onchange="selectPresetMusic(this.value, this)">
       <option value="">Or pick a preset...</option>
     </select>
   </div>
