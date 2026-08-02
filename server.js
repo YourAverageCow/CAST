@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Zero-install static server for the web version.
+// Static server for the web version, PLUS (new) a native rendering backend.
 //
 // Run:  node server.js
 // Then open http://localhost:8123
@@ -8,12 +8,245 @@
 // A real HTTP server (not a file:// open) is required because the app needs
 // COOP/COEP headers for cross-origin isolation (SharedArrayBuffer, threaded
 // wasm) — browsers won't grant that to files opened directly from disk.
+//
+// This file used to be pure static serving. It now also exposes a render
+// backend that shells out to the user's own installed `ffmpeg` instead of
+// ffmpeg.wasm — real native rendering is faster and doesn't hang the way the
+// WASM multi-thread core occasionally does. This is purely additive: the
+// deployed GitHub Pages build has no server, so it always falls back to the
+// original WASM path automatically (see web/app.js's native-probe-then-
+// fallback logic) — nothing here changes what that build does.
+//
+// Deliberately zero npm dependencies, matching the rest of this repo — the
+// render path reuses web/lib/ffmpeg-filters.js's pure filter-graph builders
+// directly via require() (already Node-compatible; that's how its own tests
+// run) and only Node builtins (http/fs/path/child_process/crypto) otherwise.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
+const { execFile, spawn } = require("child_process");
 
 const PORT = 8123;
 const ROOT = path.join(__dirname, "web");
+const FONT_PATH = path.join(ROOT, "vendor", "fonts", "DejaVuSans.ttf");
+
+const {
+  safeColor, buildCaptionCues, buildDrawtextFilterChain,
+  buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
+} = require(path.join(ROOT, "lib", "ffmpeg-filters.js"));
+
+// ---------- ffmpeg availability ----------
+// Not just "does `ffmpeg` exist" — captions are burned in via the drawtext
+// filter, which needs ffmpeg built with libfreetype. Plenty of real ffmpeg
+// installs (confirmed on this exact machine's homebrew build) omit it, so
+// checking `-version` alone would report "available" and then fail every
+// single render with an opaque "No such filter" error. Treat "no drawtext"
+// the same as "no ffmpeg" — /render-capability reports unavailable either
+// way, and the client falls back to the WASM path automatically, which
+// bundles its own drawtext-capable ffmpeg core.
+let ffmpegAvailable = null; // null = not checked yet, else boolean
+function checkFfmpeg(cb) {
+  if (ffmpegAvailable !== null) { cb(ffmpegAvailable); return; }
+  execFile("ffmpeg", ["-filters"], (err, stdout) => {
+    ffmpegAvailable = !err && /drawtext/.test(stdout || "");
+    cb(ffmpegAvailable);
+  });
+}
+
+// ---------- render concurrency limiter ----------
+// Mirrors FFmpegWorkerPool's job (web/worker-pool.js) for native processes —
+// batch "Generate All" can fire off several renders at once; cap how many
+// real ffmpeg subprocesses run concurrently so they don't oversubscribe the
+// CPU. One less than the core count, minimum 1, matches typical guidance for
+// leaving a core free for the OS/UI.
+const MAX_CONCURRENT_RENDERS = Math.max(1, os.cpus().length - 1);
+let activeRenders = 0;
+const renderQueue = [];
+function acquireRenderSlot() {
+  return new Promise((resolve) => {
+    const tryAcquire = () => {
+      if (activeRenders < MAX_CONCURRENT_RENDERS) {
+        activeRenders++;
+        resolve();
+      } else {
+        renderQueue.push(tryAcquire);
+      }
+    };
+    tryAcquire();
+  });
+}
+function releaseRenderSlot() {
+  activeRenders--;
+  const next = renderQueue.shift();
+  if (next) next();
+}
+
+// ---------- SSE progress channels ----------
+// Keyed by a client-generated render id: the client opens an SSE connection
+// on /render-progress/:id BEFORE posting the binary payload to /render, so
+// the id correlates the two requests. Plain Node http, no ws/sse library.
+const progressChannels = new Map();
+function sendProgress(id, pct) {
+  const res = progressChannels.get(id);
+  if (res) res.write(`data: ${JSON.stringify({ pct })}\n\n`);
+}
+function closeProgressChannel(id) {
+  const res = progressChannels.get(id);
+  if (res) { res.end(); progressChannels.delete(id); }
+}
+
+// ---------- binary request framing ----------
+// No multipart parser (zero dependencies) — a simple length-prefixed frame
+// instead: [4 bytes LE uint32: JSON metadata length][JSON metadata][bg
+// bytes][audio bytes][music bytes if meta.hasMusic][title-card PNG bytes if
+// meta.hasTitleCard]. Metadata carries each segment's byte length plus every
+// non-binary field runJob already sends to the WASM worker (subs, style,
+// w/h/fps, bgW/bgH, musicVolume, titleCard timing). Mirrors web/app.js's
+// renderVideoNatively(), which builds this exact frame client-side.
+function parseRenderBody(body) {
+  const metaLen = body.readUInt32LE(0);
+  const meta = JSON.parse(body.subarray(4, 4 + metaLen).toString("utf8"));
+  let offset = 4 + metaLen;
+  const bg = body.subarray(offset, offset + meta.bgLen); offset += meta.bgLen;
+  const audio = body.subarray(offset, offset + meta.audioLen); offset += meta.audioLen;
+  let music = null, titleCardImage = null;
+  if (meta.hasMusic) { music = body.subarray(offset, offset + meta.musicLen); offset += meta.musicLen; }
+  if (meta.hasTitleCard) { titleCardImage = body.subarray(offset, offset + meta.titleCardImageLen); offset += meta.titleCardImageLen; }
+  return { meta, bg, audio, music, titleCardImage };
+}
+
+// Builds the exact same filter-graph/args ffmpeg-worker.js constructs for
+// the WASM path (see that file's `self.onmessage` "render" case) — only the
+// exec mechanism differs (child_process vs ffmpeg.wasm's FS+exec). Writes
+// inputs into `dir` and returns the full ffmpeg CLI args array plus the
+// expected total output duration (for progress-percentage math).
+function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
+  fs.writeFileSync(path.join(dir, "bg.mp4"), bg);
+  fs.writeFileSync(path.join(dir, "audio.wav"), audio);
+  const hasMusic = !!music;
+  const hasTitleCard = !!titleCardImage;
+  const cardDurationSec = hasTitleCard ? (meta.titleCard.cardDurationSec || 0) : 0;
+  const narrationDelaySec = hasTitleCard ? (meta.titleCard.narrationDelaySec || 0) : 0;
+  if (hasMusic) fs.writeFileSync(path.join(dir, "music.mp3"), music);
+  if (hasTitleCard) fs.writeFileSync(path.join(dir, "titlecard.png"), titleCardImage);
+
+  fs.mkdirSync(path.join(dir, "fonts"));
+  fs.copyFileSync(FONT_PATH, path.join(dir, "fonts", "DejaVuSans.ttf"));
+
+  const style = meta.style || {};
+  const cues = buildCaptionCues(meta.subs || []);
+  for (const cue of cues) fs.writeFileSync(path.join(dir, cue.file), cue.text);
+  let { filterComplex: videoFC, outLabel: videoOutLabel } = buildDrawtextFilterChain({
+    w: meta.w, h: meta.h, bgW: meta.bgW, bgH: meta.bgH,
+    fontSize: parseInt(style.fontSize) || 68,
+    textColor: safeColor(style.textColor, "white"),
+    strokeColor: safeColor(style.strokeColor, "black"),
+    strokeWidth: parseInt(style.strokeWidth) || 3,
+    positionY: parseFloat(style.positionY) || 0.55,
+    cues,
+  });
+
+  let nextInput = 2;
+  const musicInputIndex = hasMusic ? nextInput++ : null;
+  const titleCardInputIndex = hasTitleCard ? nextInput++ : null;
+
+  if (hasTitleCard) {
+    const overlay = buildTitleCardOverlay({
+      videoFilterComplex: videoFC, videoOutLabel,
+      w: meta.w, h: meta.h, titleCardInputIndex, cardDurationSec,
+    });
+    videoFC = overlay.filterComplex;
+    videoOutLabel = overlay.outLabel;
+  }
+  const audioChain = buildAudioFilterChain({
+    narrationInputIndex: 1, musicInputIndex, musicVolume: meta.musicVolume, delaySec: narrationDelaySec,
+  });
+  const filterComplex = `${videoFC};${audioChain.filterChain}`;
+
+  const inputArgs = ["-stream_loop", "-1", "-i", "bg.mp4", "-i", "audio.wav"];
+  if (hasMusic) inputArgs.push("-i", "music.mp3");
+  if (hasTitleCard) {
+    inputArgs.push("-loop", "1", "-framerate", String(meta.fps), "-t", String(cardDurationSec + 1), "-i", "titlecard.png");
+  }
+
+  const durationArgs = [];
+  let expectedDurationSec = parseWavDurationSec(audio) || 0;
+  if (hasTitleCard) {
+    const narrDurationSec = parseWavDurationSec(audio);
+    if (narrDurationSec) {
+      const bound = cardDurationSec + narrDurationSec + 0.5;
+      durationArgs.push("-t", bound.toFixed(3));
+      expectedDurationSec = bound;
+    }
+  }
+
+  const args = [
+    ...inputArgs,
+    "-filter_complex", filterComplex,
+    "-map", `[${videoOutLabel}]`, "-map", `[${audioChain.outLabel}]`,
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+    "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
+    "-r", String(meta.fps),
+    "-shortest", ...durationArgs,
+    "-progress", "pipe:1", "-y", "out.mp4",
+  ];
+  return { args, expectedDurationSec };
+}
+
+function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respond) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-render-"));
+  const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
+  let args, expectedDurationSec;
+  try {
+    ({ args, expectedDurationSec } = buildRenderArgs(dir, meta, bg, audio, music, titleCardImage));
+  } catch (e) {
+    cleanup();
+    respond(500, { error: "Failed to build render: " + e.message });
+    return;
+  }
+  const proc = spawn("ffmpeg", args, { cwd: dir });
+  let stderrTail = "";
+  proc.stderr.on("data", (chunk) => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+  });
+  let stdoutBuf = "";
+  proc.stdout.on("data", (chunk) => {
+    stdoutBuf += chunk.toString();
+    const lines = stdoutBuf.split("\n");
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      const m = /^out_time_ms=(\d+)/.exec(line);
+      if (m && expectedDurationSec > 0) {
+        const pct = Math.min(99, Math.round((parseInt(m[1], 10) / 1e6 / expectedDurationSec) * 100));
+        sendProgress(renderId, pct);
+      }
+    }
+  });
+  proc.on("error", (err) => {
+    cleanup();
+    respond(500, { error: "Couldn't run ffmpeg: " + err.message });
+  });
+  proc.on("close", (code) => {
+    if (code !== 0) {
+      cleanup();
+      respond(500, { error: `ffmpeg exited with code ${code}\n${stderrTail.slice(-1000)}` });
+      return;
+    }
+    sendProgress(renderId, 100);
+    let data;
+    try {
+      data = fs.readFileSync(path.join(dir, "out.mp4"));
+    } catch (e) {
+      cleanup();
+      respond(500, { error: "Render finished but output was missing: " + e.message });
+      return;
+    }
+    cleanup();
+    respond(200, data, "video/mp4");
+  });
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -39,7 +272,66 @@ function log(req) {
 const server = http.createServer((req, res) => {
   log(req);
 
-  let urlPath = decodeURIComponent(req.url.split("?")[0]);
+  const urlNoQuery = req.url.split("?")[0];
+
+  // ---- Native render backend routes (see the block above) ----
+  if (urlNoQuery === "/render-capability" && req.method === "GET") {
+    checkFfmpeg((available) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ available }));
+    });
+    return;
+  }
+  if (urlNoQuery.startsWith("/render-progress/") && req.method === "GET") {
+    const id = urlNoQuery.slice("/render-progress/".length);
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
+    progressChannels.set(id, res);
+    req.on("close", () => { progressChannels.delete(id); });
+    return;
+  }
+  if (urlNoQuery === "/render" && req.method === "POST") {
+    const id = new URL(req.url, "http://localhost").searchParams.get("id") || crypto.randomUUID();
+    checkFfmpeg((available) => {
+      if (!available) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "ffmpeg isn't installed (or not on PATH) — install it and restart the server." }));
+        return;
+      }
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", async () => {
+        const body = Buffer.concat(chunks);
+        let parsed;
+        try {
+          parsed = parseRenderBody(body);
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Malformed render request: " + e.message }));
+          return;
+        }
+        await acquireRenderSlot();
+        const respond = (status, data, contentType) => {
+          releaseRenderSlot();
+          closeProgressChannel(id);
+          if (contentType) {
+            res.writeHead(status, { "Content-Type": contentType, "Content-Length": data.length });
+            res.end(data);
+          } else {
+            res.writeHead(status, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        };
+        runNativeRender(id, parsed.meta, parsed.bg, parsed.audio, parsed.music, parsed.titleCardImage, respond);
+      });
+    });
+    return;
+  }
+
+  let urlPath = decodeURIComponent(urlNoQuery);
   if (urlPath === "/") urlPath = "/index.html";
   // Prevent escaping ROOT via "..".
   const filePath = path.normalize(path.join(ROOT, urlPath));

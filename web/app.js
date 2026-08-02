@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 66;
+const VERSION = 67;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -107,8 +107,29 @@ function buildEngineSelect() {
   $("#ttsEngine").innerHTML = opts;
   $("#ttsEngineQuick").innerHTML = '<option value="">Use settings engine</option>' + opts;
 }
+// Probed once at startup: is a real local backend (server.js's /render,
+// shelling out to the user's own installed ffmpeg) reachable? True only
+// when running via `node server.js` with ffmpeg on PATH — always false on
+// the deployed GitHub Pages build (no server there to answer), which is
+// exactly what makes the WASM fallback below automatic with no extra logic.
+let nativeRenderAvailable = false;
+async function probeNativeRenderBackend() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    const resp = await fetch("/render-capability", { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return !!data.available;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
+  nativeRenderAvailable = await probeNativeRenderBackend();
   buildEngineSelect();
   const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
   populateModels();
@@ -847,8 +868,74 @@ function ensureFFmpeg(poolSize) {
   return ffmpegPoolReady;
 }
 
-// Renders one job's video via the pool; resolves to a Uint8Array of the MP4.
+// Native rendering needs no ffmpeg.wasm/font download at all — skip
+// warming up the WASM pool entirely when the local backend is available.
+// Falls straight through to the original ensureFFmpeg() otherwise (GitHub
+// Pages, or ffmpeg missing from PATH — server.js's own /render-capability
+// probe already accounts for that).
+function ensureRenderBackend(poolSize) {
+  if (nativeRenderAvailable) return Promise.resolve();
+  return ensureFFmpeg(poolSize);
+}
+
+// POSTs the same payload shape the WASM worker takes to server.js's
+// /render, over a simple length-prefixed binary frame (no multipart parser
+// needed): [4-byte LE uint32 metadata length][JSON metadata][bg][audio]
+// [music if present][title-card PNG if present] — server.js's
+// parseRenderBody() is the exact inverse of this. Progress arrives over a
+// separate SSE connection correlated by a client-generated id, opened
+// before the POST so no progress ticks can race ahead of it.
+async function renderVideoNatively(payload, onProgress) {
+  const id = crypto.randomUUID();
+  let es = null;
+  if (onProgress) {
+    es = new EventSource(`/render-progress/${id}`);
+    es.onmessage = (e) => {
+      try { onProgress(JSON.parse(e.data).pct); } catch (err) { /* ignore malformed tick */ }
+    };
+  }
+  try {
+    const hasMusic = !!payload.music;
+    const hasTitleCard = !!(payload.titleCard && payload.titleCard.imageBytes);
+    const meta = {
+      subs: payload.subs, style: payload.style,
+      w: payload.w, h: payload.h, fps: payload.fps, bgW: payload.bgW, bgH: payload.bgH,
+      musicVolume: payload.musicVolume,
+      hasMusic, hasTitleCard,
+      titleCard: hasTitleCard
+        ? { cardDurationSec: payload.titleCard.cardDurationSec, narrationDelaySec: payload.titleCard.narrationDelaySec }
+        : null,
+      bgLen: payload.bg.byteLength,
+      audioLen: payload.audio.byteLength,
+      musicLen: hasMusic ? payload.music.byteLength : 0,
+      titleCardImageLen: hasTitleCard ? payload.titleCard.imageBytes.byteLength : 0,
+    };
+    const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+    const header = new Uint8Array(4);
+    new DataView(header.buffer).setUint32(0, metaBytes.byteLength, true);
+    const parts = [header, metaBytes, payload.bg, payload.audio];
+    if (hasMusic) parts.push(payload.music);
+    if (hasTitleCard) parts.push(new Uint8Array(payload.titleCard.imageBytes));
+
+    const resp = await fetch(`/render?id=${id}`, { method: "POST", body: new Blob(parts) });
+    if (!resp.ok) {
+      let msg = `Native render failed (${resp.status})`;
+      try { const errJson = await resp.json(); if (errJson.error) msg = errJson.error; } catch (e) { /* non-JSON error body */ }
+      throw new Error(msg);
+    }
+    const buf = await resp.arrayBuffer();
+    if (onProgress) onProgress(100);
+    return new Uint8Array(buf);
+  } finally {
+    if (es) es.close();
+  }
+}
+
+// Renders one job's video — via the local native backend when available,
+// falling back to the ffmpeg.wasm worker pool otherwise. Resolves to a
+// Uint8Array of the MP4 either way, so callers don't need to know which path ran.
 function renderVideoInWorker(payload, onProgress) {
+  if (nativeRenderAvailable) return renderVideoNatively(payload, onProgress);
   return ffmpegPool.submit((worker) => worker.render(payload, onProgress));
 }
 
@@ -1098,7 +1185,7 @@ async function exportVideo() {
     musicVolume: parseFloat($("#musicVolume").value) || 0.25,
   });
 
-  await ensureFFmpeg(1);
+  await ensureRenderBackend(1);
   const globalSettings = getGlobalSettings();
   await runJob(job, globalSettings, (j) => {
     renderResultCard(j, $("#outputContainer"), { prepend: true });
@@ -1468,7 +1555,7 @@ async function runDebugTestRender() {
     const narrationSec = Math.max(1, (subs.length ? subs[subs.length - 1].end : 3) + 0.5);
 
     const w = 640, h = 360; // small + fast — this is a style/timing check, not a real export
-    await ensureFFmpeg(1);
+    await ensureRenderBackend(1);
 
     let bgFile = currentVideo;
     let bgW = 0, bgH = 0;
@@ -1853,7 +1940,7 @@ async function renderAllBatch() {
   const grid = $("#resultsGrid");
 
   try {
-    await ensureFFmpeg(parallelism);
+    await ensureRenderBackend(parallelism);
     jobsToRun.forEach(j => { j.status = "queued"; j.progressLabel = "Queued..."; renderResultCard(j, grid); });
     await Promise.all(jobsToRun.map(job => runJob(job, globalSettings, (j) => renderResultCard(j, grid))));
     const failed = jobsToRun.filter(j => j.status === "error").length;
@@ -1872,7 +1959,7 @@ async function retryBatchJob(job) {
   job.status = "queued";
   job.error = null;
   renderResultCard(job, $("#resultsGrid"));
-  await ensureFFmpeg(parseInt($("#batchParallelism").value) || 1);
+  await ensureRenderBackend(parseInt($("#batchParallelism").value) || 1);
   await runJob(job, getGlobalSettings(), (j) => renderResultCard(j, $("#resultsGrid")));
 }
 

@@ -16,7 +16,10 @@ It works. Probably.
 
 Generates or Turns your AITAH Reddit stories into narrated videos with captions on a background clip, as seen on your favorite doom scrolling platform 
 
-The whole thing runs in your browser: Piper TTS for the voice, ffmpeg.wasm for rendering, DeepSeek/OpenAI for the story writing. No server, no install.
+Piper/Kokoro TTS for the voice, DeepSeek/OpenAI for the story writing — those still run in-browser either way. Rendering has two tiers:
+
+- **Local (`node server.js`)**: if you have `ffmpeg` installed (with drawtext/libfreetype support — most installs have this), rendering runs natively via your own ffmpeg instead of ffmpeg.wasm. Faster, and doesn't have ffmpeg.wasm's occasional hangs on some machines. This is detected automatically — nothing to configure.
+- **Deployed / no local ffmpeg**: falls back to ffmpeg.wasm, entirely in-browser, exactly as before. Slower for longer videos, but zero install.
 
 ## Running it
 
@@ -24,9 +27,9 @@ The whole thing runs in your browser: Piper TTS for the voice, ffmpeg.wasm for r
 node server.js
 ```
 
-Then open http://localhost:8123. Or double-click `Open AITAH Creator Web.command`, which does the same thing and opens the browser for you.
+Then open http://localhost:8123. Or double-click `Open AITAH Creator Web.command`, which does the same thing and opens the browser for you. If `ffmpeg` is on your PATH, rendering uses it automatically — otherwise it falls back to the in-browser engine with no extra setup.
 
-Or just use the deployed version: https://youraveragecow.github.io/Slopdaddy/
+Or just use the deployed version (no local install, always uses the in-browser engine): https://youraveragecow.github.io/Slopdaddy/
 
 ## Tests
 
@@ -43,12 +46,13 @@ Runs automatically on every push/PR via `.github/workflows/test.yml`.
 - A browser
 - An API key for an OpenAI-compatible provider (settings panel, top-right)
 - A background video (Subway Surfers gameplay is the classic choice)
+- `ffmpeg` on your PATH, if you want native rendering speed when running locally (optional — falls back to the in-browser engine without it)
 - Reasonable expectations
 
 ## Known limitations
 
 - Caption sync is "close enough", not frame-perfect
-- Browser-based rendering is slower than native ffmpeg for longer videos
+- Rendering is native-ffmpeg-speed when running locally with a compatible `ffmpeg` install, ffmpeg.wasm speed otherwise (deployed site, or no local `ffmpeg`)
 - It's vibe-coded, so treat it accordingly
 
 ## License
