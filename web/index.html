@@ -358,8 +358,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   <textarea id="storyText" placeholder="Your story will appear here... or paste your own!" rows="7" oninput="validateInputs(); autoGrow(this);"></textarea>
 
   <h2><span class="step-num">3</span>Preview &amp; Export<span class="step-bar"></span></h2>
-  <div class="voice-preview-row" style="margin-bottom:8px;">
-    <select id="voiceQuick" onchange="syncVoiceQuick()">
+  <div class="voice-preview-row" style="margin-bottom:8px;display:flex;gap:6px;">
+    <select id="ttsEngineQuick" onchange="syncEngineQuick()" style="flex:1;">
+      <option value="">Use settings engine</option>
+    </select>
+    <select id="voiceQuick" onchange="syncVoiceQuick()" style="flex:1;">
       <option value="">Use settings voice</option>
     </select>
   </div>

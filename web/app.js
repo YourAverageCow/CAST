@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 59;
+const VERSION = 60;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -114,6 +114,7 @@ function buildEngineSelect() {
     `<option value="${e.id}">${escapeHtml(e.label)}</option>`
   ).join("");
   $("#ttsEngine").innerHTML = opts;
+  $("#ttsEngineQuick").innerHTML = '<option value="">Use settings engine</option>' + opts;
 }
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
@@ -204,6 +205,18 @@ async function populateVoices(engineId) {
   $("#voiceQuick").innerHTML = '<option value="">Use settings voice</option>' + opts;
 }
 function syncVoiceQuick() { const v = $("#voiceQuick").value; if (v) $("#voice").value = v; }
+// Quick engine override in the sidebar mirrors the settings-panel select
+// (setting #ttsEngine directly, same as syncVoiceQuick does for #voice) —
+// but changing engines invalidates the current voice list, so it also
+// repopulates voices and resets the now-stale voiceQuick selection.
+async function syncEngineQuick() {
+  const v = $("#ttsEngineQuick").value;
+  if (!v) return;
+  $("#ttsEngine").value = v;
+  $("#voiceQuick").value = "";
+  await onEngineChangeUI();
+  saveSettings();
+}
 function getEngine() { return $("#ttsEngine").value || DEFAULT_TTS_ENGINE; }
 function getVoice() {
   syncVoiceQuick();
