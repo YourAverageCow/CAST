@@ -1,4 +1,4 @@
-# Slopdaddy
+# Slopdaddy (Name Pending)
 
 An AI slop video factory for making AITAH story videos. 
 
