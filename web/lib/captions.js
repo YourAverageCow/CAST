@@ -2,6 +2,15 @@
 // a classic <script> in the browser (declares these as globals, consumed
 // unqualified by app.js) and as a plain require()-able module in tests.
 
+// Splits a single paragraph into word tokens — whitespace-separated,
+// standalone punctuation dropped. Shared by computeWordTimings and
+// countFirstParagraphWords so the two stay in lockstep: the Nth word this
+// produces for a paragraph is always the same Nth entry computeWordTimings
+// puts in its flattened words[] array.
+function splitParagraphWords(para) {
+  return para.split(/\s+/).filter(w => w && !/^[.,!?;:]+$/.test(w));
+}
+
 // Estimate per-word timing from the full audio duration.
 // We align words to the audio by distributing the narration time across
 // words proportional to character length (better than uniform since it
@@ -13,9 +22,7 @@ function computeWordTimings(text, totalDuration) {
     totalDuration = wordCount * 0.4;
   }
   const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
-  const allWords = paragraphs.flatMap(para =>
-    para.split(/\s+/).filter(w => w && !/^[.,!?;:]+$/.test(w))
-  );
+  const allWords = paragraphs.flatMap(splitParagraphWords);
 
   const charTotal = allWords.reduce((s, w) => s + w.length + 1, 0) || 1;
   const perChar = totalDuration / charTotal;
@@ -63,6 +70,16 @@ function buildWordCues(words) {
   return words.map(w => ({ start: w.start, end: w.end, text: w.text }));
 }
 
+// Word count of the story's first paragraph, tokenized identically to
+// computeWordTimings. Lets a caller (app.js, for the title-card sync) find
+// exactly where the auto-extracted title line ends within the words[]
+// array computeWordTimings produces, so those words can be split off from
+// the rest of the narration/captions.
+function countFirstParagraphWords(text) {
+  const paragraphs = (text || "").split(/\n\s*\n/).filter(p => p.trim());
+  return paragraphs.length ? splitParagraphWords(paragraphs[0]).length : 0;
+}
+
 // Remove characters TextEncoder/ffmpeg choke on (lone surrogates, control chars).
 function sanitizeText(s) {
   if (typeof s !== "string") return "";
@@ -73,5 +90,5 @@ function sanitizeText(s) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { computeWordTimings, buildSubsFromWords, buildWordCues, sanitizeText };
+  module.exports = { computeWordTimings, countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText };
 }

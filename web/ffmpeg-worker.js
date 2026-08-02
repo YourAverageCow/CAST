@@ -118,6 +118,12 @@ self.onmessage = async (e) => {
       const hasMusic = !!msg.music;
       const hasTitleCard = !!(msg.titleCard && msg.titleCard.imageBytes);
       const cardDurationSec = hasTitleCard ? (msg.titleCard.cardDurationSec || 0) : 0;
+      // Distinct from cardDurationSec: when the card shows the story's own
+      // auto-extracted first line, its narration plays unshifted (0 delay)
+      // in sync with the card, so the two only coincidentally match when a
+      // custom title falls back to the old fixed-delay behavior — see
+      // app.js's runJob for which case sets which value.
+      const narrationDelaySec = hasTitleCard ? (msg.titleCard.narrationDelaySec || 0) : 0;
       if (hasMusic) ffmpeg.FS.writeFile("music.mp3", new Uint8Array(msg.music));
       if (hasTitleCard) ffmpeg.FS.writeFile("titlecard.png", new Uint8Array(msg.titleCard.imageBytes));
 
@@ -138,12 +144,13 @@ self.onmessage = async (e) => {
         videoFC = overlay.filterComplex;
         videoOutLabel = overlay.outLabel;
       }
-      // Narration is delayed by the title-card duration (silence up front)
-      // so speech doesn't start until the card's on-screen window ends —
-      // caption cue timings are shifted by the same amount before they ever
-      // reach this worker (app.js), so the two stay in sync.
+      // narrationDelaySec is 0 whenever the card's own duration already
+      // matches the spoken length of what it displays (app.js keeps caption
+      // cue timings unshifted to match); otherwise it silence-pads narration
+      // by adelay so speech starts only once the card's window ends, with
+      // caption cues shifted by the same amount before they reach this worker.
       const audio = buildAudioFilterChain({
-        narrationInputIndex: 1, musicInputIndex, musicVolume: msg.musicVolume, delaySec: cardDurationSec,
+        narrationInputIndex: 1, musicInputIndex, musicVolume: msg.musicVolume, delaySec: narrationDelaySec,
       });
       const filterComplex = `${videoFC};${audio.filterChain}`;
 

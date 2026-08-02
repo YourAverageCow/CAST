@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 62;
+const VERSION = 63;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -950,12 +950,6 @@ async function runJob(job, globalSettings, onUpdate) {
 
     update({ status: "voice", progressPct: 0, progressLabel: "Generating voice..." });
     const { audioUrl, words } = await generateSpeech(story, settings.voice, settings.ttsEngine);
-    // "capcut" = one bold word at a time; "classic" = grouped phrases
-    // (the original style). Both feed the same per-cue drawtext+enable()
-    // render path — this only changes how cues are grouped, not how
-    // they're rendered.
-    const rawSubs = settings.captionPreset === "classic" ? buildSubsFromWords(words) : buildWordCues(words);
-    const subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
 
     const w = parseInt(settings.resW) || 1080;
     const h = parseInt(settings.resH) || 1920;
@@ -963,17 +957,42 @@ async function runJob(job, globalSettings, onUpdate) {
 
     let titleCardPayload = null;
     let cardDurationSec = 0;
+    let narrationDelaySec = 0;
+    let narrationWords = words;
     if (job.titleCardEnabled) {
       update({ status: "render", progressPct: 5, progressLabel: "Building title card..." });
-      cardDurationSec = TITLE_CARD_DURATION_SEC;
+      // An auto-extracted title is literally the story's first line, already
+      // spoken as part of the narration — instead of showing it once on the
+      // card and then again as a caption after a fixed delay, let its own
+      // audio play while the card is up (narrationDelaySec stays 0) and drop
+      // those words from the caption list, sizing the card to exactly how
+      // long that line takes to say. A user-typed custom title isn't
+      // guaranteed to match anything in the story, so that case keeps the
+      // old fixed-duration/fixed-delay behavior.
+      const isAutoTitle = !job.titleCardText;
       const titleText = (job.titleCardText || extractTitleFromStory(story) || "Untitled").trim();
       const cardBlob = await renderTitleCardImage({ title: titleText, channelName: globalSettings.channelName, w, h });
-      titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec };
-      // Narration/captions are delayed to start after the card — shift every
-      // cue's timing by the same amount so they land after the card ends
-      // exactly like the audio does (ffmpeg-worker.js delays the narration
-      // track itself via adelay using this same cardDurationSec).
-      for (const s of subs) { s.start += cardDurationSec; s.end += cardDurationSec; }
+
+      if (isAutoTitle && words.length) {
+        const titleWordCount = Math.min(countFirstParagraphWords(story), words.length);
+        const lastTitleWord = words[titleWordCount - 1];
+        cardDurationSec = lastTitleWord ? lastTitleWord.end : TITLE_CARD_DURATION_SEC;
+        narrationWords = words.slice(titleWordCount);
+      } else {
+        cardDurationSec = TITLE_CARD_DURATION_SEC;
+        narrationDelaySec = TITLE_CARD_DURATION_SEC;
+      }
+      titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec, narrationDelaySec };
+    }
+
+    // "capcut" = one bold word at a time; "classic" = grouped phrases
+    // (the original style). Both feed the same per-cue drawtext+enable()
+    // render path — this only changes how cues are grouped, not how
+    // they're rendered.
+    const rawSubs = settings.captionPreset === "classic" ? buildSubsFromWords(narrationWords) : buildWordCues(narrationWords);
+    const subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
+    if (narrationDelaySec > 0) {
+      for (const s of subs) { s.start += narrationDelaySec; s.end += narrationDelaySec; }
     }
 
     let musicPayload = null;
@@ -1465,10 +1484,14 @@ async function runDebugTestRender() {
     let titleCardPayload = null;
     let cardDurationSec = 0;
     if ($("#titleCardEnabled").checked) {
+      // Debug tool deliberately tests caption sample text and title text
+      // from two separate fields (see runDebugTestRender's comment above),
+      // so unlike runJob's real pipeline there's nothing here to sync the
+      // card to — always the old fixed-duration/fixed-delay behavior.
       cardDurationSec = TITLE_CARD_DURATION_SEC;
       const title = extractTitleFromStory($("#storyText").value.trim()) || "AITAH for a debug test";
       const cardBlob = await renderTitleCardImage({ title, channelName: globalSettings.channelName, w, h });
-      titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec };
+      titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec, narrationDelaySec: cardDurationSec };
       subs = subs.map(s => ({ start: s.start + cardDurationSec, end: s.end + cardDurationSec, text: s.text }));
     }
 

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { computeWordTimings, buildSubsFromWords, buildWordCues, sanitizeText } = require("./captions.js");
+const { computeWordTimings, countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText } = require("./captions.js");
 
 test("computeWordTimings distributes duration proportionally to word length", () => {
   const times = computeWordTimings("a bb ccc", 6);
@@ -28,6 +28,27 @@ test("computeWordTimings ignores lone punctuation tokens as words", () => {
 test("computeWordTimings respects paragraph breaks (still flattens to one timeline)", () => {
   const times = computeWordTimings("hi there\n\nbye now", 4);
   assert.deepEqual(times.map(t => t.text), ["hi", "there", "bye", "now"]);
+});
+
+test("countFirstParagraphWords counts only the first paragraph", () => {
+  assert.equal(countFirstParagraphWords("AITAH for this?\n\nHere is the story body."), 3);
+});
+
+test("countFirstParagraphWords lines up with computeWordTimings' word indices", () => {
+  const story = "AITAH for this?\n\nHere is the rest of it.";
+  const n = countFirstParagraphWords(story);
+  const words = computeWordTimings(story, 10);
+  assert.deepEqual(words.slice(0, n).map(w => w.text), ["AITAH", "for", "this?"]);
+  assert.equal(words[n].text, "Here");
+});
+
+test("countFirstParagraphWords ignores standalone punctuation tokens", () => {
+  assert.equal(countFirstParagraphWords("hello , world !\n\nnext paragraph"), 2);
+});
+
+test("countFirstParagraphWords returns 0 for empty/blank text", () => {
+  assert.equal(countFirstParagraphWords(""), 0);
+  assert.equal(countFirstParagraphWords("   \n\n  "), 0);
 });
 
 test("buildSubsFromWords combines two short adjacent words under the char/gap limits", () => {
