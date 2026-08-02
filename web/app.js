@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 64;
+const VERSION = 65;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -32,15 +32,6 @@ function showToast(msg, duration) {
   t.textContent = msg;
   t.classList.add("show");
   setTimeout(() => t.classList.remove("show"), duration || 2500);
-}
-function setProgress(pct, stage) {
-  const bar = $("#progressBar");
-  const fill = $("#progressFill");
-  const txt = $("#progressPercent");
-  bar.style.display = "block";
-  fill.style.width = pct + "%";
-  txt.textContent = stage ? `${pct}% — ${stage}` : `${pct}%`;
-  if (pct >= 100) setTimeout(() => { bar.style.display = "none"; }, 1500);
 }
 function openSettings() { $("#settingsOverlay").classList.add("show"); $("#settingsPanel").classList.add("open"); }
 function closeSettings() { $("#settingsOverlay").classList.remove("show"); $("#settingsPanel").classList.remove("open"); }
@@ -1107,7 +1098,6 @@ async function exportVideo() {
   await ensureFFmpeg(1);
   const globalSettings = getGlobalSettings();
   await runJob(job, globalSettings, (j) => {
-    setProgress(j.progressPct, j.progressLabel);
     renderResultCard(j, $("#outputContainer"), { prepend: true });
   });
 
