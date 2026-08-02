@@ -29,9 +29,15 @@ Piper/Kokoro TTS for the voice, DeepSeek/OpenAI for the story writing — those 
 node server.js
 ```
 
-Then open http://localhost:8123. Or double-click `Open AITAH Creator Web.command`, which does the same thing and opens the browser for you. If `ffmpeg` is on your PATH, rendering uses it automatically — otherwise it falls back to the in-browser engine with no extra setup.
+Then open http://localhost:8123. Or double-click `Open AITAH Creator Web.command`, which does the same thing and opens the browser for you. If `ffmpeg`/`whisper` are on your PATH, rendering/caption-sync use them natively — otherwise it falls back to in-browser engines with no extra setup.
 
-Or just use the deployed version (no local install, always uses the in-browser engine): https://youraveragecow.github.io/Slopdaddy/
+Or run it as a standalone app instead of a browser tab (same backend, real app window — early/first version, no installer yet):
+```bash
+npm install
+npm start
+```
+
+Or just use the deployed version (no local install, always uses the in-browser engine, may lag behind the features above): https://youraveragecow.github.io/Slopdaddy/
 
 ## Tests
 

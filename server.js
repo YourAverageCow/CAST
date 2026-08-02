@@ -17,10 +17,13 @@
 // original WASM path automatically (see web/app.js's native-probe-then-
 // fallback logic) — nothing here changes what that build does.
 //
-// Deliberately zero npm dependencies, matching the rest of this repo — the
-// render path reuses web/lib/ffmpeg-filters.js's pure filter-graph builders
-// directly via require() (already Node-compatible; that's how its own tests
-// run) and only Node builtins (http/fs/path/child_process/crypto) otherwise.
+// Deliberately zero npm dependencies itself, matching the rest of this repo
+// — the render path reuses web/lib/ffmpeg-filters.js's pure filter-graph
+// builders directly via require() (already Node-compatible; that's how its
+// own tests run) and only Node builtins (http/fs/path/child_process/crypto)
+// otherwise. Also required (not just run as a CLI entrypoint) by
+// electron/main.js, which starts this exact same backend in-process for the
+// standalone app — everything below runs identically either way.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -484,6 +487,18 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// Required (not just run as a CLI script) by electron/main.js to start the
+// same backend in-process for the standalone app — handle "something's
+// already listening on this port" gracefully instead of crashing the whole
+// process, since that's expected whenever the app is launched twice, or
+// launched while a standalone `node server.js` is already running.
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.log(`Port ${PORT} is already in use — assuming another instance of this server is already running there.`);
+    return;
+  }
+  throw err;
+});
 server.listen(PORT, () => {
   console.log(`Serving AITAH Video Creator (web) at http://localhost:${PORT}`);
   console.log("Press Ctrl+C to stop.");

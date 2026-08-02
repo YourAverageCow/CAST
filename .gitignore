@@ -7,3 +7,8 @@
 # Editor
 .vscode/
 .idea/
+
+# Electron app (package.json/electron/main.js)
+node_modules/
+dist/
+out/

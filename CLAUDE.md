@@ -4,20 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Slopdaddy generates narrated AITAH/Reddit-story videos with burned-in captions over a background clip. Piper/Kokoro TTS (client-side ONNX) for narration and DeepSeek/OpenAI for story generation always run in-browser. Rendering has two tiers: `server.js` now also shells out to the user's own installed native `ffmpeg` when it's present and drawtext-capable (see "Native rendering backend" below) — falling back to ffmpeg.wasm (in a Web Worker) otherwise, which is the only path the deployed GitHub Pages build ever uses (no server there). No build step, no bundler, no framework either way.
+Slopdaddy generates narrated AITAH/Reddit-story videos with burned-in captions over a background clip. Piper/Kokoro TTS (client-side ONNX) for narration and DeepSeek/OpenAI for story generation always run in-browser. Rendering and caption-sync transcription both have two tiers: `server.js` shells out to the user's own installed native `ffmpeg`/`whisper` when present and capable (see "Native rendering backend" and "Caption-sync cascade" below) — falling back to ffmpeg.wasm / an in-browser estimate otherwise. No bundler, no framework either way.
+
+**Two branches, two purposes** (as of the native-backend work): `main` is where active development happens, heading toward a standalone local app (this is that work — see "Standalone app" below). `web` is a frozen-ish snapshot kept as the zero-install "click a link" browser-only version — that's what the deployed GitHub Pages site (https://youraveragecow.github.io/Slopdaddy/) builds from, gated by `.github/workflows/pages.yml`'s `workflow_run` filter on `web`'s own `Tests` runs, not `main`'s. Backport pure-logic fixes/features to `web` when practical (cherry-pick or manual port); native-only features (this whole file's "Native rendering backend"/"Caption-sync cascade"/"Standalone app" sections) don't apply there at all, since `web`'s `server.js` stays as plain static-file serving.
 
 ## Commands
 
 ```bash
 node server.js              # local dev server at http://localhost:8123 (needed for COOP/COEP headers — opening index.html via file:// breaks isolation)
+npm start                    # (main branch only) launches the standalone Electron app — same UI/backend, real app window instead of a browser tab
 node --test web/lib/*.test.js   # run all tests (Node's built-in test runner, zero dependencies)
 node --test web/lib/foo.test.js # run a single test file
 node -c web/app.js           # syntax-check a file (no linter configured — this is the closest thing)
 ```
 
-There is no `package.json`, no lint config, and no build step anywhere in this repo — everything in `web/` is served as-is, and `server.js`'s render backend shells out to native `ffmpeg` rather than adding an npm dependency to bundle one. Double-clicking `Open AITAH Creator Web.command` runs `node run.js`, which starts `server.js` and opens the browser for you.
+`web/` itself has no build step, no bundler, no lint config — everything there is served as-is, and `server.js`'s render/transcribe backends shell out to native `ffmpeg`/`whisper` rather than adding npm dependencies to bundle them. **`main`'s `package.json`/`package-lock.json`/`node_modules/` are new** (first-ever npm dependency in this repo's history) — `electron` only, for the standalone app wrapper; `web/` stays dependency-free regardless. Double-clicking `Open AITAH Creator Web.command` runs `node run.js`, which starts `server.js` and opens the browser for you — this still works identically on `main`, independent of the Electron app.
 
-Tests run automatically on push/PR via `.github/workflows/test.yml`. `.github/workflows/pages.yml` (the GitHub Pages deploy) is gated on that: it triggers via `workflow_run` on the Tests workflow's completion, not on `push` directly, and only proceeds `if` the Tests run succeeded (or on manual `workflow_dispatch`). A red test run blocks deployment.
+Tests run automatically on push/PR via `.github/workflows/test.yml` (on both `main` and `web` pushes). `.github/workflows/pages.yml` (the GitHub Pages deploy) is gated on `web`'s Tests runs specifically: it triggers via `workflow_run`, not `push` directly, and only proceeds `if` that run succeeded (or on manual `workflow_dispatch`). A red test run on `web` blocks deployment; the `github-pages` environment's deployment-branch policy was updated to allow `web` (previously only `main`).
 
 ## Architecture
 
@@ -43,6 +46,16 @@ Caption timing used to be a pure guess (`computeWordTimings` in `web/lib/caption
 Both Whisper tiers (native and browser) return the same raw shape and both feed `alignWordsBySequence()` (`web/lib/captions.js`) — an LCS-style word-sequence alignment, **not** a reuse of `alignWordsFromCharacters` (that needs an exactly reconstructable character string; Whisper's transcription can diverge from the known script — confirmed live: "AITAH" transcribed as "ADA", and "$15,000" split into two separate word tokens). Matched words get real timestamps; unmatched runs interpolate between the nearest real anchors via `distributeWordsInSpan`, so a few ASR misses self-correct locally instead of reintroducing drift. Captions always show the known script's word, never Whisper's transcription. Returns `null` (never throws) on total mismatch, same fail-closed convention as `alignWordsFromCharacters`.
 
 `SETTINGS_FIELDS`/`saveSettings`/`loadSettings` gained checkbox support (`el.type === "checkbox" ? el.checked : el.value`) for `#enableBrowserAsr` — no checkbox had ever been persisted before this.
+
+### Standalone app (`electron/main.js`)
+
+`npm start` (`main` branch only) launches the same `web/` UI + `server.js` backend as a real Electron app window instead of a browser tab — "Discord-style": Chromium + a Node backend, packaged as one app, not something you visit via a URL. There is deliberately no separate backend implementation for this: `electron/main.js`'s `startBackend()` just `require()`s `server.js`, which runs its top-level `server.listen(...)` as a side effect — identical to `node server.js`'s CLI path, just invoked from Electron's main process instead. `waitForServer()` polls briefly before `BrowserWindow.loadURL()` since the OS-level listen can take a beat after `require()` returns.
+
+`server.js`'s `server.on("error", ...)` handler (treats `EADDRINUSE` as "another instance is already serving this" rather than crashing) exists specifically so requiring it unconditionally from Electron's main process is safe even if the app is launched twice, or launched while a standalone `node server.js` happens to already be running on the same port — confirmed live: a second `node server.js` invocation while the Electron app was running logged the graceful message and exited cleanly rather than crashing.
+
+This is a first working version, not a full packaging/distribution pipeline — no `electron-builder` config, no per-OS installers, no icons, no code signing, no auto-update yet. Those are a real separate follow-up phase.
+
+Native rendering/transcription (`server.js`'s `/render`/`/transcribe`) work identically whether the UI is a browser tab (`node server.js`) or this Electron window — same backend, same probes, same fallback logic. Nothing in `web/app.js`'s native-probe code needed to change for the Electron wrapper to work.
 
 ### No modules, no bundler — plain classic scripts sharing global scope
 
