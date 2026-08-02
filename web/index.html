@@ -300,6 +300,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     </div>
     <label style="margin-top:8px;">Voice</label>
     <select id="voice"></select>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+      <input type="checkbox" id="enableBrowserAsr" style="width:auto;"> Improve caption sync with AI transcription (slower, ~40MB download)
+    </label>
+    <p style="font-size:0.72rem;color:var(--muted);margin-top:4px;">Only used when a local native Whisper backend isn't already available (that's used automatically and is faster) — this runs speech-to-text in your browser instead to get real word timestamps, rather than an estimate.</p>
   </div>
   <div class="settings-section">
     <h3>Title Card Identity</h3>

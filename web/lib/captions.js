@@ -64,6 +64,142 @@ function computeWordTimings(text, totalDuration) {
   return times;
 }
 
+// Distributes `words` (plain strings) proportionally across [startTime,
+// endTime] using the same wordWeight heuristic computeWordTimings uses.
+// Shared by alignWordsBySequence and snapPausesToWords to fill the gap
+// between two REAL anchors (ASR-matched words, or detected pause
+// boundaries) with the best available estimate, scoped to just that
+// bounded span instead of the whole clip — so gaps self-correct locally
+// rather than reintroducing the global drift this whole feature exists to fix.
+function distributeWordsInSpan(words, startTime, endTime) {
+  const weights = words.map(wordWeight);
+  const weightTotal = weights.reduce((s, w) => s + w, 0) || 1;
+  const span = Math.max(0, endTime - startTime);
+  const times = [];
+  let t = startTime;
+  for (let i = 0; i < words.length; i++) {
+    const dur = (weights[i] / weightTotal) * span;
+    times.push({ text: words[i], start: t, end: t + dur });
+    t += dur;
+  }
+  return times;
+}
+
+function normalizeForMatch(w) {
+  return (w || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Aligns Whisper-style word-level ASR output (real timestamps, but the
+// transcribed words may not match the known script 1:1 — numbers spoken
+// differently, misheard words, merged/split tokens; confirmed live: a real
+// Whisper run split "$15,000" into two separate word tokens) onto the
+// KNOWN narration text via an LCS-style sequence alignment. Unlike
+// alignWordsFromCharacters below (character-level, needs an exactly
+// reconstructable string), this tolerates insertions/deletions on either
+// side: matched known-words get the ASR word's real timing, and unmatched
+// runs are filled in between the nearest real anchors (or the clip's start
+// /end) via distributeWordsInSpan above — a few ASR misses self-correct
+// locally instead of drifting. Captions always show the KNOWN script's
+// word, never Whisper's transcription. Returns null (never throws) if
+// nothing matched at all, so callers fall back to computeWordTimings.
+function alignWordsBySequence(text, asrWords, totalDuration) {
+  const paragraphs = (text || "").split(/\n\s*\n/).filter(p => p.trim());
+  const knownWords = paragraphs.flatMap(splitParagraphWords);
+  if (!knownWords.length || !Array.isArray(asrWords) || !asrWords.length) return null;
+
+  const a = knownWords.map(normalizeForMatch);
+  const b = asrWords.map(w => normalizeForMatch(w.text));
+
+  const n = a.length, m = b.length;
+  // LCS DP table — word counts are small (a few hundred at most for a
+  // typical story), so O(n*m) is trivial.
+  const dp = [];
+  for (let i = 0; i <= n; i++) dp.push(new Uint16Array(m + 1));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      dp[i][j] = (a[i - 1] && a[i - 1] === b[j - 1])
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  const matches = []; // {i, j} — knownWords[i] matched to asrWords[j]
+  let i = n, j = m;
+  while (i > 0 && j > 0) {
+    if (a[i - 1] && a[i - 1] === b[j - 1]) {
+      matches.push({ i: i - 1, j: j - 1 });
+      i--; j--;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+  matches.reverse();
+  if (!matches.length) return null;
+
+  const times = new Array(n);
+  for (const match of matches) {
+    times[match.i] = { text: knownWords[match.i], start: asrWords[match.j].start, end: asrWords[match.j].end };
+  }
+
+  let idx = 0;
+  while (idx < n) {
+    if (times[idx]) { idx++; continue; }
+    let gapEnd = idx;
+    while (gapEnd < n && !times[gapEnd]) gapEnd++;
+    const spanStart = idx > 0 ? times[idx - 1].end : 0;
+    const spanEnd = gapEnd < n ? times[gapEnd].start : totalDuration;
+    const filled = distributeWordsInSpan(knownWords.slice(idx, gapEnd), spanStart, spanEnd);
+    for (let k = 0; k < filled.length; k++) times[idx + k] = filled[k];
+    idx = gapEnd;
+  }
+  return times;
+}
+
+// Nudges computeWordTimings' punctuation-pause ESTIMATE to match REAL
+// detected silence in the actual audio (see detectSilenceGaps in app.js —
+// a lightweight Web Audio energy-threshold pass, not a trained VAD model).
+// Every word ending in sentence/clause punctuation is a candidate pause
+// point; if a real gap starts within `toleranceSec` of that word's
+// estimated end, its timing becomes a real anchor and everything between
+// anchors is redistributed via distributeWordsInSpan — so one correctly
+// detected pause corrects every word around it, not just the word it
+// happened to land near. Returns `words` unchanged if no gap is close
+// enough to any candidate pause point.
+function snapPausesToWords(words, pauseGaps, totalDuration, toleranceSec) {
+  if (!Array.isArray(words) || !words.length) return words;
+  if (!Array.isArray(pauseGaps) || !pauseGaps.length) return words;
+  toleranceSec = toleranceSec == null ? 0.5 : toleranceSec;
+
+  const anchors = []; // {index, time} — words[index] should END exactly at time
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i].text || "";
+    if (!/[.!?,;:]["')]?$/.test(w)) continue;
+    let best = null, bestDist = toleranceSec;
+    for (const gap of pauseGaps) {
+      const dist = Math.abs(gap.start - words[i].end);
+      if (dist <= bestDist) { best = gap; bestDist = dist; }
+    }
+    if (best) anchors.push({ index: i, time: best.start });
+  }
+  if (!anchors.length) return words;
+
+  const knownWords = words.map(w => w.text);
+  const result = new Array(words.length);
+  let prevIndex = -1, prevTime = 0;
+  for (const anchor of anchors) {
+    const span = distributeWordsInSpan(knownWords.slice(prevIndex + 1, anchor.index + 1), prevTime, anchor.time);
+    for (let k = 0; k < span.length; k++) result[prevIndex + 1 + k] = span[k];
+    prevIndex = anchor.index;
+    prevTime = anchor.time;
+  }
+  if (prevIndex + 1 < words.length) {
+    const span = distributeWordsInSpan(knownWords.slice(prevIndex + 1), prevTime, totalDuration || words[words.length - 1].end);
+    for (let k = 0; k < span.length; k++) result[prevIndex + 1 + k] = span[k];
+  }
+  return result;
+}
+
 // Builds real per-word timing from character-level forced alignment (e.g.
 // ElevenLabs' /with-timestamps response: parallel `characters`/
 // `startTimes`/`endTimes` arrays covering the exact text sent to the
@@ -144,5 +280,8 @@ function sanitizeText(s) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { computeWordTimings, alignWordsFromCharacters, countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText };
+  module.exports = {
+    computeWordTimings, alignWordsFromCharacters, alignWordsBySequence, snapPausesToWords,
+    countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText,
+  };
 }

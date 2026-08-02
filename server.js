@@ -55,33 +55,54 @@ function checkFfmpeg(cb) {
   });
 }
 
-// ---------- render concurrency limiter ----------
-// Mirrors FFmpegWorkerPool's job (web/worker-pool.js) for native processes —
-// batch "Generate All" can fire off several renders at once; cap how many
-// real ffmpeg subprocesses run concurrently so they don't oversubscribe the
-// CPU. One less than the core count, minimum 1, matches typical guidance for
-// leaving a core free for the OS/UI.
-const MAX_CONCURRENT_RENDERS = Math.max(1, os.cpus().length - 1);
-let activeRenders = 0;
-const renderQueue = [];
-function acquireRenderSlot() {
-  return new Promise((resolve) => {
-    const tryAcquire = () => {
-      if (activeRenders < MAX_CONCURRENT_RENDERS) {
-        activeRenders++;
-        resolve();
-      } else {
-        renderQueue.push(tryAcquire);
-      }
-    };
-    tryAcquire();
+// ---------- whisper availability ----------
+// Same shape as checkFfmpeg — cached, and checks for a specific capability
+// (word_timestamps support showing up in --help) rather than just "does a
+// binary named `whisper` exist", so an ancient/incompatible install reports
+// unavailable instead of failing every single transcription request.
+let whisperAvailable = null; // null = not checked yet, else boolean
+function checkWhisper(cb) {
+  if (whisperAvailable !== null) { cb(whisperAvailable); return; }
+  execFile("whisper", ["--help"], (err, stdout) => {
+    whisperAvailable = !err && /word_timestamps/.test(stdout || "");
+    cb(whisperAvailable);
   });
 }
-function releaseRenderSlot() {
-  activeRenders--;
-  const next = renderQueue.shift();
-  if (next) next();
+
+// ---------- concurrency limiter ----------
+// Mirrors FFmpegWorkerPool's job (web/worker-pool.js) for native processes —
+// batch "Generate All" can fire off several renders (and now transcriptions)
+// at once; cap how many real subprocesses of a given kind run concurrently
+// so they don't oversubscribe the CPU. One less than the core count, minimum
+// 1, matches typical guidance for leaving a core free for the OS/UI.
+// Rendering (ffmpeg) and transcription (whisper, CPU/PyTorch-heavy) are
+// different resource profiles, so each kind gets its own independent limiter
+// rather than sharing one pool — a render and a transcribe can run at once
+// without either starving the other's queue.
+function makeSlotLimiter(max) {
+  let active = 0;
+  const queue = [];
+  return {
+    acquire() {
+      return new Promise((resolve) => {
+        const tryAcquire = () => {
+          if (active < max) { active++; resolve(); }
+          else queue.push(tryAcquire);
+        };
+        tryAcquire();
+      });
+    },
+    release() {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    },
+  };
 }
+const MAX_CONCURRENT_RENDERS = Math.max(1, os.cpus().length - 1);
+const renderLimiter = makeSlotLimiter(MAX_CONCURRENT_RENDERS);
+const MAX_CONCURRENT_TRANSCRIBES = Math.max(1, os.cpus().length - 1);
+const transcribeLimiter = makeSlotLimiter(MAX_CONCURRENT_TRANSCRIBES);
 
 // ---------- SSE progress channels ----------
 // Keyed by a client-generated render id: the client opens an SSE connection
@@ -248,6 +269,62 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
   });
 }
 
+// Shells out to the user's own `whisper` CLI (openai-whisper) instead of any
+// in-browser ASR — real per-word timestamps from actually transcribing the
+// generated audio. Mirrors runNativeRender's temp-dir/cleanup/respond
+// conventions exactly; only the subprocess and output-parsing differ.
+// --fp16 False avoids a CPU-only slowdown/warning (confirmed live on this
+// machine: fp16 needs CUDA, and warns+degrades on CPU/Apple Silicon).
+function runNativeTranscribe(transcribeId, audio, respond) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-transcribe-"));
+  const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
+  fs.writeFileSync(path.join(dir, "audio.wav"), audio);
+
+  sendProgress(transcribeId, 10);
+  const proc = spawn("whisper", [
+    path.join(dir, "audio.wav"),
+    "--model", "tiny.en",
+    "--word_timestamps", "True",
+    "--output_format", "json",
+    "--output_dir", dir,
+    "--fp16", "False",
+  ], { cwd: dir });
+  let stderrTail = "";
+  proc.stderr.on("data", (chunk) => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+  });
+  proc.on("error", (err) => {
+    cleanup();
+    respond(500, { error: "Couldn't run whisper: " + err.message });
+  });
+  proc.on("close", (code) => {
+    if (code !== 0) {
+      cleanup();
+      respond(500, { error: `whisper exited with code ${code}\n${stderrTail.slice(-1000)}` });
+      return;
+    }
+    sendProgress(transcribeId, 90);
+    let json;
+    try {
+      // whisper names its output <input-basename>.json in --output_dir.
+      json = JSON.parse(fs.readFileSync(path.join(dir, "audio.json"), "utf8"));
+    } catch (e) {
+      cleanup();
+      respond(500, { error: "Transcription finished but output was missing/malformed: " + e.message });
+      return;
+    }
+    cleanup();
+    // Confirmed live against a real whisper run: segments[].words[] each
+    // {word, start, end, probability}, `word` with a leading space — flatten
+    // into the {text,start,end} shape alignWordsBySequence expects.
+    const words = (json.segments || []).flatMap(seg =>
+      (seg.words || []).map(w => ({ text: (w.word || "").trim(), start: w.start, end: w.end }))
+    );
+    sendProgress(transcribeId, 100);
+    respond(200, { words });
+  });
+}
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -313,9 +390,9 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ error: "Malformed render request: " + e.message }));
           return;
         }
-        await acquireRenderSlot();
+        await renderLimiter.acquire();
         const respond = (status, data, contentType) => {
-          releaseRenderSlot();
+          renderLimiter.release();
           closeProgressChannel(id);
           if (contentType) {
             res.writeHead(status, { "Content-Type": contentType, "Content-Length": data.length });
@@ -326,6 +403,54 @@ const server = http.createServer((req, res) => {
           }
         };
         runNativeRender(id, parsed.meta, parsed.bg, parsed.audio, parsed.music, parsed.titleCardImage, respond);
+      });
+    });
+    return;
+  }
+
+  // ---- Native transcribe backend routes (tier 1 of caption sync) ----
+  if (urlNoQuery === "/transcribe-capability" && req.method === "GET") {
+    checkWhisper((available) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ available }));
+    });
+    return;
+  }
+  if (urlNoQuery.startsWith("/transcribe-progress/") && req.method === "GET") {
+    const id = urlNoQuery.slice("/transcribe-progress/".length);
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
+    progressChannels.set(id, res);
+    req.on("close", () => { progressChannels.delete(id); });
+    return;
+  }
+  if (urlNoQuery === "/transcribe" && req.method === "POST") {
+    const id = new URL(req.url, "http://localhost").searchParams.get("id") || crypto.randomUUID();
+    checkWhisper((available) => {
+      if (!available) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "whisper isn't installed (or not on PATH)." }));
+        return;
+      }
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", async () => {
+        // No framing needed — the POST body is just the raw narration audio
+        // bytes. Unlike /render, whisper doesn't need the known script text
+        // (it transcribes freely); alignment against the known text happens
+        // client-side via alignWordsBySequence once this responds.
+        const audio = Buffer.concat(chunks);
+        await transcribeLimiter.acquire();
+        const respond = (status, data) => {
+          transcribeLimiter.release();
+          closeProgressChannel(id);
+          res.writeHead(status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(data));
+        };
+        runNativeTranscribe(id, audio, respond);
       });
     });
     return;

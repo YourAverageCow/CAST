@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 67;
+const VERSION = 68;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -64,13 +64,14 @@ const SETTINGS_FIELDS = [
   "voice", "captionPreset",
   "channelName",
   "ttsEngine", "ttsOpenaiKey", "ttsElevenlabsKey",
+  "enableBrowserAsr",
 ];
 function saveSettings() {
   try {
     const data = {};
     for (const id of SETTINGS_FIELDS) {
       const el = document.getElementById(id);
-      if (el) data[id] = el.value;
+      if (el) data[id] = el.type === "checkbox" ? el.checked : el.value;
     }
     localStorage.setItem("slopdaddy_settings", JSON.stringify(data));
   } catch (e) {}
@@ -88,7 +89,8 @@ function loadSettings() {
     // (rebuilt per-engine) — both restored once their options exist.
     for (const id of SETTINGS_FIELDS) {
       const el = document.getElementById(id);
-      if (el && data[id] !== undefined && id !== "model" && id !== "voice") el.value = data[id];
+      if (!el || data[id] === undefined || id === "model" || id === "voice") continue;
+      if (el.type === "checkbox") el.checked = !!data[id]; else el.value = data[id];
     }
     populateModels();
     if (data["model"]) {
@@ -127,9 +129,31 @@ async function probeNativeRenderBackend() {
   }
 }
 
+// Same probe pattern, for server.js's /transcribe (shells out to the user's
+// own installed `whisper` CLI) — real per-word timestamps from actually
+// transcribing the generated audio, tier 1 of the caption-sync cascade in
+// generateSpeech() below. Also always false on the deployed GitHub Pages
+// build (no server to answer), same as nativeRenderAvailable.
+let nativeWhisperAvailable = false;
+async function probeNativeWhisperBackend() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    const resp = await fetch("/transcribe-capability", { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return !!data.available;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  nativeRenderAvailable = await probeNativeRenderBackend();
+  [nativeRenderAvailable, nativeWhisperAvailable] = await Promise.all([
+    probeNativeRenderBackend(), probeNativeWhisperBackend(),
+  ]);
   buildEngineSelect();
   const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
   populateModels();
@@ -741,6 +765,137 @@ function queueTTS(fn) {
   return run;
 }
 
+// Tier 2 of the caption-sync cascade (the always-on default when native
+// Whisper isn't available and browser ASR isn't enabled) — a lightweight
+// Web Audio energy-threshold pass over the generated audio, no ML model, no
+// download. Finds REAL silence/pause boundaries so snapPausesToWords can
+// correct computeWordTimings' assumed pause length at punctuation instead
+// of trusting a guess. TTS output is clean single-speaker audio with a low
+// noise floor, so a trained VAD model's main advantage (robustness to
+// background noise) buys little here — confirmed in research before
+// building this. Returns [{start,end}] in seconds, or null on any failure.
+async function detectSilenceGaps(audioBlob) {
+  try {
+    const buf = await audioBlob.arrayBuffer();
+    const audioCtx = new AudioContext();
+    const audioBuffer = await audioCtx.decodeAudioData(buf);
+    audioCtx.close();
+    const data = audioBuffer.getChannelData(0);
+    const sampleRate = audioBuffer.sampleRate;
+    const windowSec = 0.02; // 20ms windows
+    const windowSize = Math.max(1, Math.round(sampleRate * windowSec));
+    const windowCount = Math.ceil(data.length / windowSize);
+    const energies = new Float32Array(windowCount);
+    let peak = 0;
+    for (let w = 0; w < windowCount; w++) {
+      const start = w * windowSize;
+      const end = Math.min(data.length, start + windowSize);
+      let sum = 0;
+      for (let i = start; i < end; i++) sum += data[i] * data[i];
+      const rms = Math.sqrt(sum / Math.max(1, end - start));
+      energies[w] = rms;
+      if (rms > peak) peak = rms;
+    }
+    if (peak <= 0) return null;
+    const threshold = peak * 0.08; // ~22dB below peak
+    // Confirmed live against real Piper output: natural inter-sentence
+    // pauses run ~100-140ms, not the 150ms originally assumed here — tuned
+    // down after that measurement so real (if brief) pauses actually register.
+    const minSilenceWindows = Math.round(0.09 / windowSec);
+    const gaps = [];
+    let runStart = -1;
+    for (let w = 0; w < windowCount; w++) {
+      if (energies[w] < threshold) {
+        if (runStart === -1) runStart = w;
+      } else if (runStart !== -1) {
+        if (w - runStart >= minSilenceWindows) {
+          gaps.push({ start: (runStart * windowSize) / sampleRate, end: (w * windowSize) / sampleRate });
+        }
+        runStart = -1;
+      }
+    }
+    if (runStart !== -1 && windowCount - runStart >= minSilenceWindows) {
+      gaps.push({ start: (runStart * windowSize) / sampleRate, end: (windowCount * windowSize) / sampleRate });
+    }
+    return gaps.length ? gaps : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Tier 3 (opt-in, #enableBrowserAsr) — a full in-browser Whisper via
+// @huggingface/transformers, mirroring ensureKokoro()'s lazy-singleton CDN-
+// import pattern exactly, for people without native Whisper who want real
+// alignment anyway and don't mind a one-time ~40MB model download plus real
+// per-generation processing time.
+const TRANSFORMERS_JS = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3";
+let browserWhisperPipeline = null;
+async function ensureBrowserWhisper() {
+  if (browserWhisperPipeline) return browserWhisperPipeline;
+  showDownloadToast("Preparing AI transcription (first time only, ~40MB)...");
+  try {
+    const mod = await import(TRANSFORMERS_JS);
+    browserWhisperPipeline = await mod.pipeline("automatic-speech-recognition", "Xenova/whisper-tiny.en");
+  } catch (e) {
+    hideDownloadToast();
+    throw e;
+  }
+  hideDownloadToast();
+  return browserWhisperPipeline;
+}
+// Same return shape as transcribeNatively (raw {text,start,end}[], not yet
+// aligned to the known script) so both tiers feed the same
+// alignWordsBySequence. transformers.js's per-word chunks come back as
+// {text, timestamp:[start,end]} — normalized here.
+async function transcribeInBrowser(audioBlob) {
+  try {
+    const pipe = await ensureBrowserWhisper();
+    const buf = await audioBlob.arrayBuffer();
+    const audioCtx = new AudioContext({ sampleRate: 16000 });
+    const audioBuffer = await audioCtx.decodeAudioData(buf);
+    audioCtx.close();
+    const result = await pipe(audioBuffer.getChannelData(0), { return_timestamps: "word" });
+    const chunks = result && result.chunks;
+    if (!chunks || !chunks.length) return null;
+    return chunks.map(c => ({ text: c.text, start: c.timestamp[0], end: c.timestamp[1] }));
+  } catch (e) {
+    return null;
+  }
+}
+
+// The caption-sync cascade — real alignment wins whenever available,
+// cheapest safety net last. Every ASR/VAD step is wrapped (transcribeNatively
+// /transcribeInBrowser/detectSilenceGaps all return null rather than throw
+// on failure) so a failure just falls through to the next tier instead of
+// breaking generation outright.
+//   0. engine's own real timing (ElevenLabs char-alignment, Browser Speech
+//      boundary events) — already resolved by the caller.
+//   1. native Whisper (server.js /transcribe) — silent, automatic.
+//   2. opt-in browser Whisper (#enableBrowserAsr) — only tried when native
+//      isn't available, since native is strictly better when present.
+//   3. computeWordTimings' estimate, corrected by real detected pauses
+//      (VAD) when neither ASR tier produced anything usable.
+async function resolveWordTimings(text, audioBlob, durationSec, engineWordTimings) {
+  if (engineWordTimings && engineWordTimings.length) return engineWordTimings;
+
+  let asrWords = null;
+  if (nativeWhisperAvailable) {
+    asrWords = await transcribeNatively(audioBlob);
+  } else {
+    const asrCheckbox = $("#enableBrowserAsr");
+    if (asrCheckbox && asrCheckbox.checked) asrWords = await transcribeInBrowser(audioBlob);
+  }
+  if (asrWords) {
+    const aligned = alignWordsBySequence(text, asrWords, durationSec);
+    if (aligned) return aligned;
+  }
+
+  let words = computeWordTimings(text, durationSec);
+  const pauseGaps = await detectSilenceGaps(audioBlob);
+  if (pauseGaps) words = snapPausesToWords(words, pauseGaps, durationSec);
+  return words;
+}
+
 async function generateSpeech(text, voice, engineId) {
   engineId = engineId || getEngine();
   const engine = TTS_ENGINES[engineId];
@@ -759,12 +914,7 @@ async function generateSpeech(text, voice, engineId) {
       const { audioBlob, durationSec, wordTimings } = await engine.generate(text, voice, config);
       hideDownloadToast();
       const audioUrl = URL.createObjectURL(audioBlob);
-      // Prefer an engine's own real per-word/character alignment (currently
-      // ElevenLabs, and Browser Speech when the browser's boundary events
-      // line up 1:1 with our tokenization) over the proportional-estimate
-      // fallback, which is what desyncs on number-heavy text since it has
-      // no access to the actual audio waveform.
-      const words = (wordTimings && wordTimings.length) ? wordTimings : computeWordTimings(text, durationSec);
+      const words = await resolveWordTimings(text, audioBlob, durationSec, wordTimings);
       return { audioUrl, words };
     } catch (e) {
       hideDownloadToast();
@@ -937,6 +1087,27 @@ async function renderVideoNatively(payload, onProgress) {
 function renderVideoInWorker(payload, onProgress) {
   if (nativeRenderAvailable) return renderVideoNatively(payload, onProgress);
   return ffmpegPool.submit((worker) => worker.render(payload, onProgress));
+}
+
+// Tier 1 of the caption-sync cascade (see generateSpeech()) — POSTs the raw
+// narration audio to server.js's /transcribe, which shells out to the
+// user's own installed `whisper` CLI for real per-word timestamps. No
+// framing needed (unlike /render): the server doesn't need the known
+// script text, just the audio — whisper transcribes freely, and matching
+// its output back onto the known text happens client-side via
+// alignWordsBySequence. Returns the raw {text,start,end}[] word list (not
+// yet aligned to the known script) or null on any failure, so the caller
+// falls through to the next tier cleanly.
+async function transcribeNatively(audioBlob) {
+  const id = crypto.randomUUID();
+  try {
+    const resp = await fetch(`/transcribe?id=${id}`, { method: "POST", body: audioBlob });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return (data && data.words && data.words.length) ? data.words : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // Snapshot of the global settings panel, in the same shape resolveJobSettings
