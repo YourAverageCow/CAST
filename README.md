@@ -1,5 +1,7 @@
 # Slopdaddy (Name Pending)
 
+> **⚠️ This branch (`web`) is the legacy zero-install browser version — not where active development happens anymore.** It's kept around for the "click a link, no install" case and gets backported bug fixes/pure-logic improvements when practical, but new features land on `main` first, which is moving toward a standalone local app (native rendering/transcription instead of in-browser WASM) rather than a pure static site. If you're developing this project rather than just using the hosted link, you probably want `main`.
+
 An AI slop video factory for making AITAH story videos. 
 
 ## About

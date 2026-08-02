@@ -230,6 +230,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .player-actions button:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 #browserNote { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); border-radius: 8px; padding: 10px 12px; font-size: 0.75rem; color: var(--muted); margin-bottom: 12px; line-height: 1.5; }
+#outdatedNote { background: rgba(240,166,50,0.1); border: 1px solid rgba(240,166,50,0.35); border-radius: 8px; padding: 10px 12px; font-size: 0.75rem; color: var(--text); margin-bottom: 12px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -342,6 +343,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <h1>Video Creator</h1>
   </div>
   <p class="subtitle">AITAH story videos — runs 100% in your browser</p>
+  <div id="outdatedNote">⚠️ This is the legacy zero-install web version, kept around for the "click a link, no install" case. It's no longer where active development happens — the actively developed version now runs as a local app with native rendering/transcription instead of in-browser WASM. Some newer features may not be here yet.</div>
   <div id="browserNote">Everything runs locally: TTS uses Piper (in-browser), video renders with ffmpeg.wasm. First use downloads the voice model + engine once.</div>
 
   <h2><span class="step-num">1</span>Background Video<span class="step-bar"></span></h2>
