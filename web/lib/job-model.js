@@ -11,6 +11,7 @@
 const JOB_OVERRIDE_FIELDS = [
   "voice", "resW", "resH", "fps",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
+  "captionPreset",
 ];
 
 // Inert today — reserved so a future scheduled-upload feature doesn't need
@@ -56,6 +57,16 @@ function createJob(overrides) {
     textColor: null,
     strokeColor: null,
     strokeWidth: null,
+    captionPreset: null, // "capcut" (one word at a time) | "classic" (grouped phrases)
+
+    // Music and title card aren't simple scalar overrides (files, booleans)
+    // so they don't go through resolveJobSettings' null-means-inherit
+    // mechanism — each job either has its own music/title-card state or
+    // doesn't; there's no "global music track" to fall back to.
+    musicFile: null,
+    musicVolume: 0.25, // 0..1, mixed under the narration track
+    titleCardEnabled: false,
+    titleCardText: null, // null = auto-extract from the story's first line
 
     resultBlob: null,
     resultUrl: null,

@@ -52,6 +52,17 @@ function buildSubsFromWords(words) {
   return subs;
 }
 
+// "CapCut style" preset: one word on screen at a time, each shown exactly
+// during its own spoken window — no grouping, no positional/highlight logic
+// needed, just a 1:1 mapping. Deliberately simple: this reuses the same
+// per-cue drawtext+enable() rendering path as the phrase-based preset with
+// zero new rendering complexity, unlike a true multi-word karaoke-highlight
+// effect (which would need precise sub-string pixel positioning inside a
+// phrase, measured independently of how ffmpeg itself lays out the text).
+function buildWordCues(words) {
+  return words.map(w => ({ start: w.start, end: w.end, text: w.text }));
+}
+
 // Remove characters TextEncoder/ffmpeg choke on (lone surrogates, control chars).
 function sanitizeText(s) {
   if (typeof s !== "string") return "";
@@ -62,5 +73,5 @@ function sanitizeText(s) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { computeWordTimings, buildSubsFromWords, sanitizeText };
+  module.exports = { computeWordTimings, buildSubsFromWords, buildWordCues, sanitizeText };
 }

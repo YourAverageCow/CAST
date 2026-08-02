@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { computeWordTimings, buildSubsFromWords, sanitizeText } = require("./captions.js");
+const { computeWordTimings, buildSubsFromWords, buildWordCues, sanitizeText } = require("./captions.js");
 
 test("computeWordTimings distributes duration proportionally to word length", () => {
   const times = computeWordTimings("a bb ccc", 6);
@@ -83,4 +83,24 @@ test("sanitizeText strips lone surrogates but keeps valid surrogate pairs", () =
 test("sanitizeText returns empty string for non-string input", () => {
   assert.equal(sanitizeText(null), "");
   assert.equal(sanitizeText(undefined), "");
+});
+
+test("buildWordCues maps each word 1:1 to its own cue, unlike buildSubsFromWords' grouping", () => {
+  const words = [
+    { text: "I", start: 0, end: 0.2 },
+    { text: "am", start: 0.25, end: 0.5 },
+    { text: "here", start: 0.55, end: 0.9 },
+  ];
+  const cues = buildWordCues(words);
+  assert.equal(cues.length, 3);
+  assert.deepEqual(cues[0], { start: 0, end: 0.2, text: "I" });
+  assert.deepEqual(cues[1], { start: 0.25, end: 0.5, text: "am" });
+  assert.deepEqual(cues[2], { start: 0.55, end: 0.9, text: "here" });
+});
+
+test("buildWordCues preserves timing gaps between words instead of merging them", () => {
+  const words = [{ text: "a", start: 0, end: 0.1 }, { text: "b", start: 5, end: 5.1 }];
+  const cues = buildWordCues(words);
+  assert.equal(cues[0].end, 0.1);
+  assert.equal(cues[1].start, 5);
 });

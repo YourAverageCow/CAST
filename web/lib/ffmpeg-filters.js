@@ -68,6 +68,79 @@ function buildDrawtextFilterChain({ w, h, bgW, bgH, fontSize, textColor, strokeC
   return { filterComplex: `[0:v]${stages.join(",")}[vout]`, outLabel: "vout" };
 }
 
+// Minimal RIFF/WAVE header parse: reads the byte rate and the "data" chunk
+// size to compute exact duration, without needing ffmpeg/ffprobe to do it.
+// Used to give the render an explicit `-t` bound when a title card delays
+// the narration — relying on `-shortest` alone was observed to let the
+// (infinitely-looped) background video run away well past the narration's
+// actual end once an overlay input was added to the graph, rather than
+// stopping where the delayed+bounded audio stream does.
+function parseWavDurationSec(bytes) {
+  if (!bytes || bytes.length < 44) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const fourcc = (off) => String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
+  if (fourcc(0) !== "RIFF" || fourcc(8) !== "WAVE") return null;
+  const byteRate = dv.getUint32(28, true);
+  if (!byteRate) return null;
+  let offset = 12;
+  while (offset + 8 <= bytes.length) {
+    const id = fourcc(offset);
+    const size = dv.getUint32(offset + 4, true);
+    if (id === "data") return size / byteRate;
+    offset += 8 + size + (size % 2); // chunks are word-aligned
+  }
+  return null;
+}
+
+// Narration is always present at `narrationInputIndex`; optionally mixed
+// under a looping music track at `musicInputIndex`. When a title card is
+// enabled, `delaySec` prepends silence to the narration (via adelay) so
+// speech starts only after the card's on-screen window — the caller is
+// responsible for shifting caption cue timings by the same amount, this
+// function only handles the audio side. Always routes through a labeled
+// filter chain (falls back to a no-op `anull` when there's nothing to do)
+// rather than special-casing "just map narration directly", so callers
+// never need to branch on whether a filter was actually applied.
+function buildAudioFilterChain({ narrationInputIndex, musicInputIndex, musicVolume, delaySec }) {
+  const delayMs = Math.max(0, Math.round((delaySec || 0) * 1000));
+  const stages = [];
+  const narrSrc = `${narrationInputIndex}:a`;
+  stages.push(
+    delayMs > 0
+      ? `[${narrSrc}]adelay=delays=${delayMs}:all=1[narr]`
+      : `[${narrSrc}]anull[narr]`
+  );
+  if (musicInputIndex == null) {
+    return { filterChain: stages.join(";"), outLabel: "narr" };
+  }
+  const vol = Math.max(0, Math.min(1, musicVolume == null ? 0.25 : musicVolume));
+  // aloop makes a short track repeat for the whole narration length; amix's
+  // duration=first stops the mixed output at the narration's length rather
+  // than the (now-infinite) looping music track's.
+  stages.push(`[${musicInputIndex}:a]volume=${vol},aloop=loop=-1:size=2e9[music]`);
+  stages.push(`[narr][music]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+  return { filterChain: stages.join(";"), outLabel: "aout" };
+}
+
+// Composites a pre-rendered title-card PNG (see app.js's canvas-based
+// renderTitleCardImage — text/avatar/badge layout is done there, not in
+// ffmpeg, so none of that complexity lives in the filter graph) over the
+// video for the first `cardDurationSec` seconds. Takes an already-built
+// video filter chain (e.g. from buildDrawtextFilterChain) and relabels its
+// output pad rather than needing to know its internals.
+function buildTitleCardOverlay({ videoFilterComplex, videoOutLabel, w, h, titleCardInputIndex, cardDurationSec }) {
+  const relabeled = videoFilterComplex.replace(
+    new RegExp(`\\[${videoOutLabel}\\]$`), "[capped]"
+  );
+  const scaleCard = `[${titleCardInputIndex}:v]scale=${w}:${h}[titlecard]`;
+  const between = `lt(t\\,${cardDurationSec.toFixed(3)})`;
+  const overlay = `[capped][titlecard]overlay=0:0:enable='${between}'[vout]`;
+  return { filterComplex: `${relabeled};${scaleCard};${overlay}`, outLabel: "vout" };
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { safeColor, buildCaptionCues, buildDrawtextFilterChain };
+  module.exports = {
+    safeColor, buildCaptionCues, buildDrawtextFilterChain,
+    buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
+  };
 }

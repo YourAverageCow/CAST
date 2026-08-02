@@ -2,7 +2,22 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   safeColor, buildCaptionCues, buildDrawtextFilterChain,
+  buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
 } = require("./ffmpeg-filters.js");
+
+function makeWav(durationSec, sampleRate) {
+  sampleRate = sampleRate || 44100;
+  const numSamples = Math.round(durationSec * sampleRate);
+  const buf = new ArrayBuffer(44 + numSamples * 2);
+  const dv = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF"); dv.setUint32(4, 36 + numSamples * 2, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sampleRate, true); dv.setUint32(28, sampleRate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  writeStr(36, "data"); dv.setUint32(40, numSamples * 2, true);
+  return bytes;
+}
 
 test("safeColor accepts plain color names", () => {
   assert.equal(safeColor("white", "black"), "white");
@@ -124,4 +139,58 @@ test("buildDrawtextFilterChain applies style consistently across every cue", () 
   assert.equal(count(/bordercolor=red/g), 3);
   assert.equal(count(/borderw=5/g), 3);
   assert.equal(count(/y=h\*0\.7-text_h\/2/g), 3);
+});
+
+test("buildAudioFilterChain maps narration directly (via anull) with no music and no delay", () => {
+  const { filterChain, outLabel } = buildAudioFilterChain({ narrationInputIndex: 1, musicInputIndex: null, musicVolume: null, delaySec: 0 });
+  assert.equal(outLabel, "narr");
+  assert.match(filterChain, /^\[1:a\]anull\[narr\]$/);
+});
+
+test("buildAudioFilterChain delays narration with adelay when a title card is enabled", () => {
+  const { filterChain, outLabel } = buildAudioFilterChain({ narrationInputIndex: 1, musicInputIndex: null, musicVolume: null, delaySec: 2.5 });
+  assert.equal(outLabel, "narr");
+  assert.match(filterChain, /\[1:a\]adelay=delays=2500:all=1\[narr\]/);
+});
+
+test("buildAudioFilterChain mixes music under narration, looped and volume-scaled", () => {
+  const { filterChain, outLabel } = buildAudioFilterChain({ narrationInputIndex: 1, musicInputIndex: 2, musicVolume: 0.3, delaySec: 0 });
+  assert.equal(outLabel, "aout");
+  assert.match(filterChain, /\[2:a\]volume=0\.3,aloop=loop=-1:size=2e9\[music\]/);
+  assert.match(filterChain, /\[narr\]\[music\]amix=inputs=2:duration=first:dropout_transition=0\[aout\]/);
+});
+
+test("buildAudioFilterChain clamps music volume to [0,1]", () => {
+  const tooLoud = buildAudioFilterChain({ narrationInputIndex: 1, musicInputIndex: 2, musicVolume: 5, delaySec: 0 });
+  assert.match(tooLoud.filterChain, /volume=1(?!\.)/); // clamped to 1, not 5
+  const negative = buildAudioFilterChain({ narrationInputIndex: 1, musicInputIndex: 2, musicVolume: -1, delaySec: 0 });
+  assert.match(negative.filterChain, /volume=0,/);
+});
+
+test("buildTitleCardOverlay relabels the video chain's output and appends a scale+overlay stage", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const video = buildDrawtextFilterChain({ w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues });
+  const { filterComplex, outLabel } = buildTitleCardOverlay({
+    videoFilterComplex: video.filterComplex, videoOutLabel: video.outLabel,
+    w: 1080, h: 1920, titleCardInputIndex: 3, cardDurationSec: 2.5,
+  });
+  assert.equal(outLabel, "vout");
+  // Original chain's output pad is renamed, not left dangling as [vout] twice.
+  assert.doesNotMatch(filterComplex.slice(0, filterComplex.indexOf("[titlecard]")), /\[vout\]/);
+  assert.match(filterComplex, /\[capped\]/);
+  assert.match(filterComplex, /\[3:v\]scale=1080:1920\[titlecard\]/);
+  assert.match(filterComplex, /\[capped\]\[titlecard\]overlay=0:0:enable='lt\(t\\,2\.500\)'\[vout\]$/);
+});
+
+test("parseWavDurationSec reads exact duration from a synthetic WAV header", () => {
+  assert.ok(Math.abs(parseWavDurationSec(makeWav(3.5)) - 3.5) < 1e-6);
+  // sample-count rounding (duration*sampleRate isn't always an integer)
+  // means this isn't bit-exact — a sub-millisecond tolerance is fine.
+  assert.ok(Math.abs(parseWavDurationSec(makeWav(0.25, 22050)) - 0.25) < 0.001);
+});
+
+test("parseWavDurationSec returns null for non-WAV or truncated input", () => {
+  assert.equal(parseWavDurationSec(new Uint8Array(10)), null);
+  assert.equal(parseWavDurationSec(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])), null);
+  assert.equal(parseWavDurationSec(null), null);
 });

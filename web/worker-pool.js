@@ -62,7 +62,10 @@ class PoolWorker {
   // need to be resent here.
   render(payload, onProgress) {
     return this._run((worker) => {
-      worker.postMessage(payload, [payload.bg.buffer, payload.audio.buffer]);
+      const transfer = [payload.bg.buffer, payload.audio.buffer];
+      if (payload.music) transfer.push(payload.music.buffer);
+      if (payload.titleCard && payload.titleCard.imageBytes) transfer.push(payload.titleCard.imageBytes);
+      worker.postMessage(payload, transfer);
     }, onProgress, /* watchdog */ true);
   }
 

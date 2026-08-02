@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 57;
+const VERSION = 58;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -14,6 +14,7 @@ let subtitles = [];           // [{start, end, text}]
 let previewActive = false;
 let previewRAF = null;
 let ttsAudio = null;
+let sidebarMusicFile = null; // background music for the sidebar's single-export flow
 
 // ---------- TTS & video engine state ----------
 // libritts_r is audiobook-trained and reads flat/monotone. These are more
@@ -88,7 +89,8 @@ const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "storyLength",
   "resW", "resH", "fps",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
-  "voice",
+  "voice", "captionPreset",
+  "channelName",
 ];
 function saveSettings() {
   try {
@@ -149,6 +151,7 @@ async function init() {
   // edge — recompute the preview's pixel-to-output scale when that happens.
   new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
   initBatchUI();
+  loadChannelProfilePic();
 }
 
 // Drag-to-resize for the left sidebar and the right settings panel. `sign`
@@ -320,6 +323,7 @@ async function sniffUnsupportedVideoCodec(file) {
 // anyway (-stream_loop -1), only the first CONVERT_MAX_SECONDS are needed.
 const CONVERT_FPS = 12;
 const CONVERT_MAX_SECONDS = 20;
+const TITLE_CARD_DURATION_SEC = 3;
 function seekVideo(video, t) {
   return new Promise((resolve) => {
     const onSeeked = () => { video.removeEventListener("seeked", onSeeked); resolve(); };
@@ -391,6 +395,21 @@ async function handleVideoUpload(input) {
   const file = input.files[0];
   if (!file) return;
   await setBackground(file, file.name);
+}
+// Background music for the sidebar's single-export flow. The auto-choice
+// library (bundled royalty-free tracks) is intentionally empty for now —
+// this is just the upload-your-own path, wired the same way it'll consume
+// a bundled library later without changing how a job carries its music.
+function handleMusicUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  sidebarMusicFile = file;
+  $("#musicStatus").textContent = file.name;
+}
+function clearMusic() {
+  sidebarMusicFile = null;
+  $("#musicInput").value = "";
+  $("#musicStatus").textContent = "No music selected.";
 }
 async function setBackground(file, label) {
   currentVideo = file;
@@ -762,6 +781,8 @@ function getGlobalSettings() {
     textColor: $("#textColor").value,
     strokeColor: $("#strokeColor").value,
     strokeWidth: parseInt($("#strokeWidth").value) || 3,
+    captionPreset: $("#captionPreset").value || "capcut",
+    channelName: $("#channelName").value.trim() || "Anonymous",
   };
 }
 
@@ -799,11 +820,36 @@ async function runJob(job, globalSettings, onUpdate) {
 
     update({ status: "voice", progressPct: 0, progressLabel: "Generating voice..." });
     const { audioUrl, words } = await generateSpeech(story, settings.voice);
-    const subs = buildSubsFromWords(words).map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
+    // "capcut" = one bold word at a time; "classic" = grouped phrases
+    // (the original style). Both feed the same per-cue drawtext+enable()
+    // render path — this only changes how cues are grouped, not how
+    // they're rendered.
+    const rawSubs = settings.captionPreset === "classic" ? buildSubsFromWords(words) : buildWordCues(words);
+    const subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
 
     const w = parseInt(settings.resW) || 1080;
     const h = parseInt(settings.resH) || 1920;
     const fps = parseInt(settings.fps) || 30;
+
+    let titleCardPayload = null;
+    let cardDurationSec = 0;
+    if (job.titleCardEnabled) {
+      update({ status: "render", progressPct: 5, progressLabel: "Building title card..." });
+      cardDurationSec = TITLE_CARD_DURATION_SEC;
+      const titleText = (job.titleCardText || extractTitleFromStory(story) || "Untitled").trim();
+      const cardBlob = await renderTitleCardImage({ title: titleText, channelName: globalSettings.channelName, w, h });
+      titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec };
+      // Narration/captions are delayed to start after the card — shift every
+      // cue's timing by the same amount so they land after the card ends
+      // exactly like the audio does (ffmpeg-worker.js delays the narration
+      // track itself via adelay using this same cardDurationSec).
+      for (const s of subs) { s.start += cardDurationSec; s.end += cardDurationSec; }
+    }
+
+    let musicPayload = null;
+    if (job.musicFile) {
+      musicPayload = new Uint8Array(await job.musicFile.arrayBuffer());
+    }
 
     update({ status: "render", progressPct: 30, progressLabel: "Rendering..." });
     const bg = new Uint8Array(await bgFile.arrayBuffer());
@@ -823,6 +869,8 @@ async function runJob(job, globalSettings, onUpdate) {
       type: "render",
       base: new URL("./", document.baseURI).href,
       bg, audio: audioData, subs, style, w, h, fps, bgW, bgH,
+      music: musicPayload, musicVolume: job.musicVolume,
+      titleCard: titleCardPayload,
     }, (pct) => update({ progressPct: pct, progressLabel: "Rendering..." }));
 
     const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
@@ -901,6 +949,10 @@ async function exportVideo() {
     bgFile: currentVideo,
     bgUnsupportedCodec: currentVideoUnsupportedCodec,
     bgTranscoded: currentVideoTranscoded,
+    titleCardEnabled: $("#titleCardEnabled").checked,
+    titleCardText: $("#titleCardText").value.trim() || null,
+    musicFile: sidebarMusicFile,
+    musicVolume: parseFloat($("#musicVolume").value) || 0.25,
   });
 
   await ensureFFmpeg(1);
@@ -951,6 +1003,363 @@ function downloadVideo(url) {
 }
 function copyVideoLink(url) {
   navigator.clipboard.writeText(url).then(() => showToast("Link copied!"));
+}
+
+// ---------- Title card ----------
+// Renders a fake-Reddit-post-style title card as a flat PNG using Canvas —
+// avatar, channel name + verified badge, wrapped title text, and a bottom
+// engagement row (like/comment/share icons). Doing all of this in Canvas
+// instead of ffmpeg's filter graph sidesteps drawtext's font/layout
+// limitations entirely (no font provider, no rich text layout, no icon
+// glyphs) — the whole card is just one flat image ffmpeg composites via
+// `overlay`, so none of that complexity has to live in the filter graph.
+// Not unit-tested — like autoTranscodeToH264's canvas work, this is DOM-
+// coupled glue code with no meaningful logic to test outside a real canvas.
+const CHANNEL_PROFILE_PIC_KEY = "slopdaddy_channelProfilePic";
+let channelProfilePicDataUrl = null;
+
+function loadChannelProfilePic() {
+  try { channelProfilePicDataUrl = localStorage.getItem(CHANNEL_PROFILE_PIC_KEY) || null; } catch (e) {}
+  updateProfilePicPreview();
+}
+function saveChannelProfilePic(dataUrl) {
+  channelProfilePicDataUrl = dataUrl;
+  try {
+    if (dataUrl) localStorage.setItem(CHANNEL_PROFILE_PIC_KEY, dataUrl);
+    else localStorage.removeItem(CHANNEL_PROFILE_PIC_KEY);
+  } catch (e) {}
+  updateProfilePicPreview();
+}
+function updateProfilePicPreview() {
+  const img = $("#channelProfilePicPreview");
+  if (!img) return;
+  if (channelProfilePicDataUrl) { img.src = channelProfilePicDataUrl; img.style.display = "block"; }
+  else { img.style.display = "none"; }
+}
+async function handleProfilePicUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("couldn't read image"));
+    reader.readAsDataURL(file);
+  });
+  saveChannelProfilePic(dataUrl);
+}
+function removeProfilePic() { saveChannelProfilePic(null); }
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function wrapCanvasText(ctx, text, maxWidth) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+  for (const w of words) {
+    const test = current ? current + " " + w : w;
+    if (current && ctx.measureText(test).width > maxWidth) {
+      lines.push(current);
+      current = w;
+    } else {
+      current = test;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+function drawHeartIcon(ctx, cx, cy, size, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  const r = size / 4;
+  ctx.arc(cx - r, cy - r, r, Math.PI, 0);
+  ctx.arc(cx + r, cy - r, r, Math.PI, 0);
+  ctx.lineTo(cx + size / 2, cy);
+  ctx.lineTo(cx, cy + size / 1.6);
+  ctx.lineTo(cx - size / 2, cy);
+  ctx.closePath();
+  ctx.fill();
+}
+function drawCommentIcon(ctx, cx, cy, size, color) {
+  ctx.fillStyle = color;
+  roundRectPath(ctx, cx - size / 2, cy - size / 2.4, size, size * 0.8, size * 0.2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx - size * 0.1, cy + size * 0.32);
+  ctx.lineTo(cx + size * 0.05, cy + size * 0.32);
+  ctx.lineTo(cx - size * 0.05, cy + size * 0.55);
+  ctx.closePath();
+  ctx.fill();
+}
+function drawShareIcon(ctx, cx, cy, size, color) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(2, size * 0.12);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + size / 2);
+  ctx.lineTo(cx, cy - size / 6);
+  ctx.moveTo(cx - size / 3, cy + size / 8);
+  ctx.lineTo(cx, cy - size / 6);
+  ctx.lineTo(cx + size / 3, cy + size / 8);
+  ctx.stroke();
+  ctx.beginPath();
+  roundRectPath(ctx, cx - size / 2, cy + size / 2 - size * 0.08, size, size * 0.28, size * 0.08);
+  ctx.stroke();
+}
+
+// Returns a PNG Blob sized w x h (matching the output resolution), with a
+// transparent background outside the card itself.
+async function renderTitleCardImage({ title, channelName, w, h }) {
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+
+  const cardX = Math.round(w * 0.06);
+  const cardW = w - cardX * 2;
+  const pad = Math.round(cardW * 0.07);
+  const avatarSize = Math.round(cardW * 0.15);
+  const titleFontSize = Math.round(cardW * 0.075);
+  const nameFontSize = Math.round(avatarSize * 0.4);
+
+  ctx.font = `bold ${titleFontSize}px sans-serif`;
+  const titleLines = wrapCanvasText(ctx, title || "Untitled", cardW - pad * 2);
+  const titleLineHeight = titleFontSize * 1.28;
+
+  const headerH = avatarSize + pad * 0.8;
+  const titleH = titleLines.length * titleLineHeight;
+  const footerH = Math.round(cardW * 0.09);
+  const cardH = pad * 2.4 + headerH + titleH + footerH;
+  const cardY = Math.round(h * 0.5 - cardH / 2);
+
+  // Card background
+  ctx.fillStyle = "#ffffff";
+  roundRectPath(ctx, cardX, cardY, cardW, cardH, Math.round(cardW * 0.03));
+  ctx.fill();
+
+  let y = cardY + pad;
+  const avatarX = cardX + pad, avatarY = y;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.clip();
+  if (channelProfilePicDataUrl) {
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = () => reject(new Error("bad avatar image"));
+        im.src = channelProfilePicDataUrl;
+      });
+      ctx.drawImage(img, avatarX, avatarY, avatarSize, avatarSize);
+    } catch (e) { ctx.fillStyle = "#cfd3d8"; ctx.fillRect(avatarX, avatarY, avatarSize, avatarSize); }
+  } else {
+    // Generic silhouette placeholder, no photo needed.
+    ctx.fillStyle = "#cfd3d8";
+    ctx.fillRect(avatarX, avatarY, avatarSize, avatarSize);
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize * 0.38, avatarSize * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize * 0.95, avatarSize * 0.3, Math.PI, 0);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // Channel name + verified badge
+  const nameX = avatarX + avatarSize + pad * 0.6;
+  const nameY = avatarY + avatarSize / 2;
+  ctx.fillStyle = "#0f1419";
+  ctx.font = `bold ${nameFontSize}px sans-serif`;
+  ctx.textBaseline = "middle";
+  const name = channelName || "Anonymous";
+  ctx.fillText(name, nameX, nameY);
+  const nameW = ctx.measureText(name).width;
+  const badgeR = nameFontSize * 0.42;
+  const badgeX = nameX + nameW + badgeR + nameFontSize * 0.3;
+  ctx.beginPath();
+  ctx.arc(badgeX, nameY, badgeR, 0, Math.PI * 2);
+  ctx.fillStyle = "#3ba8f5";
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = Math.max(2, badgeR * 0.28);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(badgeX - badgeR * 0.45, nameY);
+  ctx.lineTo(badgeX - badgeR * 0.1, nameY + badgeR * 0.35);
+  ctx.lineTo(badgeX + badgeR * 0.5, nameY - badgeR * 0.4);
+  ctx.stroke();
+
+  // Title text
+  y = cardY + pad + headerH;
+  ctx.fillStyle = "#0f1419";
+  ctx.font = `bold ${titleFontSize}px sans-serif`;
+  ctx.textBaseline = "alphabetic";
+  for (const line of titleLines) {
+    y += titleLineHeight;
+    ctx.fillText(line, cardX + pad, y);
+  }
+
+  // Footer engagement row (icons only; counts are decorative placeholders,
+  // matching how these story-video title cards conventionally look).
+  const footerY = cardY + cardH - footerH / 2 - pad * 0.3;
+  const iconSize = footerH * 0.55;
+  let fx = cardX + pad;
+  drawHeartIcon(ctx, fx, footerY, iconSize, "#8b98a5");
+  fx += iconSize + iconSize * 0.4;
+  ctx.fillStyle = "#8b98a5";
+  ctx.font = `${Math.round(iconSize * 0.7)}px sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.fillText("99+", fx, footerY);
+  fx += ctx.measureText("99+").width + iconSize * 1.2;
+  drawCommentIcon(ctx, fx, footerY, iconSize, "#8b98a5");
+  fx += iconSize + iconSize * 0.4;
+  ctx.fillStyle = "#8b98a5";
+  ctx.fillText("99+", fx, footerY);
+
+  const shareX = cardX + cardW - pad - iconSize * 2.2;
+  drawShareIcon(ctx, shareX, footerY, iconSize, "#8b98a5");
+  ctx.fillStyle = "#8b98a5";
+  ctx.font = `${Math.round(iconSize * 0.6)}px sans-serif`;
+  ctx.fillText("Share", shareX + iconSize, footerY);
+
+  return await new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
+}
+
+// Extracts the story's title line for the auto-title-card case — mirrors
+// the "AITAH for X" first-line convention the story prompts already enforce.
+function extractTitleFromStory(story) {
+  const firstLine = (story || "").split("\n").find(l => l.trim());
+  return (firstLine || "").trim().slice(0, 140);
+}
+
+// ---------- Debug tools ----------
+// Lets caption/title-card/style changes be checked in seconds, without
+// generating a story or waiting on Piper TTS — this is exactly the kind of
+// check that had to be hand-scripted in a console during development.
+async function previewTitleCard() {
+  const title = extractTitleFromStory($("#storyText").value.trim()) || "AITAH for testing this feature";
+  const channelName = $("#channelName").value.trim() || "Anonymous";
+  const blob = await renderTitleCardImage({ title, channelName, w: 1080, h: 1920 });
+  const img = $("#debugImagePreview");
+  const url = URL.createObjectURL(blob);
+  if (img.dataset.prevUrl) URL.revokeObjectURL(img.dataset.prevUrl);
+  img.src = url;
+  img.dataset.prevUrl = url;
+  $("#debugImageOverlay").classList.add("show");
+}
+function closeDebugImagePreview() {
+  $("#debugImageOverlay").classList.remove("show");
+}
+
+// A flat-color "background" built from one repeated JPEG frame, streamed
+// through the same convertFrame/convertFinish worker path autoTranscodeToH264
+// already uses — so the debug tool doesn't require a real background video
+// to be uploaded first.
+async function makeSolidColorClip(w, h, durationSec) {
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#4a4f57";
+  ctx.fillRect(0, 0, w, h);
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+  const bin = atob(dataUrl.split(",")[1]);
+  const bytes = new Uint8Array(bin.length);
+  for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+
+  const frameCount = Math.max(1, Math.round(durationSec * CONVERT_FPS));
+  return ffmpegPool.submit(async (worker) => {
+    for (let i = 0; i < frameCount; i++) worker.postFrame(i, bytes.slice(0));
+    return worker.transcodeFinish(CONVERT_FPS, frameCount);
+  });
+}
+function makeSilentWavBytes(durationSec) {
+  const sr = 22050;
+  const numSamples = Math.max(1, Math.round(durationSec * sr));
+  const buf = new ArrayBuffer(44 + numSamples * 2);
+  const dv = new DataView(buf);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF"); dv.setUint32(4, 36 + numSamples * 2, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  writeStr(36, "data"); dv.setUint32(40, numSamples * 2, true);
+  return new Uint8Array(buf);
+}
+
+// Runs a short, fast real render through the exact same pipeline as a real
+// export (captions, title card) using typed sample text and a synthesized
+// silent track instead of a generated story + TTS. No music mixing here —
+// music doesn't affect anything visual, so it's not worth the extra wait.
+async function runDebugTestRender() {
+  const statusEl = $("#debugStatus");
+  const btn = $("#debugRenderBtn");
+  btn.disabled = true;
+  statusEl.textContent = "Rendering test clip...";
+  try {
+    const sampleText = sanitizeText($("#debugSampleText").value.trim()) || "Debug test caption.";
+    const words = computeWordTimings(sampleText, 0); // ~150wpm fallback timing, no TTS needed
+    const globalSettings = getGlobalSettings();
+    const rawSubs = globalSettings.captionPreset === "classic" ? buildSubsFromWords(words) : buildWordCues(words);
+    let subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
+    const narrationSec = Math.max(1, (subs.length ? subs[subs.length - 1].end : 3) + 0.5);
+
+    const w = 640, h = 360; // small + fast — this is a style/timing check, not a real export
+    await ensureFFmpeg(1);
+
+    let bgFile = currentVideo;
+    let bgW = 0, bgH = 0;
+    if (bgFile) {
+      const dims = await probeVideoDimensions(bgFile);
+      bgW = dims.w; bgH = dims.h;
+    } else {
+      bgFile = await makeSolidColorClip(w, h, narrationSec + TITLE_CARD_DURATION_SEC);
+      bgW = w; bgH = h;
+    }
+
+    let titleCardPayload = null;
+    let cardDurationSec = 0;
+    if ($("#titleCardEnabled").checked) {
+      cardDurationSec = TITLE_CARD_DURATION_SEC;
+      const title = extractTitleFromStory($("#storyText").value.trim()) || "AITAH for a debug test";
+      const cardBlob = await renderTitleCardImage({ title, channelName: globalSettings.channelName, w, h });
+      titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec };
+      subs = subs.map(s => ({ start: s.start + cardDurationSec, end: s.end + cardDurationSec, text: s.text }));
+    }
+
+    const bg = new Uint8Array(await bgFile.arrayBuffer());
+    const audio = makeSilentWavBytes(narrationSec);
+    const style = {
+      fontSize: parseInt(globalSettings.fontSize) || 68,
+      textColor: globalSettings.textColor,
+      strokeColor: globalSettings.strokeColor,
+      strokeWidth: parseInt(globalSettings.strokeWidth) || 3,
+      positionY: parseFloat(globalSettings.positionY) || 0.55,
+    };
+
+    const outBytes = await renderVideoInWorker({
+      type: "render",
+      base: new URL("./", document.baseURI).href,
+      bg, audio, subs, style, w, h, fps: 24, bgW, bgH,
+      music: null, musicVolume: 0,
+      titleCard: titleCardPayload,
+    }, (pct) => { statusEl.textContent = `Rendering test clip... ${pct}%`; });
+
+    const url = URL.createObjectURL(new Blob([outBytes.buffer], { type: "video/mp4" }));
+    previewExported(url);
+    statusEl.textContent = "Done — captions" + (titleCardPayload ? " + title card" : "") + " above.";
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = "Failed: " + (e && e.message ? e.message : String(e));
+  }
+  btn.disabled = false;
 }
 
 // ---------- Batch composer ----------
@@ -1044,6 +1453,13 @@ function buildBatchCardElement(job) {
     <select class="bc-voice">${voiceOpts}</select>
     <button class="bc-customize-toggle">Customize style &#9662;</button>
     <div class="bc-customize" style="display:none">
+      <div class="field-full"><label>Caption preset</label>
+        <select class="bc-captionPreset">
+          <option value="">Use settings preset</option>
+          <option value="capcut">CapCut (one word at a time)</option>
+          <option value="classic">Classic (grouped phrases)</option>
+        </select>
+      </div>
       <div><label>Width</label><input type="number" class="bc-resW" min="480" max="2160" step="2"></div>
       <div><label>Height</label><input type="number" class="bc-resH" min="480" max="3840" step="2"></div>
       <div><label>FPS</label><input type="number" class="bc-fps" min="10" max="60"></div>
@@ -1053,6 +1469,22 @@ function buildBatchCardElement(job) {
       <div><label>Text Color</label><input type="text" class="bc-textColor"></div>
       <div><label>Stroke Color</label><input type="text" class="bc-strokeColor"></div>
       <div class="field-full"><label>Stroke Width</label><input type="number" class="bc-strokeWidth" min="0" max="10"></div>
+      <div class="field-full">
+        <label style="display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" class="bc-titleCard" style="width:auto;"> Title card
+        </label>
+        <input type="text" class="bc-titleCardText" placeholder="Auto title from story (or type your own)" style="margin-top:6px;">
+      </div>
+      <div class="field-full">
+        <label>Background music</label>
+        <div class="row">
+          <input type="file" class="bc-music-input" accept="audio/*" style="display:none">
+          <button class="accent bc-music-upload" style="flex:1;">Upload</button>
+          <button class="bc-music-clear" style="flex:1;">None</button>
+        </div>
+        <p class="bc-music-status" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
+        <input type="range" class="bc-musicVolume" min="0" max="1" step="0.05" value="0.25">
+      </div>
     </div>
   `;
 
@@ -1080,6 +1512,26 @@ function buildBatchCardElement(job) {
   });
 
   div.querySelector(".bc-voice").addEventListener("change", (e) => { job.voice = e.target.value || null; });
+  div.querySelector(".bc-captionPreset").addEventListener("change", (e) => { job.captionPreset = e.target.value || null; });
+
+  div.querySelector(".bc-titleCard").addEventListener("change", (e) => { job.titleCardEnabled = e.target.checked; });
+  div.querySelector(".bc-titleCardText").addEventListener("input", (e) => { job.titleCardText = e.target.value || null; });
+
+  const musicStatus = div.querySelector(".bc-music-status");
+  const musicInput = div.querySelector(".bc-music-input");
+  div.querySelector(".bc-music-upload").onclick = () => musicInput.click();
+  musicInput.onchange = () => {
+    const file = musicInput.files[0];
+    if (!file) return;
+    job.musicFile = file;
+    musicStatus.textContent = file.name;
+  };
+  div.querySelector(".bc-music-clear").onclick = () => {
+    job.musicFile = null;
+    musicInput.value = "";
+    musicStatus.textContent = "No music selected.";
+  };
+  div.querySelector(".bc-musicVolume").addEventListener("input", (e) => { job.musicVolume = parseFloat(e.target.value); });
 
   const customizeToggle = div.querySelector(".bc-customize-toggle");
   const customizePanel = div.querySelector(".bc-customize");
@@ -1092,7 +1544,7 @@ function buildBatchCardElement(job) {
   // user actually types something — mirrors resolveJobSettings' null/""
   // fallback rule in lib/job-model.js.
   for (const field of JOB_OVERRIDE_FIELDS) {
-    if (field === "voice") continue; // handled above via <select>
+    if (field === "voice" || field === "captionPreset") continue; // handled above via <select> (change, not input)
     const input = div.querySelector(`.bc-${field}`);
     if (!input) continue;
     input.addEventListener("input", () => {

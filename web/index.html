@@ -220,6 +220,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 /* Player panel (right side) */
 #playerOverlay { display: none; position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 300; box-shadow: -8px 0 30px rgba(0,0,0,0.5); }
 #playerOverlay.show { display: block; }
+#debugImageOverlay { display: none; position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 300; box-shadow: -8px 0 30px rgba(0,0,0,0.5); }
+#debugImageOverlay.show { display: block; }
 .player-box { position: relative; height: 100%; display: flex; flex-direction: column; padding: 20px; gap: 12px; overflow-y: auto; }
 .player-box video { width: 100%; border-radius: 8px; background: #000; aspect-ratio: 9/16; object-fit: contain; }
 .player-close { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font-size: 0.9rem; display: flex; align-items: center; justify-content: center; padding: 0; z-index: 2; }
@@ -269,7 +271,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   </div>
   <div class="settings-section">
     <h3>Caption Style</h3>
-    <div class="caption-grid">
+    <label>Preset</label>
+    <select id="captionPreset">
+      <option value="capcut" selected>CapCut (one word at a time)</option>
+      <option value="classic">Classic (grouped phrases)</option>
+    </select>
+    <div class="caption-grid" style="margin-top:8px;">
       <div><label>Font</label><input type="text" id="font" value="Arial"></div>
       <div><label>Font Size</label><input type="number" id="fontSize" value="68" min="24" max="120"></div>
       <div><label>Position Y</label><input type="number" id="positionY" value="0.55" min="0.05" max="0.95" step="0.01"></div>
@@ -281,6 +288,30 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   <div class="settings-section">
     <h3>Voice</h3>
     <select id="voice"></select>
+  </div>
+  <div class="settings-section">
+    <h3>Title Card Identity</h3>
+    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Used when a video has the title card enabled. The title card itself is turned on per-video.</p>
+    <label>Channel Name</label>
+    <input type="text" id="channelName" placeholder="Anonymous" value="Anonymous">
+    <label style="margin-top:8px;">Profile Picture</label>
+    <div class="row" style="align-items:center;gap:10px;">
+      <img id="channelProfilePicPreview" style="display:none;width:40px;height:40px;border-radius:50%;object-fit:cover;">
+      <button class="accent" onclick="document.getElementById('channelProfilePicInput').click()" style="flex:1;">Upload</button>
+      <button onclick="removeProfilePic()" style="flex:1;">Remove</button>
+    </div>
+    <input type="file" id="channelProfilePicInput" accept="image/*" style="display:none" onchange="handleProfilePicUpload(this)">
+  </div>
+  <div class="settings-section">
+    <h3>Debug</h3>
+    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Check how captions/title card actually look without generating a full story or waiting on TTS.</p>
+    <label>Sample caption text</label>
+    <textarea id="debugSampleText" rows="2">This is a test caption line for checking timing and style.</textarea>
+    <div class="row" style="margin-top:8px;">
+      <button class="accent" onclick="previewTitleCard()">Preview Title Card</button>
+      <button class="primary" onclick="runDebugTestRender()" id="debugRenderBtn">Test Render (real, ~3s clip)</button>
+    </div>
+    <p id="debugStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
   </div>
 </div>
 
@@ -317,6 +348,23 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <option value="">Use settings voice</option>
     </select>
   </div>
+  <div class="row" style="align-items:center;margin-top:4px;">
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--text);margin:0;">
+      <input type="checkbox" id="titleCardEnabled" style="width:auto;"> Title card
+    </label>
+  </div>
+  <input type="text" id="titleCardText" placeholder="Auto title from story (or type your own)" style="margin-top:6px;">
+
+  <label style="margin-top:10px;">Background Music</label>
+  <div class="row">
+    <input type="file" id="musicInput" accept="audio/*" style="display:none" onchange="handleMusicUpload(this)">
+    <button class="accent" onclick="document.getElementById('musicInput').click()" style="flex:1;">Upload track</button>
+    <button onclick="clearMusic()" style="flex:1;">None</button>
+  </div>
+  <p id="musicStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
+  <label style="margin-top:4px;">Music Volume</label>
+  <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25">
+
   <div class="row">
     <button class="accent" onclick="startPreview()" id="previewBtn">Preview</button>
     <button class="primary" onclick="exportVideo()" id="exportBtn" style="margin-top:0">Export Video</button>
@@ -384,6 +432,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <button onclick="downloadVideo(document.getElementById('playerVideo').src)">Download</button>
       <button onclick="copyVideoLink(document.getElementById('playerVideo').src)">Copy Link</button>
     </div>
+  </div>
+</div>
+
+<div id="debugImageOverlay">
+  <div class="player-box">
+    <button class="player-close" onclick="closeDebugImagePreview()">X</button>
+    <h2 style="margin:0;color:var(--text);text-transform:none;letter-spacing:0;">Title Card Preview</h2>
+    <img id="debugImagePreview" style="width:100%;border-radius:8px;">
   </div>
 </div>
 

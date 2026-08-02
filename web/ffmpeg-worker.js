@@ -115,8 +115,48 @@ self.onmessage = async (e) => {
       ffmpeg.FS.writeFile("bg.mp4", new Uint8Array(msg.bg));
       ffmpeg.FS.writeFile("audio.wav", new Uint8Array(msg.audio));
 
-      const { filterComplex, outLabel, writtenFiles } =
+      const hasMusic = !!msg.music;
+      const hasTitleCard = !!(msg.titleCard && msg.titleCard.imageBytes);
+      const cardDurationSec = hasTitleCard ? (msg.titleCard.cardDurationSec || 0) : 0;
+      if (hasMusic) ffmpeg.FS.writeFile("music.mp3", new Uint8Array(msg.music));
+      if (hasTitleCard) ffmpeg.FS.writeFile("titlecard.png", new Uint8Array(msg.titleCard.imageBytes));
+
+      let { filterComplex: videoFC, outLabel: videoOutLabel, writtenFiles } =
         buildCaptionFilter(msg.subs || [], msg.style || {}, msg.w, msg.h, msg.bgW, msg.bgH);
+
+      // Input indices: 0=bg (looped), 1=narration, then whichever of
+      // music/title-card are actually present, in that order.
+      let nextInput = 2;
+      const musicInputIndex = hasMusic ? nextInput++ : null;
+      const titleCardInputIndex = hasTitleCard ? nextInput++ : null;
+
+      if (hasTitleCard) {
+        const overlay = buildTitleCardOverlay({
+          videoFilterComplex: videoFC, videoOutLabel,
+          w: msg.w, h: msg.h, titleCardInputIndex, cardDurationSec,
+        });
+        videoFC = overlay.filterComplex;
+        videoOutLabel = overlay.outLabel;
+      }
+      // Narration is delayed by the title-card duration (silence up front)
+      // so speech doesn't start until the card's on-screen window ends —
+      // caption cue timings are shifted by the same amount before they ever
+      // reach this worker (app.js), so the two stay in sync.
+      const audio = buildAudioFilterChain({
+        narrationInputIndex: 1, musicInputIndex, musicVolume: msg.musicVolume, delaySec: cardDurationSec,
+      });
+      const filterComplex = `${videoFC};${audio.filterChain}`;
+
+      const inputArgs = ["-stream_loop", "-1", "-i", "bg.mp4", "-i", "audio.wav"];
+      if (hasMusic) inputArgs.push("-i", "music.mp3");
+      // -loop 1 alone makes this an unbounded stream with no framerate of
+      // its own — pin both explicitly (matching the main output's fps, and
+      // a duration comfortably past when the overlay stops drawing it) so
+      // it can't desync from -shortest's bound on the other streams or
+      // starve the overlay filter waiting on frames at a mismatched rate.
+      if (hasTitleCard) {
+        inputArgs.push("-loop", "1", "-framerate", String(msg.fps), "-t", String(cardDurationSec + 1), "-i", "titlecard.png");
+      }
 
       // Only the mt core has real OS threads for libx264 to use — on the st
       // core this would be a silent no-op, but there's no reason to ask.
@@ -124,22 +164,33 @@ self.onmessage = async (e) => {
         ? ["-threads", String(Math.max(1, Math.min(8, self.navigator.hardwareConcurrency || 4)))]
         : [];
 
+      // -shortest alone was observed to let the (infinitely-looped)
+      // background run well past the narration's real end once a title-card
+      // overlay input was added to the graph — give the encode an explicit
+      // hard stop, computed from the narration's actual WAV duration, as a
+      // belt-and-suspenders bound rather than trusting -shortest here.
+      const durationArgs = [];
+      if (hasTitleCard) {
+        const narrDurationSec = parseWavDurationSec(new Uint8Array(msg.audio));
+        if (narrDurationSec) durationArgs.push("-t", (cardDurationSec + narrDurationSec + 0.5).toFixed(3));
+      }
+
       runFFmpeg([
-        "-stream_loop", "-1",
-        "-i", "bg.mp4",
-        "-i", "audio.wav",
+        ...inputArgs,
         "-filter_complex", filterComplex,
-        "-map", `[${outLabel}]`, "-map", "1:a",
+        "-map", `[${videoOutLabel}]`, "-map", `[${audio.outLabel}]`,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", ...threadArgs,
         "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
         "-r", String(msg.fps),
-        "-shortest", "-y", "out.mp4",
+        "-shortest", ...durationArgs, "-y", "out.mp4",
       ]);
 
       const data = ffmpeg.FS.readFile("out.mp4");
       const out = new Uint8Array(data);
       self.postMessage({ type: "done", data: out.buffer }, [out.buffer]);
       safeUnlink("bg.mp4"); safeUnlink("audio.wav"); safeUnlink("out.mp4");
+      if (hasMusic) safeUnlink("music.mp3");
+      if (hasTitleCard) safeUnlink("titlecard.png");
       writtenFiles.forEach(safeUnlink);
     } else if (msg.type === "ready") {
       await ensureLoaded(msg.base, msg.font, msg.forceST);
