@@ -4,7 +4,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 70;
+const VERSION = 71;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -240,6 +240,8 @@ async function init() {
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
   new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
+  initMediaLibraryUI();
+  refreshMediaLibraryCache();
   initBatchUI();
   loadChannelProfilePic();
   initAppUpdates();
@@ -1973,6 +1975,201 @@ async function runDebugTestRender() {
   btn.disabled = false;
 }
 
+// ---------- Media library (IndexedDB-backed persistent uploads) ----------
+// User-uploaded video/audio files that stay available across sessions,
+// unlike bgFile/musicFile (plain in-memory File objects, gone on reload).
+// One IndexedDB database, one object store keyed by id, blobs stored
+// natively (no base64 tax). Every consumer (single-flow upload, batch-card
+// upload, bulk-generate's random assignment) gets a real File back from
+// getMediaLibraryFile() and hands it to the exact same setBackground()/
+// setBatchCardBackground() entry points a manual upload already uses.
+const MEDIA_LIBRARY_DB_NAME = "slopdaddy-media-library";
+const MEDIA_LIBRARY_STORE = "items";
+let mediaLibraryDB = null;
+function openMediaLibraryDB() {
+  if (mediaLibraryDB) return Promise.resolve(mediaLibraryDB);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(MEDIA_LIBRARY_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const store = req.result.createObjectStore(MEDIA_LIBRARY_STORE, { keyPath: "id" });
+      store.createIndex("kind", "kind", { unique: false });
+    };
+    req.onsuccess = () => { mediaLibraryDB = req.result; resolve(mediaLibraryDB); };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// Cache of metadata (no blobs, to keep this light) so bulk-generate's random
+// pick and the picker UI don't need to re-await IndexedDB on every call.
+// Refreshed after every add/delete and once at startup (see init()).
+let mediaLibraryCache = { video: [], audio: [] };
+async function refreshMediaLibraryCache() {
+  mediaLibraryCache = {
+    video: await listMediaLibraryItems("video"),
+    audio: await listMediaLibraryItems("audio"),
+  };
+}
+
+async function addMediaLibraryItem(file, kind) {
+  const db = await openMediaLibraryDB();
+  const record = buildMediaItemRecord(file, kind);
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_LIBRARY_STORE, "readwrite");
+    tx.objectStore(MEDIA_LIBRARY_STORE).put({ ...record, blob: file });
+    tx.oncomplete = () => resolve(record);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function listMediaLibraryItems(kind) {
+  const db = await openMediaLibraryDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_LIBRARY_STORE, "readonly");
+    const store = tx.objectStore(MEDIA_LIBRARY_STORE);
+    const source = kind ? store.index("kind") : store;
+    const req = kind ? source.getAll(kind) : source.getAll();
+    req.onsuccess = () => {
+      // Metadata only — strip the blob so the list/cache doesn't hold every
+      // stored file's bytes in memory at once.
+      resolve(req.result.map(({ blob, ...meta }) => meta));
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getMediaLibraryFile(id) {
+  const db = await openMediaLibraryDB();
+  const record = await new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_LIBRARY_STORE, "readonly");
+    const req = tx.objectStore(MEDIA_LIBRARY_STORE).get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  if (!record) return null;
+  return new File([record.blob], record.name, { type: record.mimeType });
+}
+
+async function deleteMediaLibraryItem(id) {
+  const db = await openMediaLibraryDB();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_LIBRARY_STORE, "readwrite");
+    tx.objectStore(MEDIA_LIBRARY_STORE).delete(id);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  await refreshMediaLibraryCache();
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) return "0 KB";
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+// null when opened in manage mode (delete-only); a callback when opened as a
+// picker (row click hands the picked File to it and closes the modal).
+let mediaLibraryPickCallback = null;
+let mediaLibraryPickKind = null; // restricts the picker's list to one kind
+
+function openMediaLibrary(onPick, kind) {
+  mediaLibraryPickCallback = onPick || null;
+  mediaLibraryPickKind = kind || null;
+  $("#mediaLibraryOverlay").classList.add("show");
+  renderMediaLibraryList();
+}
+function closeMediaLibrary() {
+  $("#mediaLibraryOverlay").classList.remove("show");
+  mediaLibraryPickCallback = null;
+}
+
+function renderMediaLibraryList() {
+  const list = $("#mediaLibraryList");
+  const items = mediaLibraryPickKind
+    ? mediaLibraryCache[mediaLibraryPickKind]
+    : [...mediaLibraryCache.video, ...mediaLibraryCache.audio];
+  if (!items.length) {
+    list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">${mediaLibraryPickKind ? "No " + mediaLibraryPickKind + " files saved yet." : "No files saved yet."} Drag files above to add them.</p>`;
+    return;
+  }
+  list.innerHTML = items.map(item => `
+    <div class="media-library-item" data-id="${item.id}">
+      <span class="media-library-item-kind">${item.kind === "audio" ? "🎵" : "🎬"}</span>
+      <span class="media-library-item-name">${escapeHtml(item.name)}</span>
+      <span class="media-library-item-size">${formatFileSize(item.size)}</span>
+      <button class="media-library-item-delete" title="Delete">&times;</button>
+    </div>
+  `).join("");
+  for (const row of list.querySelectorAll(".media-library-item")) {
+    const id = row.dataset.id;
+    if (mediaLibraryPickCallback) {
+      row.querySelector(".media-library-item-name").style.cursor = "pointer";
+      row.addEventListener("click", async (e) => {
+        if (e.target.classList.contains("media-library-item-delete")) return;
+        const file = await getMediaLibraryFile(id);
+        if (file) { mediaLibraryPickCallback(file); closeMediaLibrary(); }
+      });
+    }
+    row.querySelector(".media-library-item-delete").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await deleteMediaLibraryItem(id);
+      renderMediaLibraryList();
+      showToast("Removed from library.");
+    });
+  }
+}
+
+// Video files with a codec the in-browser renderer can't read (AV1/VP9/VP8 —
+// same check runJob does before rendering, sniffUnsupportedVideoCodec) are
+// converted to H.264 up front, before they're stored — so anything pulled
+// back out of the library later (single-flow, batch cards, bulk-generate's
+// random assignment) is already render-ready and never needs the per-job
+// transcode-on-first-render path at all.
+async function addFilesToMediaLibrary(files) {
+  let added = 0;
+  for (let file of files) {
+    const kind = inferKindFromMimeType(file.type);
+    if (kind !== "video" && kind !== "audio") continue;
+    if (!file.type.startsWith("video/") && !file.type.startsWith("audio/")) continue;
+    if (kind === "video") {
+      const codec = await sniffUnsupportedVideoCodec(file);
+      if (codec) {
+        showDownloadToast(`Converting ${codec} video to H.264...`);
+        try {
+          const blob = await autoTranscodeToH264(file, (pct) => showDownloadToast(`Converting ${codec} video to H.264... ${pct}%`));
+          file = new File([blob], file.name, { type: "video/mp4" });
+        } catch (e) {
+          hideDownloadToast();
+          showToast(`Couldn't convert "${file.name}" (${codec}): ${e.message}`, 6000);
+          continue;
+        }
+        hideDownloadToast();
+      }
+    }
+    await addMediaLibraryItem(file, kind);
+    added++;
+  }
+  await refreshMediaLibraryCache();
+  renderMediaLibraryList();
+  if (added) showToast(added === 1 ? "Added to library." : `Added ${added} files to library.`);
+}
+
+function handleMediaLibraryUpload(input) {
+  if (input.files.length) addFilesToMediaLibrary([...input.files]);
+  input.value = "";
+}
+
+function initMediaLibraryUI() {
+  const dropZone = $("#mediaLibraryDropZone");
+  dropZone.addEventListener("click", () => $("#mediaLibraryInput").click());
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("drag"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag"));
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("drag");
+    if (e.dataTransfer.files.length) addFilesToMediaLibrary([...e.dataTransfer.files]);
+  });
+}
+
 // ---------- Batch composer ----------
 // Each card is its own fully independent job (own premise/story/background/
 // voice/style) — the global settings panel only supplies the fallback
@@ -1991,6 +2188,8 @@ function setFlow(flow) {
   }
 }
 
+const MAX_BULK_GENERATE = 15;
+
 function initBatchUI() {
   const select = $("#batchParallelism");
   const opts = [];
@@ -2003,6 +2202,13 @@ function initBatchUI() {
   select.value = String(defaultParallelism);
   updateParallelismHint();
   select.addEventListener("change", updateParallelismHint);
+
+  const countSelect = $("#bulkGenerateCount");
+  const countOpts = [];
+  for (let i = 1; i <= MAX_BULK_GENERATE; i++) countOpts.push(`<option value="${i}">${i}</option>`);
+  countSelect.innerHTML = countOpts.join("");
+  countSelect.value = "5";
+
   if (batchJobs.length === 0) addBatchCard();
 }
 
@@ -2080,6 +2286,7 @@ function buildBatchCardElement(job) {
       <option value="">Or pick a preset...</option>
       ${presetVideoOpts}
     </select>` : ""}
+    <button class="library-pick-link bc-library-pick-video">Choose from library</button>
     <label>Voice</label>
     <select class="bc-voice"><option value="">Use settings voice</option></select>
     <button class="bc-customize-toggle">Customize style &#9662;</button>
@@ -2125,6 +2332,7 @@ function buildBatchCardElement(job) {
           <option value="">Or pick a preset...</option>
           ${presetMusicOpts}
         </select>` : ""}
+        <button class="library-pick-link bc-library-pick-music">Choose from library</button>
         <input type="range" class="bc-musicVolume" min="0" max="1" step="0.05" value="0.25">
       </div>
     </div>
@@ -2169,6 +2377,9 @@ function buildBatchCardElement(job) {
       }
     });
   }
+  div.querySelector(".bc-library-pick-video").onclick = () => {
+    openMediaLibrary(async (file) => { await setBatchCardBackground(job, file, div); }, "video");
+  };
 
   div.querySelector(".bc-voice").addEventListener("change", (e) => { job.voice = e.target.value || null; });
   div.querySelector(".bc-captionPreset").addEventListener("change", (e) => { job.captionPreset = e.target.value || null; });
@@ -2214,6 +2425,9 @@ function buildBatchCardElement(job) {
       }
     });
   }
+  div.querySelector(".bc-library-pick-music").onclick = () => {
+    openMediaLibrary((file) => { job.musicFile = file; musicStatus.textContent = file.name; }, "audio");
+  };
   div.querySelector(".bc-musicVolume").addEventListener("input", (e) => { job.musicVolume = parseFloat(e.target.value); });
 
   const customizeToggle = div.querySelector(".bc-customize-toggle");
@@ -2283,6 +2497,84 @@ async function generateStoryForCard(job, btn, ta) {
     showToast("Story generated!");
   } catch (e) { alert("Generation failed: " + e.message); }
   btn.textContent = "Generate Story";
+  btn.disabled = false;
+}
+
+// Applies a bulk-generate plan entry (web/lib/bulk-assignment.js) to a
+// freshly-created card — the only piece that touches IndexedDB/File; the
+// plan itself is pure and already decided which library item (if any) this
+// card gets.
+async function applyBulkVideoAssignment(planEntry, job, cardEl) {
+  if (planEntry.source !== "library") return;
+  const file = await getMediaLibraryFile(planEntry.itemId);
+  if (file) await setBatchCardBackground(job, file, cardEl);
+}
+
+// Headless variant of getIdeasForCard + generateStoryForCard: bulk-generate
+// creates all N cards up front (each already mounted in the DOM via
+// addBatchCard()), so this streams straight into that card's own textareas
+// instead of taking them as separate live-typing targets — same streamChat
+// calls, same prompts, just orchestrated in a loop rather than by hand.
+async function generateIdeaAndStoryForJob(job, cardEl) {
+  const premiseTa = cardEl.querySelector(".bc-premise");
+  const storyTa = cardEl.querySelector(".bc-story");
+
+  let premise = "";
+  await streamChat(
+    [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
+     { role: "user", content: ideasPrompt() }],
+    (chunk) => { premise += chunk; job.premise = premise; premiseTa.value = premise; autoGrow(premiseTa); }
+  );
+
+  let story = "";
+  await streamChat(
+    [{ role: "system", content: storySystemPrompt() }, { role: "user", content: storyUserPrompt(job.premise || "a dramatic family conflict") }],
+    (chunk) => { story += chunk; job.story = story; storyTa.value = story; autoGrow(storyTa); }
+  );
+}
+
+// Bulk-creates `count` cards in one click, each with an auto-generated
+// premise+story (reusing the same story-generation pipeline the per-card
+// "Suggest Ideas"/"Generate Story" buttons use) and — if requested — a
+// background video assigned from the media library, either the same file
+// for every card or a random one per card (web/lib/bulk-assignment.js).
+//
+// Sequential, not concurrent: streamChat hits the user's own configured
+// DeepSeek/OpenAI key directly, and firing up to MAX_BULK_GENERATE concurrent
+// completions against one key risks rate-limiting and produces out-of-order,
+// meaningless progress — mirrors this app's existing precedent of
+// serializing TTS calls despite parallel-safe rendering (queueTTS).
+async function bulkGenerateBatch() {
+  const count = parseInt($("#bulkGenerateCount").value) || 1;
+  const videoMode = $("#bulkVideoMode").value;
+  const useRandomLibrary = $("#bulkUseRandomLibrary").checked;
+
+  if (useRandomLibrary && mediaLibraryCache.video.length === 0) {
+    showToast("Your media library is empty — add a video first, or uncheck 'random from library'.");
+    return;
+  }
+
+  const plan = planBulkVideoAssignment({
+    count, videoMode, useRandomLibrary, libraryItems: mediaLibraryCache.video,
+  });
+
+  const btn = $("#bulkGenerateBtn");
+  btn.disabled = true;
+  const progress = $("#bulkGenerateProgress");
+  try {
+    for (let i = 0; i < count; i++) {
+      progress.textContent = `Generating story ${i + 1}/${count}...`;
+      const job = addBatchCard();
+      const cardEl = document.querySelector(`.batch-card[data-job-id="${job.id}"]`);
+      await applyBulkVideoAssignment(plan[i], job, cardEl);
+      await generateIdeaAndStoryForJob(job, cardEl);
+    }
+    showToast(`Generated ${count} stor${count === 1 ? "y" : "ies"}.`);
+  } catch (e) {
+    console.error(e);
+    alert("Bulk generation failed: " + (e && e.message ? e.message : String(e)));
+  }
+  progress.textContent = "";
   btn.disabled = false;
 }
 

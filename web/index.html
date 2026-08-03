@@ -161,6 +161,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .result-retry-btn { width: 100%; margin-top: 8px; padding: 8px; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; }
 .result-retry-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+.bulk-generate-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.bulk-generate-row select { width: auto; padding: 6px 10px; }
+.bulk-generate-row label { font-size: 0.78rem; color: var(--muted); display: flex; align-items: center; gap: 6px; margin: 0; }
+.bulk-generate-row .bulk-generate-btn { width: auto; padding: 8px 14px; }
+#bulkGenerateProgress { font-size: 0.75rem; color: var(--muted); margin: 4px 0 0; }
+
+.library-pick-link { background: transparent; border: none; color: var(--accent); font-size: 0.72rem; cursor: pointer; padding: 4px 0; text-decoration: underline; }
+
+#mediaLibraryOverlay { display: none; position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 300; box-shadow: -8px 0 30px rgba(0,0,0,0.5); }
+#mediaLibraryOverlay.show { display: block; }
+.media-library-drop { border: 2px dashed var(--border); border-radius: 8px; padding: 20px; text-align: center; cursor: pointer; font-size: 0.8rem; color: var(--muted); transition: border-color 0.15s; }
+.media-library-drop:hover, .media-library-drop.drag { border-color: var(--accent); }
+.media-library-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+.media-library-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.78rem; }
+.media-library-item-kind { flex: none; }
+.media-library-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.media-library-item-size { flex: none; color: var(--muted); }
+.media-library-item-delete { flex: none; background: transparent; border: 1px solid var(--border); color: var(--muted); width: 24px; height: 24px; border-radius: 6px; cursor: pointer; padding: 0; font-size: 0.85rem; }
+.media-library-item-delete:hover { color: var(--danger); border-color: var(--danger); }
+
 .toast { position: fixed; bottom: 20px; right: 20px; background: #238636; color: #fff; padding: 10px 18px; border-radius: 6px; font-size: 0.8rem; opacity: 0; transition: opacity 0.3s; z-index: 200; }
 .toast.show { opacity: 1; }
 
@@ -371,6 +391,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <option value="">Or pick a preset...</option>
     </select>
   </div>
+  <button class="library-pick-link" onclick="openMediaLibrary((file) => setBackground(file, file.name), 'video')">Choose from library</button>
 
   <h2><span class="step-num">2</span>Story<span class="step-bar"></span></h2>
   <label>Premise / Idea</label>
@@ -410,6 +431,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <option value="">Or pick a preset...</option>
     </select>
   </div>
+  <button class="library-pick-link" onclick="openMediaLibrary((file) => { sidebarMusicFile = file; document.getElementById('musicStatus').textContent = file.name; }, 'audio')">Choose from library</button>
   <label style="margin-top:4px;">Music Volume</label>
   <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25">
 
@@ -445,6 +467,20 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
   <div id="batchFlow" style="display:none">
     <div id="batchComposer">
+      <div class="bulk-generate-row">
+        <label>Generate
+          <select id="bulkGenerateCount"></select>
+          stories
+        </label>
+        <select id="bulkVideoMode">
+          <option value="separate">Separate videos</option>
+          <option value="same">Same video for all</option>
+        </select>
+        <label><input type="checkbox" id="bulkUseRandomLibrary" style="width:auto;"> Use random video from your library</label>
+        <button class="primary bulk-generate-btn" id="bulkGenerateBtn" onclick="bulkGenerateBatch()">Generate Stories</button>
+        <button class="accent bulk-generate-btn" onclick="openMediaLibrary()">Media Library</button>
+      </div>
+      <p id="bulkGenerateProgress"></p>
       <div id="batchCardList"></div>
       <button class="accent" id="addBatchCardBtn" onclick="addBatchCard()">+ Add Video</button>
       <div class="batch-controls">
@@ -485,9 +521,22 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   </div>
 </div>
 
+<div id="mediaLibraryOverlay">
+  <div class="player-box">
+    <button class="player-close" onclick="closeMediaLibrary()">X</button>
+    <h2 style="margin:0;color:var(--text);text-transform:none;letter-spacing:0;">Media Library</h2>
+    <p style="font-size:0.72rem;color:var(--muted);margin:0;">Videos and audio you upload here stay saved in the app for reuse — no re-uploading each time.</p>
+    <div id="mediaLibraryDropZone" class="media-library-drop">Drag video/audio files here, or click to browse</div>
+    <input type="file" id="mediaLibraryInput" accept="video/*,audio/*" multiple style="display:none" onchange="handleMediaLibraryUpload(this)">
+    <div id="mediaLibraryList" class="media-library-list"></div>
+  </div>
+</div>
+
 <script src="lib/captions.js"></script>
 <script src="lib/video-utils.js"></script>
 <script src="lib/job-model.js"></script>
+<script src="lib/media-library-model.js"></script>
+<script src="lib/bulk-assignment.js"></script>
 <script src="lib/ffmpeg-filters.js"></script>
 <script src="lib/tts-engines.js"></script>
 <script src="lib/presets.js"></script>
