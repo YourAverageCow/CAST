@@ -4,7 +4,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 71;
+const VERSION = 72;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1657,11 +1657,32 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
+// Greedy word-wrap into as many lines as needed to stay within maxWidth. A
+// single word wider than maxWidth on its own (no spaces to break on — a long
+// URL-like title, or a channel name with no spaces) is force-broken
+// character by character instead of being left to overflow, so the result
+// is always guaranteed to fit horizontally regardless of what shrinkFontToFit
+// below settles on.
 function wrapCanvasText(ctx, text, maxWidth) {
   const words = text.split(/\s+/).filter(Boolean);
   const lines = [];
   let current = "";
   for (const w of words) {
+    if (ctx.measureText(w).width > maxWidth) {
+      if (current) { lines.push(current); current = ""; }
+      let chunk = "";
+      for (const ch of w) {
+        const test = chunk + ch;
+        if (chunk && ctx.measureText(test).width > maxWidth) {
+          lines.push(chunk);
+          chunk = ch;
+        } else {
+          chunk = test;
+        }
+      }
+      current = chunk;
+      continue;
+    }
     const test = current ? current + " " + w : w;
     if (current && ctx.measureText(test).width > maxWidth) {
       lines.push(current);
@@ -1672,6 +1693,35 @@ function wrapCanvasText(ctx, text, maxWidth) {
   }
   if (current) lines.push(current);
   return lines;
+}
+
+// Shrinks fontSize (in integer px steps) until `measure(fontSize)` reports
+// true, or a floor is hit — the shared mechanism behind both the channel
+// name and the title text's shrink-to-fit behavior. `measure` sets
+// ctx.font itself (since what "fits" differs — a single fillText width for
+// the name, vs. re-wrapping into lines and checking overall card height for
+// the title) and returns whether the current fontSize fits.
+function shrinkFontToFit(fontSize, minFontSize, measure) {
+  while (fontSize > minFontSize && !measure(fontSize)) {
+    fontSize -= 1;
+  }
+  return fontSize;
+}
+
+// Last-resort fallback for the channel name once it's already at the
+// smallest allowed font: unlike the title, a name can't wrap onto more
+// lines (it sits on one line next to the avatar), so a single long/
+// space-less name (no word boundaries for wrapCanvasText to break on)
+// that still doesn't fit at the font floor gets truncated with an ellipsis
+// instead — guarantees it never overflows the card regardless of input.
+// ctx.font must already be set to the size this should measure against.
+function truncateToFit(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let truncated = text;
+  while (truncated.length > 1 && ctx.measureText(truncated + "…").width > maxWidth) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated + "…";
 }
 function drawHeartIcon(ctx, cx, cy, size, color) {
   ctx.fillStyle = color;
@@ -1724,16 +1774,32 @@ async function renderTitleCardImage({ title, channelName, w, h }) {
   const cardW = w - cardX * 2;
   const pad = Math.round(cardW * 0.07);
   const avatarSize = Math.round(cardW * 0.15);
-  const titleFontSize = Math.round(cardW * 0.075);
-  const nameFontSize = Math.round(avatarSize * 0.4);
+  const maxTitleFontSize = Math.round(cardW * 0.075);
+  const minTitleFontSize = Math.max(12, Math.round(cardW * 0.03));
+  const maxNameFontSize = Math.round(avatarSize * 0.4);
+  const minNameFontSize = Math.max(10, Math.round(avatarSize * 0.18));
 
+  const headerH = avatarSize + pad * 0.8;
+  const footerH = Math.round(cardW * 0.09);
+  // The card grows to fit however many lines the title wraps into, but not
+  // without limit — past this height it'd dominate (or overflow) the frame,
+  // so a long title shrinks its font instead of an ever-taller card.
+  const maxCardH = h * 0.62;
+
+  // Shrink the title's font (re-wrapping at each candidate size, since a
+  // smaller font both narrows each line and changes how many lines result)
+  // until the resulting card height fits, or the floor is hit.
+  const titleFontSize = shrinkFontToFit(maxTitleFontSize, minTitleFontSize, (size) => {
+    ctx.font = `bold ${size}px sans-serif`;
+    const lines = wrapCanvasText(ctx, title || "Untitled", cardW - pad * 2);
+    const cardH = pad * 2.4 + headerH + lines.length * (size * 1.28) + footerH;
+    return cardH <= maxCardH;
+  });
   ctx.font = `bold ${titleFontSize}px sans-serif`;
   const titleLines = wrapCanvasText(ctx, title || "Untitled", cardW - pad * 2);
   const titleLineHeight = titleFontSize * 1.28;
 
-  const headerH = avatarSize + pad * 0.8;
   const titleH = titleLines.length * titleLineHeight;
-  const footerH = Math.round(cardW * 0.09);
   const cardH = pad * 2.4 + headerH + titleH + footerH;
   const cardY = Math.round(h * 0.5 - cardH / 2);
 
@@ -1773,15 +1839,25 @@ async function renderTitleCardImage({ title, channelName, w, h }) {
   }
   ctx.restore();
 
-  // Channel name + verified badge
+  // Channel name + verified badge. Available width is reserved using the
+  // badge size at the LARGEST possible name font (maxNameFontSize) — a safe
+  // upper-bound reservation, since the actual badge only ever shrinks along
+  // with a shrunk name font, never grows past it.
   const nameX = avatarX + avatarSize + pad * 0.6;
   const nameY = avatarY + avatarSize / 2;
+  const name = channelName || "Anonymous";
+  const badgeReserve = maxNameFontSize * 1.3;
+  const nameMaxWidth = (cardX + cardW - pad) - nameX - badgeReserve;
+  const nameFontSize = shrinkFontToFit(maxNameFontSize, minNameFontSize, (size) => {
+    ctx.font = `bold ${size}px sans-serif`;
+    return ctx.measureText(name).width <= nameMaxWidth;
+  });
   ctx.fillStyle = "#0f1419";
   ctx.font = `bold ${nameFontSize}px sans-serif`;
   ctx.textBaseline = "middle";
-  const name = channelName || "Anonymous";
-  ctx.fillText(name, nameX, nameY);
-  const nameW = ctx.measureText(name).width;
+  const displayName = truncateToFit(ctx, name, nameMaxWidth);
+  ctx.fillText(displayName, nameX, nameY);
+  const nameW = ctx.measureText(displayName).width;
   const badgeR = nameFontSize * 0.42;
   const badgeX = nameX + nameW + badgeR + nameFontSize * 0.3;
   ctx.beginPath();
