@@ -5,11 +5,73 @@
 // requiring server.js runs its top-level `server.listen(...)` as a side
 // effect, starting the exact same HTTP server this process then points a
 // BrowserWindow at.
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
 
 const PORT = 8123;
+const RELEASES_URL = "https://github.com/YourAverageCow/Slopdaddy/releases";
+
+// Manual, explicit flow rather than the auto-download shortcut — an
+// unsigned build (no code-signing cert set up yet) makes the actual
+// apply-update step untested/possibly unreliable on macOS (Squirrel.Mac
+// generally expects a signed app), so downloading/installing only ever
+// happens on direct user action from Settings, never silently in the
+// background. Checking for an update, by contrast, is just a GitHub API
+// call — that part needs no signing and is safe to do automatically.
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = false;
+
+function sendUpdateStatus(win, status) {
+  if (win && !win.isDestroyed()) win.webContents.send("update-status", status);
+}
+
+function wireUpdater(win) {
+  autoUpdater.on("checking-for-update", () => sendUpdateStatus(win, { state: "checking" }));
+  autoUpdater.on("update-available", (info) => sendUpdateStatus(win, { state: "available", version: info.version }));
+  autoUpdater.on("update-not-available", () => sendUpdateStatus(win, { state: "not-available" }));
+  autoUpdater.on("error", (err) => {
+    sendUpdateStatus(win, { state: "error", message: (err && err.message) || String(err) });
+  });
+  autoUpdater.on("download-progress", (progress) => {
+    sendUpdateStatus(win, { state: "downloading", percent: progress.percent });
+  });
+  autoUpdater.on("update-downloaded", (info) => sendUpdateStatus(win, { state: "downloaded", version: info.version }));
+}
+
+ipcMain.handle("get-app-info", () => ({ version: app.getVersion(), isPackaged: app.isPackaged }));
+
+ipcMain.handle("check-for-updates", async () => {
+  // No app-update.yml exists outside a real packaged build (electron-builder
+  // generates it from the `publish` config at package time) — calling
+  // checkForUpdates() in dev mode throws a confusing low-level error, so
+  // short-circuit with a clear message instead.
+  if (!app.isPackaged) {
+    return { ok: false, error: "Update checks only work in a packaged build, not `npm start` from source." };
+  }
+  try {
+    await autoUpdater.checkForUpdates();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+ipcMain.handle("download-update", async () => {
+  try {
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+ipcMain.handle("quit-and-install", () => {
+  autoUpdater.quitAndInstall();
+});
+
+ipcMain.handle("open-releases-page", () => shell.openExternal(RELEASES_URL));
 // Packaged builds get their icon from electron-builder's mac/win/linux
 // config (build/icon.icns|ico|png) automatically — this is only for the
 // window/taskbar icon during unpackaged `npm start` runs, where Electron
@@ -56,8 +118,11 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js"),
     },
   });
+
+  wireUpdater(win);
 
   try {
     await waitForServer(`http://localhost:${PORT}/`);
@@ -66,6 +131,11 @@ async function createWindow() {
     // silently showing a blank window with no explanation.
   }
   win.loadURL(`http://localhost:${PORT}/`);
+
+  // Automatic on launch, but check-only — never auto-downloads/installs (see
+  // the autoDownload=false comment above). Settings' "Check for Updates"
+  // button triggers the exact same check on demand via IPC.
+  if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
 }
 
 app.whenReady().then(() => {

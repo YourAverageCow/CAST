@@ -183,6 +183,81 @@ async function init() {
   new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
   initBatchUI();
   loadChannelProfilePic();
+  initAppUpdates();
+}
+
+// ---------- Standalone app updates (Electron only) ----------
+// window.electronAPI only exists under the Electron app (see
+// electron/preload.js's narrow contextBridge surface) — a plain browser tab
+// (including the deployed GitHub Pages build) has no such bridge and can't
+// self-update anyway, so this whole section stays hidden rather than
+// showing buttons that would do nothing.
+function initAppUpdates() {
+  if (!window.electronAPI || !window.electronAPI.isElectron) return;
+  $("#appUpdatesSection").style.display = "";
+  window.electronAPI.getAppInfo().then((info) => {
+    $("#appVersionText").textContent = info.version + (info.isPackaged ? "" : " (dev, unpackaged)");
+  });
+  window.electronAPI.onUpdateStatus(renderUpdateStatus);
+}
+
+function renderUpdateStatus(status) {
+  const text = $("#updateStatusText");
+  const actionsRow = $("#updateActionsRow");
+  const downloadBtn = $("#downloadUpdateBtn");
+  const installBtn = $("#installUpdateBtn");
+  const checkBtn = $("#checkUpdateBtn");
+  downloadBtn.style.display = "none";
+  installBtn.style.display = "none";
+  actionsRow.style.display = "none";
+  checkBtn.disabled = false;
+
+  if (status.state === "checking") {
+    text.textContent = "Checking for updates...";
+    checkBtn.disabled = true;
+  } else if (status.state === "available") {
+    text.textContent = `Update available: v${status.version}`;
+    actionsRow.style.display = "flex";
+    downloadBtn.style.display = "";
+  } else if (status.state === "not-available") {
+    text.textContent = "You're up to date.";
+  } else if (status.state === "downloading") {
+    text.textContent = `Downloading update... ${Math.round(status.percent || 0)}%`;
+  } else if (status.state === "downloaded") {
+    text.textContent = `Update v${status.version} downloaded — restart to install.`;
+    actionsRow.style.display = "flex";
+    installBtn.style.display = "";
+  } else if (status.state === "error") {
+    text.textContent = "Update check failed: " + status.message;
+  }
+}
+
+async function checkForAppUpdate() {
+  if (!window.electronAPI) return;
+  $("#updateStatusText").textContent = "Checking for updates...";
+  $("#checkUpdateBtn").disabled = true;
+  const result = await window.electronAPI.checkForUpdates();
+  $("#checkUpdateBtn").disabled = false;
+  // On success, the real outcome (available/not-available) arrives via the
+  // onUpdateStatus event listener, not this return value — this only
+  // surfaces a failure to even START the check (e.g. running unpackaged).
+  if (!result.ok) $("#updateStatusText").textContent = "Update check failed: " + result.error;
+}
+
+async function downloadAppUpdate() {
+  if (!window.electronAPI) return;
+  $("#downloadUpdateBtn").disabled = true;
+  $("#updateStatusText").textContent = "Downloading update...";
+  const result = await window.electronAPI.downloadUpdate();
+  if (!result.ok) {
+    $("#updateStatusText").textContent = "Download failed: " + result.error;
+    $("#downloadUpdateBtn").disabled = false;
+  }
+}
+
+function installAppUpdate() {
+  if (!window.electronAPI) return;
+  window.electronAPI.quitAndInstall();
 }
 
 // Drag-to-resize for the left sidebar and the right settings panel. `sign`

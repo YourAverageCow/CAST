@@ -14,6 +14,9 @@
     "dist:win": "electron-builder --win",
     "dist:linux": "electron-builder --linux"
   },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
   "devDependencies": {
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3"
@@ -21,6 +24,11 @@
   "build": {
     "appId": "com.slopdaddy.app",
     "productName": "Slopdaddy",
+    "publish": {
+      "provider": "github",
+      "owner": "YourAverageCow",
+      "repo": "Slopdaddy"
+    },
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -37,16 +45,22 @@
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.video",
-      "target": ["dmg"]
+      "target": [
+        "dmg"
+      ]
     },
     "win": {
       "icon": "build/icon.ico",
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "linux": {
       "icon": "build/icon.png",
       "category": "AudioVideo",
-      "target": ["AppImage"]
+      "target": [
+        "AppImage"
+      ]
     }
   }
 }
