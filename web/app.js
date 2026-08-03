@@ -1,6 +1,9 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
+// main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
+// (electron-updater compares that semver against GitHub release tags) — bump
+// both together.
 const VERSION = 68;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
@@ -195,10 +198,23 @@ async function init() {
 function initAppUpdates() {
   if (!window.electronAPI || !window.electronAPI.isElectron) return;
   $("#appUpdatesSection").style.display = "";
+  // Shows this codebase's own v-number (the same VERSION shown in
+  // #versionBadge everywhere else in the app), not package.json's semver —
+  // that field exists purely for electron-updater's release-tag comparison,
+  // not as a user-facing version number, so it'd read as a confusing
+  // mismatch ("1.0.0" vs. the "v68" badge) if shown directly.
   window.electronAPI.getAppInfo().then((info) => {
-    $("#appVersionText").textContent = info.version + (info.isPackaged ? "" : " (dev, unpackaged)");
+    $("#appVersionText").textContent = `v${VERSION}` + (info.isPackaged ? "" : " (dev, unpackaged)");
   });
   window.electronAPI.onUpdateStatus(renderUpdateStatus);
+}
+
+// electron-updater reports package.json's semver (e.g. "69.0.0", tracking
+// this codebase's VERSION per the x.0.0 convention) — display just the
+// leading number so it reads as "v69", matching #versionBadge/#appVersionText
+// instead of a confusing raw semver string.
+function formatAppVersion(semver) {
+  return "v" + String(semver).split(".")[0];
 }
 
 function renderUpdateStatus(status) {
@@ -216,7 +232,7 @@ function renderUpdateStatus(status) {
     text.textContent = "Checking for updates...";
     checkBtn.disabled = true;
   } else if (status.state === "available") {
-    text.textContent = `Update available: v${status.version}`;
+    text.textContent = `Update available: ${formatAppVersion(status.version)}`;
     actionsRow.style.display = "flex";
     downloadBtn.style.display = "";
   } else if (status.state === "not-available") {
@@ -224,7 +240,7 @@ function renderUpdateStatus(status) {
   } else if (status.state === "downloading") {
     text.textContent = `Downloading update... ${Math.round(status.percent || 0)}%`;
   } else if (status.state === "downloaded") {
-    text.textContent = `Update v${status.version} downloaded — restart to install.`;
+    text.textContent = `Update ${formatAppVersion(status.version)} downloaded — restart to install.`;
     actionsRow.style.display = "flex";
     installBtn.style.display = "";
   } else if (status.state === "error") {

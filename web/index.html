@@ -318,16 +318,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     </div>
     <input type="file" id="channelProfilePicInput" accept="image/*" style="display:none" onchange="handleProfilePicUpload(this)">
   </div>
-  <div class="settings-section" id="appUpdatesSection" style="display:none;">
-    <h3>App Updates</h3>
-    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Version <span id="appVersionText">—</span></p>
-    <button class="accent" onclick="checkForAppUpdate()" id="checkUpdateBtn" style="width:100%;">Check for Updates</button>
-    <p id="updateStatusText" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
-    <div class="row" id="updateActionsRow" style="display:none;margin-top:6px;">
-      <button class="primary" onclick="downloadAppUpdate()" id="downloadUpdateBtn" style="display:none;">Download Update</button>
-      <button class="primary" onclick="installAppUpdate()" id="installUpdateBtn" style="display:none;">Restart &amp; Install</button>
-    </div>
-  </div>
   <div class="settings-section">
     <h3>Debug</h3>
     <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Check how captions/title card actually look without generating a full story or waiting on TTS.</p>
@@ -341,6 +331,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <button class="primary" onclick="runDebugTestRender()" id="debugRenderBtn">Test Render (real, ~3s clip)</button>
     </div>
     <p id="debugStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
+  </div>
+  <div class="settings-section" id="appUpdatesSection" style="display:none;">
+    <h3>App Updates</h3>
+    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Version <span id="appVersionText">—</span></p>
+    <button class="accent" onclick="checkForAppUpdate()" id="checkUpdateBtn" style="width:100%;">Check for Updates</button>
+    <p id="updateStatusText" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
+    <div class="row" id="updateActionsRow" style="display:none;margin-top:6px;">
+      <button class="primary" onclick="downloadAppUpdate()" id="downloadUpdateBtn" style="display:none;">Download Update</button>
+      <button class="primary" onclick="installAppUpdate()" id="installUpdateBtn" style="display:none;">Restart &amp; Install</button>
+    </div>
   </div>
 </div>
 
