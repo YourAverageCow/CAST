@@ -34,6 +34,17 @@ Tests run automatically on push/PR via `.github/workflows/test.yml` (on both `ma
 
 Native TTS is explicitly not part of this — Piper/Kokoro still run as WASM/ONNX in the browser either way. Native Whisper-based caption alignment (below) followed the same pattern once it was built.
 
+### Vendored TTS assets for offline-first-launch (`main` only)
+
+Unlike `web` (which fetches Kokoro's model/library and Piper's per-voice files from a CDN/HuggingFace at runtime, same as ever), `main` vendors these locally so a fresh install works with zero network dependency:
+- `web/vendor/kokoro/` — `kokoro-js@1.2.1`'s bundled `kokoro.web.js` itself, plus the ONNX-runtime WASM binaries (`onnx/ort-wasm-simd-threaded.jsep.{wasm,mjs}`) it needs — the latter wired via `kokoro.web.js`'s own exported `env.wasmPaths` setter, a supported override.
+- `web/vendor/kokoro-model/` — the full Kokoro q8 model (`onnx/model_quantized.onnx`, ~92MB) plus `config.json`/`tokenizer.json`/`tokenizer_config.json` and all 10 of this app's voice embeddings (`voices/*.bin`, ~522KB each — one shared model covers every voice, so vendoring these ten small files is enough for all of them).
+- `web/vendor/piper-voices/` — just the default voice (`en_US-ryan-medium`, ~63MB); every other Piper voice still fetches from HuggingFace on first use, unchanged.
+
+The tricky part: `kokoro.web.js` hardcodes its model/config/tokenizer/voice fetches to `https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/...` with no exposed config knob for that (confirmed by inspecting the bundled source — it only re-exports a narrow `env.wasmPaths` setter, not the full transformers.js `env` object that would otherwise support `localModelPath`/`remoteHost`). `web/app.js`'s `patchKokoroFetch()` narrowly intercepts `window.fetch` for exactly that URL prefix and redirects to `web/vendor/kokoro-model/`, installed once and left active permanently (a new/already-vendored voice's `.bin` can be requested by a later `.generate()` call, not just during `from_pretrained`) — everything else's fetch calls pass through untouched. Piper's `voiceProvider.fetch()` in `ensurePiper()` needed no such trick — it's this app's own code, so the default-voice case just branches to a local path directly.
+
+Verified live (not just configured): cleared the browser's `transformers-cache`/`kokoro-voices` Cache Storage buckets first (to rule out a stale cache masking a broken redirect), then confirmed via network-request inspection that a real Kokoro generation hits only `vendor/kokoro-model/*` paths — zero requests to `huggingface.co` or `cdn.jsdelivr.net` — and same for a Piper `en_US-ryan-medium` generation hitting only `vendor/piper-voices/*`.
+
 ### Caption-sync cascade: real alignment first, estimate last
 
 Caption timing used to be a pure guess (`computeWordTimings` in `web/lib/captions.js` — spreads an engine's total audio duration across words proportional to a per-word weight; still exists as the final fallback). `web/app.js`'s `resolveWordTimings(text, audioBlob, durationSec, engineWordTimings)` — called from `generateSpeech()` — is the cascade, evaluated in order:

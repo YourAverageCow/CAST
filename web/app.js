@@ -4,7 +4,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 68;
+const VERSION = 69;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -24,8 +24,15 @@ let sidebarMusicFile = null; // background music for the sidebar's single-export
 // web/lib/tts-engines.js — this section just holds the per-engine runtime
 // instances (lazily created, one per engine that needs local init).
 const PIPER_JS = "./vendor/piper-tts-web.js";
-const KOKORO_JS = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/dist/kokoro.web.js";
+// main branch only: kokoro.web.js, its ONNX-runtime WASM binaries, and the
+// full model+all-10-voices are all vendored locally (web/vendor/kokoro/,
+// web/vendor/kokoro-model/) so a fresh install works fully offline instead
+// of needing this ~90MB+ first-use download — see ensureKokoro() below for
+// how the model/voice fetches (hardcoded to huggingface.co inside
+// kokoro.web.js, with no exposed config knob) get redirected there.
+const KOKORO_JS = BASE + "vendor/kokoro/kokoro.web.js";
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const KOKORO_HF_PREFIX = `https://huggingface.co/${KOKORO_MODEL_ID}/resolve/main/`;
 let piperEngine = null;
 let kokoroEngine = null;
 
@@ -794,6 +801,15 @@ async function ensurePiper() {
     const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime } = mod;
     const voiceProvider = {
       async fetch(voice) {
+        // The default voice is vendored locally (web/vendor/piper-voices/)
+        // so a fresh install works offline without waiting on a first-use
+        // download — every other voice still fetches from HuggingFace on
+        // first use, same as before.
+        if (voice === "en_US-ryan-medium") {
+          const json = await (await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx.json")).json();
+          const onnx = URL.createObjectURL(await (await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx")).blob());
+          return [json, onnx];
+        }
         // Correct HuggingFace path for piper voices.
         const parts = voice.split("-");
         const lang = parts[0].split("_")[0];
@@ -819,18 +835,46 @@ async function ensurePiper() {
   return piperEngine;
 }
 
+// kokoro.web.js hardcodes its model/config/tokenizer/voice fetches to
+// https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/...
+// with no exposed config knob (confirmed by inspecting the bundled source —
+// it re-exports only a narrow env.wasmPaths setter, not the full
+// transformers.js env object that WOULD support this properly via
+// localModelPath/remoteHost). A permanent, narrowly-scoped fetch patch is
+// the only way to redirect those specific URLs to the vendored local copies
+// in web/vendor/kokoro-model/ — everything else's fetch calls pass through
+// completely untouched. Installed once and left active for the rest of the
+// session, since a new (already-vendored) voice's .bin can be requested by
+// Kokoro at any later .generate() call, not just during from_pretrained.
+let kokoroFetchPatched = false;
+function patchKokoroFetch() {
+  if (kokoroFetchPatched) return;
+  kokoroFetchPatched = true;
+  const origFetch = window.fetch.bind(window);
+  const localPrefix = BASE + "vendor/kokoro-model/";
+  window.fetch = function (input, init) {
+    const url = typeof input === "string" ? input : (input && input.url);
+    if (typeof url === "string" && url.startsWith(KOKORO_HF_PREFIX)) {
+      return origFetch(localPrefix + url.slice(KOKORO_HF_PREFIX.length), init);
+    }
+    return origFetch(input, init);
+  };
+}
+
 // Kokoro (kokoro-js) mirrors Piper's lazy-singleton pattern: one shared
-// engine instance, model weights fetched from HuggingFace by the library
-// itself on first use and cached by the browser (same "don't vendor large
-// binaries that already have a good CDN/HF home" approach Piper's own voice
-// files use). dtype "q8" is the quantized variant — ~86MB vs. ~326MB fp32,
-// no meaningful quality loss per the model's own documentation.
+// engine instance. The model+all 10 voices are vendored locally (see
+// patchKokoroFetch above) so this never actually hits HuggingFace on main —
+// dtype "q8" is the quantized variant (~92MB) vs. ~326MB fp32, no meaningful
+// quality loss per the model's own documentation, and is what the vendored
+// files are.
 async function ensureKokoro() {
   if (kokoroEngine) return kokoroEngine;
-  showDownloadToast("Preparing Kokoro TTS engine (first time only, ~90MB)...");
+  showDownloadToast("Preparing Kokoro TTS engine...");
   try {
+    patchKokoroFetch();
     const mod = await import(KOKORO_JS);
-    const { KokoroTTS } = mod;
+    const { KokoroTTS, env } = mod;
+    env.wasmPaths = BASE + "vendor/kokoro/onnx/";
     kokoroEngine = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, { dtype: "q8" });
   } catch (e) {
     hideDownloadToast();
@@ -1250,7 +1294,7 @@ async function onEngineChangeUI() {
   $("#ttsElevenlabsKeyRow").style.display = engineId === "elevenlabs" ? "" : "none";
   const notes = {
     piper: "Runs fully offline in your browser. Free, no API key.",
-    kokoro: "Runs fully offline in your browser, higher quality than Piper. Free, no API key — first use downloads a ~90MB model.",
+    kokoro: "Runs fully offline in your browser, higher quality than Piper. Free, no API key — model is bundled, no download needed.",
     openaiTts: "Cloud API — costs money per character generated.",
     elevenlabs: "Cloud API — free tier (~10k characters/month, requires attribution, no commercial use) then paid.",
     browserSpeech: "Uses your OS's built-in voices. Needs a one-time \"share tab audio\" permission prompt to record narration — less reliable in Firefox than Chrome, and quality varies a lot by OS.",
