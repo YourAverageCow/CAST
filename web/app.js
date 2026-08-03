@@ -1,10 +1,11 @@
-// Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
+// Everything runs in the browser: multiple AI story-gen providers, Piper/
+// Kokoro TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 72;
+const VERSION = 73;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -55,24 +56,67 @@ function toggleSettings() {
 }
 
 // ---------- API config ----------
-const MODELS = {
-  deepseek: ["deepseek-chat", "deepseek-reasoner"],
-  openai: ["gpt-4o-mini", "gpt-4o"],
-};
-
-function apiBase() {
-  return $("#provider").value === "openai" ? "https://api.openai.com/v1" : "https://api.deepseek.com/v1";
+// STORY_PROVIDERS (web/lib/story-providers.js) is the registry — this
+// section is just the DOM glue: which provider/model/base-URL/API-key the
+// settings panel currently has selected, and building the <select>s from
+// the registry instead of hardcoded <option> tags (mirrors buildEngineSelect
+// for TTS_ENGINES).
+function getStoryProvider() {
+  return STORY_PROVIDERS[$("#provider").value] || STORY_PROVIDERS[DEFAULT_STORY_PROVIDER];
 }
 
+function buildProviderSelect() {
+  $("#provider").innerHTML = Object.values(STORY_PROVIDERS)
+    .map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
+}
+
+// A provider's base URL is fixed except Ollama/self-hosted ones
+// (editableBaseUrl), where the settings panel exposes a text field so the
+// user can point at a different host/port than the localhost default.
+function apiBase() {
+  const provider = getStoryProvider();
+  if (provider.editableBaseUrl) {
+    return $("#customBaseUrl").value.trim() || provider.baseUrl;
+  }
+  return provider.baseUrl;
+}
+
+function getModel() {
+  const provider = getStoryProvider();
+  return provider.customModel ? $("#modelCustom").value.trim() : $("#model").value;
+}
+
+// Ollama (and any other needsApiKey:false provider) doesn't require a key —
+// only alert/block generation for providers that actually need one.
 function getApiKey() {
+  const provider = getStoryProvider();
   const k = $("#apiKey").value.trim();
-  if (!k) { alert("Enter your API key in Settings first."); return null; }
+  if (!k && provider.needsApiKey) { alert("Enter your API key in Settings first."); return null; }
   return k;
 }
 
+// Rebuilds #model's <select> options for whichever provider is selected, and
+// toggles the custom-model/custom-base-URL fields a provider like Ollama
+// needs instead of/alongside them. Called on #provider's change event and
+// once from init()/loadSettings().
+function populateModels() {
+  const provider = getStoryProvider();
+  $("#model").style.display = provider.customModel ? "none" : "";
+  $("#modelCustomRow").style.display = provider.customModel ? "" : "none";
+  if (!provider.customModel) {
+    $("#model").innerHTML = provider.models.map((m, i) => `<option value="${m}" ${i === 0 ? "selected" : ""}>${m}</option>`).join("");
+  }
+  $("#customBaseUrlRow").style.display = provider.editableBaseUrl ? "" : "none";
+  if (provider.editableBaseUrl && !$("#customBaseUrl").value) {
+    $("#customBaseUrl").value = provider.baseUrl;
+  }
+  $("#apiKeyRow").style.display = provider.needsApiKey ? "" : "none";
+}
+$("#provider").addEventListener("change", populateModels);
+
 // Persist all settings in localStorage so they survive page reloads / hard resets.
 const SETTINGS_FIELDS = [
-  "apiKey", "provider", "model", "storyLength",
+  "apiKey", "provider", "model", "modelCustom", "customBaseUrl", "storyLength",
   "resW", "resH", "fps",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset",
@@ -209,6 +253,7 @@ async function init() {
     probeNativeRenderBackend(), probeNativeWhisperBackend(),
   ]);
   buildEngineSelect();
+  buildProviderSelect();
   const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
   populateModels();
   await populateVoices(getEngine());
@@ -372,12 +417,6 @@ function initPanelResize(panelId, handleId, sign, storageKey) {
   handle.addEventListener("pointercancel", stop);
 }
 
-function populateModels() {
-  const p = $("#provider").value;
-  $("#model").innerHTML = MODELS[p].map((m, i) => `<option value="${m}" ${i===0?'selected':''}>${m}</option>`).join("");
-}
-$("#provider").addEventListener("change", populateModels);
-
 // Rebuilds #voice/#voiceQuick from the given engine's own voice list —
 // engines have entirely different voices, so this runs on init and every
 // engine change. Async because Browser Speech's list comes from
@@ -409,21 +448,20 @@ function getVoice() {
   return $("#voice").value || TTS_ENGINES[getEngine()].defaultVoice() || "";
 }
 
-// ---------- DeepSeek story generation (streaming, client-side) ----------
+// ---------- Story generation (streaming, client-side) ----------
+// Provider-agnostic: STORY_PROVIDERS (web/lib/story-providers.js) supplies
+// buildChatRequest() (the {url, headers, body} to send) and parseSSEDelta()
+// (how to pull the next text chunk out of one parsed `data: ` line) — this
+// function is just the shared fetch + SSE-read loop every provider streams
+// through, regardless of whether its wire format is OpenAI's or Anthropic's.
 async function streamChat(messages, onChunk) {
+  const provider = getStoryProvider();
   const key = getApiKey();
-  if (!key) return;
-  const base = apiBase();
-  const resp = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-    body: JSON.stringify({
-      model: $("#model").value,
-      stream: true,
-      temperature: 0.9,
-      messages,
-    }),
+  if (key === null) return;
+  const { url, headers, body } = buildChatRequest(provider, {
+    model: getModel(), messages, temperature: 0.9, apiKey: key, baseUrl: apiBase(),
   });
+  const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
   if (!resp.ok) throw new Error("API error: " + resp.status);
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
@@ -440,8 +478,8 @@ async function streamChat(messages, onChunk) {
       if (data === "[DONE]") continue;
       try {
         const parsed = JSON.parse(data);
-        const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
-        if (delta && delta.content) onChunk(delta.content);
+        const text = parseSSEDelta(provider.api, parsed);
+        if (text) onChunk(text);
       } catch (e) {}
     }
   }
@@ -1495,10 +1533,12 @@ function renderResultCard(job, container, opts) {
     div.dataset.jobId = job.id;
     if (opts.prepend) container.prepend(div); else container.appendChild(div);
   }
-  // Batch cards (in #resultsGrid) show a short title so it's clear which
-  // job a card belongs to; the single-flow's #outputContainer never has
-  // more than one live card at a time, so it doesn't need one.
-  const title = container.id === "resultsGrid"
+  // Batch cards (in #resultsGrid, and the full-page batch progress panel's
+  // own grid) show a short title so it's clear which job a card belongs to;
+  // the single-flow's #outputContainer never has more than one live card at
+  // a time, so it doesn't need one.
+  const isBatchGrid = container.id === "resultsGrid" || container.id === "batchProgressGrid";
+  const title = isBatchGrid
     ? `<div class="result-card-title">${escapeHtml((job.premise || job.story || "Untitled").slice(0, 60))}</div>`
     : "";
   if (job.status === "done") {
@@ -1514,7 +1554,7 @@ function renderResultCard(job, container, opts) {
   } else if (job.status === "error") {
     div.innerHTML = title +
       `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>` +
-      (container.id === "resultsGrid" ? `<button class="result-retry-btn" data-action="retry">Retry</button>` : "");
+      (isBatchGrid ? `<button class="result-retry-btn" data-action="retry">Retry</button>` : "");
     const retryBtn = div.querySelector('[data-action="retry"]');
     if (retryBtn) retryBtn.onclick = () => retryBatchJob(job);
   } else {
@@ -2654,6 +2694,96 @@ async function bulkGenerateBatch() {
   btn.disabled = false;
 }
 
+// ---------- Full-page batch progress panel ----------
+// Opened by renderAllBatch() for the duration of a batch render — a
+// dashboard-style view (stats + a live-updating grid of per-job cards,
+// reusing renderResultCard so a finished/failed card gets the exact same
+// Preview/Download/Retry buttons it would in #resultsGrid) rather than a
+// single progress bar, since a batch run can take a while and the user
+// asked to see resource use / ETA / elapsed time while it's in flight.
+let batchProgressState = null; // { startTime, totalJobs, jobs, tickHandle }
+
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function openBatchProgressPanel(jobs) {
+  if (batchProgressState) clearInterval(batchProgressState.tickHandle);
+  batchProgressState = { startTime: Date.now(), totalJobs: jobs.length, jobs };
+  $("#batchProgressOverlay").classList.add("show");
+  $("#batchProgressCloseBtn").textContent = "Minimize";
+  $("#batchProgressReopenBtn").style.display = "none";
+  const grid = $("#batchProgressGrid");
+  grid.innerHTML = "";
+  for (const job of jobs) renderResultCard(job, grid);
+  updateBatchProgressStats();
+  batchProgressState.tickHandle = setInterval(updateBatchProgressStats, 500);
+}
+
+// Not real system-wide CPU/memory (no browser API exposes that) — CPU
+// cores and this page's own JS heap usage are the closest honest proxies
+// for "resource use" available client-side, alongside the concurrency/
+// backend settings that actually govern how much of the machine gets used.
+function updateBatchProgressStats() {
+  if (!batchProgressState) return;
+  const { startTime, totalJobs, jobs } = batchProgressState;
+  const elapsedMs = Date.now() - startTime;
+  const doneCount = jobs.filter(j => j.status === "done" || j.status === "error").length;
+  const activeCount = jobs.filter(j => !["draft", "queued", "done", "error"].includes(j.status)).length;
+  const overallPct = totalJobs
+    ? Math.round(jobs.reduce((sum, j) => sum + (j.status === "done" ? 100 : (j.progressPct || 0)), 0) / totalJobs)
+    : 0;
+
+  let etaLabel = "Estimating...";
+  if (doneCount >= totalJobs) {
+    etaLabel = "Done";
+  } else if (doneCount > 0) {
+    const msPerJob = elapsedMs / doneCount;
+    etaLabel = "~" + formatElapsed(msPerJob * (totalJobs - doneCount));
+  }
+
+  const concurrency = parseInt($("#batchParallelism").value) || 1;
+  const backendLabel = nativeRenderAvailable ? "Native (ffmpeg)" : "Browser (WASM)";
+  const cores = navigator.hardwareConcurrency || nativeCpuCount || 1;
+  const memInfo = (performance.memory)
+    ? `${Math.round(performance.memory.usedJSHeapSize / 1048576)} MB`
+    : "n/a";
+
+  $("#batchProgressStats").innerHTML = [
+    ["Elapsed", formatElapsed(elapsedMs)],
+    ["Est. remaining", etaLabel],
+    ["Videos done", `${doneCount} / ${totalJobs}`],
+    ["Active renders", `${activeCount} / ${concurrency}`],
+    ["CPU cores", cores],
+    ["Render backend", backendLabel],
+    ["Page memory", memInfo],
+  ].map(([label, value]) => `
+    <div class="batch-stat-tile">
+      <div class="stat-label">${label}</div>
+      <div class="stat-value">${value}</div>
+    </div>`).join("");
+
+  $("#batchProgressOverallFill").style.width = overallPct + "%";
+  $("#batchProgressOverallLabel").textContent = `${overallPct}% overall — ${doneCount} of ${totalJobs} videos finished`;
+  $("#batchProgressTitle").textContent = doneCount >= totalJobs ? "Batch complete" : `Rendering ${totalJobs} video${totalJobs === 1 ? "" : "s"}...`;
+  if (doneCount >= totalJobs) {
+    clearInterval(batchProgressState.tickHandle);
+    $("#batchProgressCloseBtn").textContent = "Close";
+  }
+}
+
+function minimizeBatchProgress() {
+  $("#batchProgressOverlay").classList.remove("show");
+  if (batchProgressState) $("#batchProgressReopenBtn").style.display = "block";
+}
+function reopenBatchProgress() {
+  $("#batchProgressOverlay").classList.add("show");
+  $("#batchProgressReopenBtn").style.display = "none";
+}
+
 // Renders every draft/errored job through the pool at once — each job's own
 // runJob() call queues on ffmpegPool.submit() internally, so this naturally
 // gets "N at a time, rest wait" behavior for free from the pool, no extra
@@ -2669,17 +2799,29 @@ async function renderAllBatch() {
   const parallelism = parseInt($("#batchParallelism").value) || 1;
   const globalSettings = getGlobalSettings();
   const grid = $("#resultsGrid");
+  const progressGrid = $("#batchProgressGrid");
+
+  openBatchProgressPanel(jobsToRun);
 
   try {
     await ensureRenderBackend(parallelism);
-    jobsToRun.forEach(j => { j.status = "queued"; j.progressLabel = "Queued..."; renderResultCard(j, grid); });
-    await Promise.all(jobsToRun.map(job => runJob(job, globalSettings, (j) => renderResultCard(j, grid))));
+    jobsToRun.forEach(j => {
+      j.status = "queued"; j.progressLabel = "Queued...";
+      renderResultCard(j, grid);
+      renderResultCard(j, progressGrid);
+    });
+    await Promise.all(jobsToRun.map(job => runJob(job, globalSettings, (j) => {
+      renderResultCard(j, grid);
+      renderResultCard(j, progressGrid);
+      updateBatchProgressStats();
+    })));
     const failed = jobsToRun.filter(j => j.status === "error").length;
     showToast(failed ? `Batch done — ${failed} of ${jobsToRun.length} failed.` : "Batch complete!");
   } catch (e) {
     console.error(e);
     alert("Batch failed to start: " + (e && e.message ? e.message : String(e)));
   }
+  updateBatchProgressStats();
 
   btn.textContent = "Generate All";
   btn.disabled = false;
@@ -2690,8 +2832,17 @@ async function retryBatchJob(job) {
   job.status = "queued";
   job.error = null;
   renderResultCard(job, $("#resultsGrid"));
+  if ($("#batchProgressGrid").querySelector(`[data-job-id="${job.id}"]`)) {
+    renderResultCard(job, $("#batchProgressGrid"));
+  }
   await ensureRenderBackend(parseInt($("#batchParallelism").value) || 1);
-  await runJob(job, getGlobalSettings(), (j) => renderResultCard(j, $("#resultsGrid")));
+  await runJob(job, getGlobalSettings(), (j) => {
+    renderResultCard(j, $("#resultsGrid"));
+    if ($("#batchProgressGrid").querySelector(`[data-job-id="${j.id}"]`)) {
+      renderResultCard(j, $("#batchProgressGrid"));
+      updateBatchProgressStats();
+    }
+  });
 }
 
 // ---------- Prompts (mirror prompts.txt) ----------
