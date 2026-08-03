@@ -1805,9 +1805,10 @@ function initBatchUI() {
   const opts = [];
   for (let i = 1; i <= MAX_PARALLEL_RENDERS; i++) opts.push(`<option value="${i}">${i}</option>`);
   select.innerHTML = opts.join("");
-  // Conservative default — safe on most machines without a crowded tab;
-  // still lets the user dial all the way up to MAX_PARALLEL_RENDERS.
-  const defaultParallelism = Math.max(1, Math.min(3, navigator.hardwareConcurrency || 2));
+  // Default to every reported core (still bounded by MAX_PARALLEL_RENDERS) —
+  // updateParallelismHint()'s copy below already warns to dial back if it's
+  // not stable on this machine.
+  const defaultParallelism = Math.max(1, Math.min(MAX_PARALLEL_RENDERS, navigator.hardwareConcurrency || 2));
   select.value = String(defaultParallelism);
   updateParallelismHint();
   select.addEventListener("change", updateParallelismHint);
