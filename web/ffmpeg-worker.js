@@ -166,9 +166,12 @@ self.onmessage = async (e) => {
       }
 
       // Only the mt core has real OS threads for libx264 to use — on the st
-      // core this would be a silent no-op, but there's no reason to ask.
+      // core this would be a silent no-op, but there's no reason to ask. No
+      // upper clamp beyond hardwareConcurrency itself: this only ever runs
+      // in a pool of exactly one worker (forceST kicks in above that), so
+      // there's no oversubscription risk from using every reported core.
       const threadArgs = usingMT
-        ? ["-threads", String(Math.max(1, Math.min(8, self.navigator.hardwareConcurrency || 4)))]
+        ? ["-threads", String(Math.max(1, self.navigator.hardwareConcurrency || 4))]
         : [];
 
       // -shortest alone was observed to let the (infinitely-looped)

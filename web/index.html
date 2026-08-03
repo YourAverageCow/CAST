@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <script src="coi-serviceworker.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AITAH Video Creator — Web</title>
+<title>Slopdaddy</title>
 <style>
 :root {
   --bg: #0d1117;
@@ -332,6 +332,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     </div>
     <p id="debugStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
   </div>
+  <div class="settings-section" id="performanceSection" style="display:none;">
+    <h3>Performance</h3>
+    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Controls the native render/transcribe backend (only shown when it's available). Higher values use more CPU cores at once — dial back if a batch render makes your machine unresponsive.</p>
+    <label>Render concurrency (<span id="renderConcurrencyValue">—</span> of <span id="renderConcurrencyMax">—</span> cores)</label>
+    <input type="range" id="renderConcurrency" min="1" max="1" step="1" value="1">
+  </div>
   <div class="settings-section" id="appUpdatesSection" style="display:none;">
     <h3>App Updates</h3>
     <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Version <span id="appVersionText">—</span></p>
@@ -352,7 +358,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <h1>Video Creator</h1>
   </div>
   <p class="subtitle">AITAH story videos — runs 100% in your browser</p>
-  <div id="browserNote">Everything runs locally: TTS uses Piper (in-browser), video renders with ffmpeg.wasm. First use downloads the voice model + engine once.</div>
+  <div id="browserNote">Everything runs locally: TTS uses Piper (in-browser), video renders with ffmpeg.wasm. The default voice and engine are bundled; other voices download once on first use.</div>
 
   <h2><span class="step-num">1</span>Background Video<span class="step-bar"></span></h2>
   <div id="videoUploadArea" onclick="document.getElementById('videoInput').click()">

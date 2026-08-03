@@ -97,9 +97,9 @@ const PiperEngine = {
 // kokoro-js (ONNX + Transformers.js, WASM/WebGPU) — same "no API key, no
 // per-use cost" shape as Piper, verified to sound clearly less synthetic in
 // every independent comparison checked before building this. Model weights
-// are fetched at runtime from HuggingFace by kokoro-js itself (q8 quantized,
-// ~86MB) and cached by the browser, mirroring how Piper's own voice files
-// are fetched on demand rather than vendored in the repo.
+// (q8 quantized, ~86MB) are vendored locally in web/vendor/kokoro-model/ for
+// offline-first-launch, same as Piper's default voice in
+// web/vendor/piper-voices/ — see app.js's patchKokoroFetch().
 const KOKORO_VOICES = [
   { id: "af_heart", label: "Heart (US female)" },
   { id: "af_bella", label: "Bella (US female)" },

@@ -10,7 +10,7 @@ let coepCredentialless = false;
 // network-first/uncached, same as before — those change on every version
 // bump, and caching them would reintroduce exactly the "testing against
 // stale cached code" problem this app already hit once this session.
-const CACHE_NAME = "slopdaddy-assets-v1";
+const CACHE_NAME = "slopdaddy-assets-v2";
 const CACHEABLE_PATTERNS = [/\/vendor\//, /\/onnx\//, /\/piper\//];
 function isCacheableAsset(url) {
     return url.origin === self.location.origin && CACHEABLE_PATTERNS.some((re) => re.test(url.pathname));

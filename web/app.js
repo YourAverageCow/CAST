@@ -32,6 +32,10 @@ const PIPER_JS = "./vendor/piper-tts-web.js";
 // kokoro.web.js, with no exposed config knob) get redirected there.
 const KOKORO_JS = BASE + "vendor/kokoro/kokoro.web.js";
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+// kokoro.web.js's voice-file fetch (unlike its model/config/tokenizer fetches,
+// which go through from_pretrained's own model-id parameter) has its OWN
+// independently hardcoded copy of this same URL — re-vendoring a newer
+// kokoro-js build with a different model id/URL shape must update both.
 const KOKORO_HF_PREFIX = `https://huggingface.co/${KOKORO_MODEL_ID}/resolve/main/`;
 let piperEngine = null;
 let kokoroEngine = null;
@@ -75,6 +79,7 @@ const SETTINGS_FIELDS = [
   "channelName",
   "ttsEngine", "ttsOpenaiKey", "ttsElevenlabsKey",
   "enableBrowserAsr",
+  "renderConcurrency",
 ];
 function saveSettings() {
   try {
@@ -125,6 +130,10 @@ function buildEngineSelect() {
 // the deployed GitHub Pages build (no server there to answer), which is
 // exactly what makes the WASM fallback below automatic with no extra logic.
 let nativeRenderAvailable = false;
+// Populated alongside nativeRenderAvailable by probeNativeRenderBackend()'s
+// /render-capability response — used to size the Performance setting's range
+// (Settings -> Performance) without duplicating os.cpus().length client-side.
+let nativeCpuCount = 1;
 async function probeNativeRenderBackend() {
   try {
     const ctrl = new AbortController();
@@ -133,10 +142,45 @@ async function probeNativeRenderBackend() {
     clearTimeout(t);
     if (!resp.ok) return false;
     const data = await resp.json();
+    if (data.cpuCount) nativeCpuCount = data.cpuCount;
     return !!data.available;
   } catch (e) {
     return false;
   }
+}
+
+// Settings -> Performance: only meaningful (and only shown) when the native
+// render backend is available — the WASM fallback's concurrency is governed
+// separately by #batchParallelism (see initBatchUI). Called once from init()
+// after the native probe resolves, and again on the slider's own input.
+function initPerformanceUI(savedData) {
+  const section = $("#performanceSection");
+  if (!nativeRenderAvailable) { section.style.display = "none"; return; }
+  section.style.display = "";
+  const slider = $("#renderConcurrency");
+  slider.max = String(nativeCpuCount);
+  $("#renderConcurrencyMax").textContent = String(nativeCpuCount);
+  // Default to every core unless the user has explicitly saved a value
+  // before (loadSettings already restored slider.value from localStorage in
+  // that case) — clamp either way in case a saved value exceeds this
+  // machine's core count (e.g. settings synced from another machine).
+  const hasSaved = savedData && savedData.renderConcurrency !== undefined;
+  const current = hasSaved ? parseInt(slider.value, 10) : nativeCpuCount;
+  slider.value = String(Math.max(1, Math.min(nativeCpuCount, current || nativeCpuCount)));
+  $("#renderConcurrencyValue").textContent = slider.value;
+  postPerformanceSettings();
+}
+
+async function postPerformanceSettings() {
+  if (!nativeRenderAvailable) return;
+  const n = parseInt($("#renderConcurrency").value, 10) || nativeCpuCount;
+  try {
+    await fetch("/performance-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ renderConcurrency: n, transcribeConcurrency: n }),
+    });
+  } catch (e) { /* best-effort — a failed update just leaves the server's previous setting in place */ }
 }
 
 // Same probe pattern, for server.js's /transcribe (shells out to the user's
@@ -174,12 +218,17 @@ async function init() {
   }
   onEngineChangeUI();
   buildPresetSelects();
+  initPerformanceUI(savedData);
   // Save on any settings change
   for (const id of SETTINGS_FIELDS) {
     const el = document.getElementById(id);
     if (el) el.addEventListener("input", saveSettings);
     if (el && el.tagName === "SELECT") el.addEventListener("change", saveSettings);
   }
+  $("#renderConcurrency").addEventListener("input", () => {
+    $("#renderConcurrencyValue").textContent = $("#renderConcurrency").value;
+    postPerformanceSettings();
+  });
   // Keep the caption preview live when style fields are edited by hand
   for (const id of ["font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth", "resW"]) {
     const el = document.getElementById(id);
@@ -806,8 +855,12 @@ async function ensurePiper() {
         // download — every other voice still fetches from HuggingFace on
         // first use, same as before.
         if (voice === "en_US-ryan-medium") {
-          const json = await (await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx.json")).json();
-          const onnx = URL.createObjectURL(await (await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx")).blob());
+          const jsonRes = await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx.json");
+          if (!jsonRes.ok) throw new Error(`Vendored voice file missing: ${jsonRes.url} (${jsonRes.status})`);
+          const onnxRes = await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx");
+          if (!onnxRes.ok) throw new Error(`Vendored voice file missing: ${onnxRes.url} (${onnxRes.status})`);
+          const json = await jsonRes.json();
+          const onnx = URL.createObjectURL(await onnxRes.blob());
           return [json, onnx];
         }
         // Correct HuggingFace path for piper voices.
@@ -856,6 +909,9 @@ function patchKokoroFetch() {
     const url = typeof input === "string" ? input : (input && input.url);
     if (typeof url === "string" && url.startsWith(KOKORO_HF_PREFIX)) {
       return origFetch(localPrefix + url.slice(KOKORO_HF_PREFIX.length), init);
+    }
+    if (typeof url === "string" && url.includes("huggingface.co") && url.includes(KOKORO_MODEL_ID)) {
+      console.warn("Kokoro fetch didn't match KOKORO_HF_PREFIX, falling through to network:", url);
     }
     return origFetch(input, init);
   };
@@ -1940,9 +1996,10 @@ function initBatchUI() {
   const opts = [];
   for (let i = 1; i <= MAX_PARALLEL_RENDERS; i++) opts.push(`<option value="${i}">${i}</option>`);
   select.innerHTML = opts.join("");
-  // Conservative default — safe on most machines without a crowded tab;
-  // still lets the user dial all the way up to MAX_PARALLEL_RENDERS.
-  const defaultParallelism = Math.max(1, Math.min(3, navigator.hardwareConcurrency || 2));
+  // Default to every reported core (still bounded by MAX_PARALLEL_RENDERS) —
+  // updateParallelismHint()'s copy below already warns to dial back if it's
+  // not stable on this machine.
+  const defaultParallelism = Math.max(1, Math.min(MAX_PARALLEL_RENDERS, navigator.hardwareConcurrency || 2));
   select.value = String(defaultParallelism);
   updateParallelismHint();
   select.addEventListener("change", updateParallelismHint);

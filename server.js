@@ -75,21 +75,25 @@ function checkWhisper(cb) {
 // ---------- concurrency limiter ----------
 // Mirrors FFmpegWorkerPool's job (web/worker-pool.js) for native processes —
 // batch "Generate All" can fire off several renders (and now transcriptions)
-// at once; cap how many real subprocesses of a given kind run concurrently
-// so they don't oversubscribe the CPU. One less than the core count, minimum
-// 1, matches typical guidance for leaving a core free for the OS/UI.
+// at once; cap how many real subprocesses of a given kind run concurrently.
 // Rendering (ffmpeg) and transcription (whisper, CPU/PyTorch-heavy) are
 // different resource profiles, so each kind gets its own independent limiter
 // rather than sharing one pool — a render and a transcribe can run at once
 // without either starving the other's queue.
+//
+// max is mutable (setMax) rather than fixed at construction — the client can
+// raise or lower it at runtime via POST /performance-settings (Settings ->
+// Performance), so a batch already queued respects a change immediately
+// rather than needing a server restart.
 function makeSlotLimiter(max) {
   let active = 0;
   const queue = [];
+  const state = { max };
   return {
     acquire() {
       return new Promise((resolve) => {
         const tryAcquire = () => {
-          if (active < max) { active++; resolve(); }
+          if (active < state.max) { active++; resolve(); }
           else queue.push(tryAcquire);
         };
         tryAcquire();
@@ -100,12 +104,33 @@ function makeSlotLimiter(max) {
       const next = queue.shift();
       if (next) next();
     },
+    setMax(n) {
+      state.max = n;
+      // A raised cap may free up waiters immediately.
+      while (active < state.max && queue.length) queue.shift()();
+    },
+    getMax() { return state.max; },
   };
 }
-const MAX_CONCURRENT_RENDERS = Math.max(1, os.cpus().length - 1);
-const renderLimiter = makeSlotLimiter(MAX_CONCURRENT_RENDERS);
-const MAX_CONCURRENT_TRANSCRIBES = Math.max(1, os.cpus().length - 1);
-const transcribeLimiter = makeSlotLimiter(MAX_CONCURRENT_TRANSCRIBES);
+// Default to every core — the user explicitly wants max resource usage by
+// default; Settings -> Performance lets them dial back to leave headroom for
+// the OS/UI if a full-throttle batch render makes the machine unresponsive.
+const CPU_COUNT = os.cpus().length;
+const renderLimiter = makeSlotLimiter(CPU_COUNT);
+const transcribeLimiter = makeSlotLimiter(CPU_COUNT);
+function clampConcurrency(n) {
+  n = parseInt(n, 10);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(1, Math.min(CPU_COUNT, n));
+}
+// Per-job thread budget: divide the core count across however many jobs of
+// that kind are currently allowed to run at once, so N concurrent renders
+// together target ~100% of cores instead of each auto-detecting and
+// fighting the others for every core (ffmpeg/whisper both default to
+// "use all cores" when no thread count is given).
+function threadBudget(limiter) {
+  return Math.max(1, Math.floor(CPU_COUNT / limiter.getMax()));
+}
 
 // ---------- SSE progress channels ----------
 // Keyed by a client-generated render id: the client opens an SSE connection
@@ -206,11 +231,17 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     }
   }
 
+  // Explicit thread budget (see threadBudget() above) rather than leaving
+  // -threads/-filter_complex_threads unset — unset means "auto-detect and
+  // use every core", which is fine for a single render but means N
+  // concurrent renders all fight over the same cores instead of sharing them.
+  const threads = String(threadBudget(renderLimiter));
   const args = [
     ...inputArgs,
+    "-filter_complex_threads", threads,
     "-filter_complex", filterComplex,
     "-map", `[${videoOutLabel}]`, "-map", `[${audioChain.outLabel}]`,
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", threads,
     "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
     "-r", String(meta.fps),
     "-shortest", ...durationArgs,
@@ -291,6 +322,7 @@ function runNativeTranscribe(transcribeId, audio, respond) {
     "--output_format", "json",
     "--output_dir", dir,
     "--fp16", "False",
+    "--threads", String(threadBudget(transcribeLimiter)),
   ], { cwd: dir });
   let stderrTail = "";
   proc.stderr.on("data", (chunk) => {
@@ -358,7 +390,31 @@ const server = http.createServer((req, res) => {
   if (urlNoQuery === "/render-capability" && req.method === "GET") {
     checkFfmpeg((available) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ available }));
+      res.end(JSON.stringify({ available, cpuCount: CPU_COUNT }));
+    });
+    return;
+  }
+  if (urlNoQuery === "/performance-settings" && req.method === "POST") {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Malformed JSON body" }));
+        return;
+      }
+      const renderConcurrency = clampConcurrency(body.renderConcurrency);
+      const transcribeConcurrency = clampConcurrency(body.transcribeConcurrency);
+      if (renderConcurrency !== null) renderLimiter.setMax(renderConcurrency);
+      if (transcribeConcurrency !== null) transcribeLimiter.setMax(transcribeConcurrency);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        renderConcurrency: renderLimiter.getMax(),
+        transcribeConcurrency: transcribeLimiter.getMax(),
+      }));
     });
     return;
   }
