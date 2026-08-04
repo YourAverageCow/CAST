@@ -133,7 +133,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 /* ---- Batch composer ---- */
 #batchFlow { width: 100%; max-width: 1600px; display: flex; flex-direction: column; align-items: stretch; gap: 20px; }
 #bulkSetupView { width: 100%; max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; }
-#bulkDoneView { width: 100%; max-width: 480px; margin: 0 auto; display: flex; flex-direction: column; }
 .bulk-cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; margin-bottom: 14px; align-items: start; }
 .bulk-cards-grid .bulk-card { margin-bottom: 0; }
 #batchCardsView { width: 100%; max-width: 1600px; margin: 0 auto; display: flex; flex-direction: column; align-items: stretch; gap: 20px; }
@@ -163,8 +162,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .bulk-finegrain-note { font-size: 0.72rem; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
 .bulk-secondary-btn { width: 100%; margin-top: 10px; background: transparent; border: 1px dashed var(--border); color: var(--muted); padding: 10px 14px; }
 .bulk-secondary-btn:hover { color: var(--text); border-color: #444c56; }
-.bulk-done-card { text-align: center; }
-.bulk-done-card h3 { justify-content: center; font-size: 1rem; margin-bottom: 6px; }
 
 .bulk-back-link { align-self: flex-start; background: transparent; border: none; color: var(--accent); font-size: 0.8rem; cursor: pointer; padding: 4px 0; margin-bottom: 8px; }
 .bulk-back-link:hover { text-decoration: underline; }
@@ -196,7 +193,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .result-retry-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 .bulk-generate-btn { width: 100%; padding: 10px 14px; }
-#bulkGenerateProgress { font-size: 0.75rem; color: var(--muted); margin: 6px 0 0; }
 
 .library-pick-link { background: transparent; border: none; color: var(--accent); font-size: 0.72rem; cursor: pointer; padding: 4px 0; text-decoration: underline; }
 
@@ -590,21 +586,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         </div>
       </div>
 
-      <p class="bulk-finegrain-note">Fine-grained per-video style (font, colors, resolution...) isn't set here — use "Review &amp; Customize Each" after generating, or "Create Separately" below, to adjust an individual video.</p>
+      <p class="bulk-finegrain-note">Fine-grained per-video style (font, colors, resolution...) isn't set here — use "Create Separately" below to adjust an individual video instead. Clicking "Generate Stories" goes straight into generating and rendering all of them.</p>
 
       <button class="primary bulk-generate-btn" id="bulkGenerateBtn" onclick="bulkGenerateBatch()">Generate Stories</button>
-      <p id="bulkGenerateProgress"></p>
       <button class="bulk-secondary-btn" onclick="createBatchSeparately()">Create Separately Instead</button>
-    </div>
-
-    <!-- ---------- "Done generating" screen ---------- -->
-    <div id="bulkDoneView" style="display:none">
-      <div class="bulk-card bulk-done-card">
-        <h3 style="color:var(--green);">Stories Ready</h3>
-        <p id="bulkDoneSummary" style="color:var(--muted);margin:0 0 14px;"></p>
-        <button class="accent" style="width:100%;" onclick="setBatchViewMode('cards')">Review &amp; Customize Each</button>
-        <button class="primary" style="width:100%;margin-top:8px;" onclick="finishBulkGenerate()">Done — Start Rendering</button>
-      </div>
     </div>
 
     <!-- ---------- Manual per-card list (today's original batch UI) ---------- -->

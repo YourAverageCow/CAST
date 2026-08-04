@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 77;
+const VERSION = 78;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2483,16 +2483,15 @@ function setFlow(flow) {
 
 const MAX_BULK_GENERATE = 15;
 
-// The Batch page has three mutually-exclusive views: "setup" (the default
-// bulk-generate screen), "done" (shown after Generate Stories finishes),
-// and "cards" (the original per-card list — reached via "Create Separately",
-// "Review & Customize Each", or "Done — Start Rendering"). Nothing about
-// batchJobs/rendering itself depends on which view is showing.
+// The Batch page has two mutually-exclusive views: "setup" (the default
+// bulk-generate screen) and "cards" (the original per-card list — reached
+// via "Create Separately", or automatically once "Generate Stories" starts
+// producing jobs). Nothing about batchJobs/rendering itself depends on
+// which view is showing.
 let batchViewMode = "setup";
 function setBatchViewMode(mode) {
   batchViewMode = mode;
   $("#bulkSetupView").style.display = mode === "setup" ? "" : "none";
-  $("#bulkDoneView").style.display = mode === "done" ? "" : "none";
   $("#batchCardsView").style.display = mode === "cards" ? "" : "none";
 }
 
@@ -2502,17 +2501,6 @@ function setBatchViewMode(mode) {
 function createBatchSeparately() {
   if (batchJobs.length === 0) addBatchCard();
   setBatchViewMode("cards");
-}
-
-// "Done — Start Rendering" on the post-generate screen: go straight into the
-// existing render pipeline (same as clicking "Generate All" from the card
-// list) without requiring a stop in the card list first. Switches to the
-// card-list view first so that if the full-page render overlay gets
-// minimized later, the user lands somewhere sensible instead of a stale
-// summary screen.
-function finishBulkGenerate() {
-  setBatchViewMode("cards");
-  renderAllBatch();
 }
 
 // Ordered lists of library item ids from the numbered multi-select picker
@@ -2953,6 +2941,11 @@ async function generateIdeaAndStoryForJob(job, cardEl) {
 // a random one from the library, or the manually-chosen ones from the
 // numbered picker (web/lib/bulk-assignment.js).
 //
+// Not a separate step before rendering: this opens the same full-page
+// progress panel renderAllBatch() uses immediately (showing story-generation
+// progress), then automatically continues straight into rendering once every
+// story is ready — no intermediate "done, now what?" screen or extra click.
+//
 // Sequential, not concurrent: streamChat hits the user's own configured
 // DeepSeek/OpenAI key directly, and firing up to MAX_BULK_GENERATE concurrent
 // completions against one key risks rate-limiting and produces out-of-order,
@@ -3005,25 +2998,40 @@ async function bulkGenerateBatch() {
 
   const btn = $("#bulkGenerateBtn");
   btn.disabled = true;
-  const progress = $("#bulkGenerateProgress");
+  setBatchViewMode("cards");
+
+  const jobs = [];
+  for (let i = 0; i < count; i++) {
+    const job = addBatchCard();
+    const cardEl = document.querySelector(`.batch-card[data-job-id="${job.id}"]`);
+    applyBulkJobDefaults(job, cardEl, defaults);
+    job.progressLabel = "Queued...";
+    jobs.push({ job, cardEl });
+  }
+
+  openBatchProgressPanel(jobs.map(j => j.job));
+  $("#batchProgressTitle").textContent = `Generating ${count} stor${count === 1 ? "y" : "ies"}...`;
+
   try {
-    for (let i = 0; i < count; i++) {
-      progress.textContent = `Generating story ${i + 1}/${count}...`;
-      const job = addBatchCard();
-      const cardEl = document.querySelector(`.batch-card[data-job-id="${job.id}"]`);
-      applyBulkJobDefaults(job, cardEl, defaults);
+    for (let i = 0; i < jobs.length; i++) {
+      const { job, cardEl } = jobs[i];
+      job.progressLabel = "Generating story...";
+      renderResultCard(job, $("#batchProgressGrid"));
       await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
       await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
       await generateIdeaAndStoryForJob(job, cardEl);
+      job.progressLabel = "Story ready";
+      renderResultCard(job, $("#batchProgressGrid"));
     }
-    $("#bulkDoneSummary").textContent = `Generated ${count} stor${count === 1 ? "y" : "ies"}.`;
-    setBatchViewMode("done");
   } catch (e) {
     console.error(e);
     alert("Bulk generation failed: " + (e && e.message ? e.message : String(e)));
+    btn.disabled = false;
+    return;
   }
-  progress.textContent = "";
+
   btn.disabled = false;
+  await renderAllBatch();
 }
 
 // ---------- Full-page batch progress panel ----------
