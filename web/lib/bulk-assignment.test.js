@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { shuffle, planBulkVideoAssignment } = require("./bulk-assignment.js");
+const { shuffle, planBulkVideoAssignment, planManualAssignment } = require("./bulk-assignment.js");
 
 const LIB = [{ id: "a" }, { id: "b" }, { id: "c" }];
 
@@ -65,4 +65,31 @@ test("result length always equals count, for count 1 through 15", () => {
     assert.equal(samePlan.length, count);
     assert.equal(separatePlan.length, count);
   }
+});
+
+test("planManualAssignment returns all 'none' when no picks were made", () => {
+  const plan = planManualAssignment({ count: 4, orderedItemIds: [] });
+  assert.equal(plan.length, 4);
+  assert.ok(plan.every(p => p.source === "none"));
+});
+
+test("planManualAssignment returns all 'none' when orderedItemIds is missing", () => {
+  const plan = planManualAssignment({ count: 3, orderedItemIds: null });
+  assert.ok(plan.every(p => p.source === "none"));
+});
+
+test("planManualAssignment maps picks 1:1 in click order when picks.length === count", () => {
+  const plan = planManualAssignment({ count: 3, orderedItemIds: ["c", "a", "b"] });
+  assert.deepEqual(plan.map(p => p.itemId), ["c", "a", "b"]);
+  assert.ok(plan.every(p => p.source === "library"));
+});
+
+test("planManualAssignment cycles through picks in the same order (not reshuffled) when picks.length < count", () => {
+  const plan = planManualAssignment({ count: 7, orderedItemIds: ["x", "y"] });
+  assert.deepEqual(plan.map(p => p.itemId), ["x", "y", "x", "y", "x", "y", "x"]);
+});
+
+test("planManualAssignment uses only the first `count` picks when picks.length > count", () => {
+  const plan = planManualAssignment({ count: 2, orderedItemIds: ["p", "q", "r", "s"] });
+  assert.deepEqual(plan.map(p => p.itemId), ["p", "q"]);
 });

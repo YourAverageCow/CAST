@@ -43,6 +43,24 @@ function planBulkVideoAssignment({ count, videoMode, useRandomLibrary, libraryIt
   });
 }
 
+// Same {source} shape as planBulkVideoAssignment, but for an explicit,
+// user-ordered list of library item ids (the numbered multi-select picker)
+// instead of a random pick. Picks are honored in click order; fewer picks
+// than `count` cycles through that same order to fill the remaining slots
+// (not reshuffled — the user's deliberate order is preserved on each lap),
+// mirroring planBulkVideoAssignment's shuffle-and-cycle behavior for
+// "separate + random" but without the shuffle, since order here was chosen
+// on purpose. More picks than `count` just uses the first `count` of them.
+function planManualAssignment({ count, orderedItemIds }) {
+  if (!orderedItemIds || orderedItemIds.length === 0) {
+    return Array.from({ length: count }, () => ({ source: "none" }));
+  }
+  return Array.from({ length: count }, (_, i) => ({
+    source: "library",
+    itemId: orderedItemIds[i % orderedItemIds.length],
+  }));
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { shuffle, planBulkVideoAssignment };
+  module.exports = { shuffle, planBulkVideoAssignment, planManualAssignment };
 }

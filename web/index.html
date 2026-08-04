@@ -132,8 +132,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 /* ---- Batch composer ---- */
 #batchFlow { width: 100%; max-width: 900px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+#bulkSetupView, #bulkDoneView { width: 100%; max-width: 480px; display: flex; flex-direction: column; }
+#batchCardsView { width: 100%; max-width: 900px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
 #batchComposer { width: 100%; max-width: 700px; display: flex; flex-direction: column; gap: 12px; }
 #batchCardList { display: flex; flex-direction: column; gap: 14px; }
+.bulk-source-choice { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.bulk-source-choice label { font-size: 0.8rem; color: var(--text); display: flex; align-items: center; gap: 6px; margin: 0; }
+.bulk-choose-btn { width: auto; align-self: flex-start; margin-top: 8px; padding: 7px 14px; }
+.bulk-picks-summary { font-size: 0.75rem; color: var(--muted); margin: 4px 0 0; }
+.bulk-back-link { align-self: flex-start; background: transparent; border: none; color: var(--accent); font-size: 0.8rem; cursor: pointer; padding: 4px 0; margin-bottom: 8px; }
+.bulk-back-link:hover { text-decoration: underline; }
 .batch-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
 .batch-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .batch-card-index { font-size: 0.8rem; color: var(--muted); font-weight: 600; }
@@ -161,11 +169,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .result-retry-btn { width: 100%; margin-top: 8px; padding: 8px; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; }
 .result-retry-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-.bulk-generate-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
-.bulk-generate-row select { width: auto; padding: 6px 10px; }
-.bulk-generate-row label { font-size: 0.78rem; color: var(--muted); display: flex; align-items: center; gap: 6px; margin: 0; }
-.bulk-generate-row .bulk-generate-btn { width: auto; padding: 8px 14px; }
-#bulkGenerateProgress { font-size: 0.75rem; color: var(--muted); margin: 4px 0 0; }
+.bulk-generate-btn { width: 100%; padding: 10px 14px; }
+#bulkGenerateProgress { font-size: 0.75rem; color: var(--muted); margin: 6px 0 0; }
 
 .library-pick-link { background: transparent; border: none; color: var(--accent); font-size: 0.72rem; cursor: pointer; padding: 4px 0; text-decoration: underline; }
 
@@ -180,6 +185,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .media-library-item-size { flex: none; color: var(--muted); }
 .media-library-item-delete { flex: none; background: transparent; border: 1px solid var(--border); color: var(--muted); width: 24px; height: 24px; border-radius: 6px; cursor: pointer; padding: 0; font-size: 0.85rem; }
 .media-library-item-delete:hover { color: var(--danger); border-color: var(--danger); }
+
+/* Numbered multi-select picker grid (openMediaLibraryPicker) — replaces the
+   plain list above when picking video/music for a bulk-generate batch. */
+.media-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }
+.media-library-tile { position: relative; cursor: pointer; border: 2px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); aspect-ratio: 16/9; display: flex; align-items: center; justify-content: center; }
+.media-library-tile:hover { border-color: #444c56; }
+.media-library-tile.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(88,166,255,0.35); }
+.media-library-tile-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.media-library-tile-icon { font-size: 1.8rem; }
+.media-library-tile-name { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.65); color: #fff; font-size: 0.65rem; padding: 3px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.media-library-tile-badge { position: absolute; top: 5px; right: 5px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 0.75rem; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0,0,0,0.5); }
+#mediaLibraryPickerFooter { display: flex; gap: 8px; margin-top: 4px; }
+#mediaLibraryPickerFooter button { flex: 1; }
 
 #batchProgressOverlay { display: none; position: fixed; inset: 0; z-index: 400; background: var(--bg); overflow-y: auto; padding: 24px 30px 40px; }
 #batchProgressOverlay.show { display: block; }
@@ -486,32 +504,84 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   </div>
 
   <div id="batchFlow" style="display:none">
-    <div id="batchComposer">
-      <div class="bulk-generate-row">
-        <label>Generate
-          <select id="bulkGenerateCount"></select>
-          stories
-        </label>
-        <select id="bulkVideoMode">
-          <option value="separate">Separate videos</option>
-          <option value="same">Same video for all</option>
-        </select>
-        <label><input type="checkbox" id="bulkUseRandomLibrary" style="width:auto;"> Use random video from your library</label>
-        <button class="primary bulk-generate-btn" id="bulkGenerateBtn" onclick="bulkGenerateBatch()">Generate Stories</button>
-        <button class="accent bulk-generate-btn" onclick="openMediaLibrary()">Media Library</button>
+
+    <!-- ---------- Bulk-generate screen (default view) ---------- -->
+    <div id="bulkSetupView">
+      <h2 style="margin-top:0;">Bulk Generate</h2>
+      <label>Generate
+        <select id="bulkGenerateCount"></select>
+        stories
+      </label>
+
+      <label style="margin-top:14px;">Background video</label>
+      <select id="bulkVideoMode">
+        <option value="separate">Separate videos</option>
+        <option value="same">Same video for all</option>
+      </select>
+      <div class="bulk-source-choice">
+        <label><input type="radio" name="bulkVideoSource" value="none" checked style="width:auto;"> Leave blank (upload later)</label>
+        <label><input type="radio" name="bulkVideoSource" value="random" style="width:auto;"> Random from library</label>
+        <label><input type="radio" name="bulkVideoSource" value="manual" style="width:auto;"> Choose for each</label>
       </div>
+      <button class="accent bulk-choose-btn" id="bulkVideoChooseBtn" style="display:none;" onclick="openBulkVideoPicker()">Choose Videos</button>
+      <p class="bulk-picks-summary" id="bulkVideoPicksSummary"></p>
+
+      <label style="margin-top:14px;">Voice</label>
+      <select id="bulkVoice"><option value="">Use settings voice</option></select>
+      <label>TTS engine</label>
+      <select id="bulkTtsEngine"><option value="">Use settings engine</option></select>
+
+      <label style="margin-top:14px;">Caption style</label>
+      <select id="bulkCaptionPreset">
+        <option value="">Use settings preset</option>
+        <option value="capcut">CapCut (one word at a time)</option>
+        <option value="classic">Classic (grouped phrases)</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+        <input type="checkbox" id="bulkTitleCard" checked style="width:auto;"> Title card
+      </label>
+
+      <label style="margin-top:14px;">Background music</label>
+      <div class="bulk-source-choice">
+        <label><input type="radio" name="bulkMusicSource" value="none" checked style="width:auto;"> No music</label>
+        <label><input type="radio" name="bulkMusicSource" value="random" style="width:auto;"> Random from library</label>
+        <label><input type="radio" name="bulkMusicSource" value="manual" style="width:auto;"> Choose for each</label>
+      </div>
+      <button class="accent bulk-choose-btn" id="bulkMusicChooseBtn" style="display:none;" onclick="openBulkMusicPicker()">Choose Music</button>
+      <p class="bulk-picks-summary" id="bulkMusicPicksSummary"></p>
+
+      <p style="font-size:0.72rem;color:var(--muted);margin-top:14px;">Fine-grained per-video style (font, colors, resolution...) isn't set here — use "Review & Customize Each" after generating, or "Create Separately" below, to adjust an individual video.</p>
+
+      <button class="primary bulk-generate-btn" id="bulkGenerateBtn" onclick="bulkGenerateBatch()" style="margin-top:14px;width:100%;">Generate Stories</button>
       <p id="bulkGenerateProgress"></p>
-      <div id="batchCardList"></div>
-      <button class="accent" id="addBatchCardBtn" onclick="addBatchCard()">+ Add Video</button>
-      <div class="batch-controls">
-        <label class="batch-parallelism-label">Parallel renders
-          <select id="batchParallelism"></select>
-        </label>
-        <button class="primary" onclick="renderAllBatch()" id="renderAllBtn">Generate All</button>
-      </div>
-      <p class="batch-hint" id="batchParallelismHint"></p>
+      <button class="accent" style="width:100%;margin-top:20px;" onclick="createBatchSeparately()">Create Separately Instead</button>
+      <button class="accent" style="width:100%;margin-top:8px;" onclick="openMediaLibrary()">Media Library</button>
     </div>
-    <div id="resultsGrid"></div>
+
+    <!-- ---------- "Done generating" screen ---------- -->
+    <div id="bulkDoneView" style="display:none">
+      <h2 style="margin-top:0;">Stories Ready</h2>
+      <p id="bulkDoneSummary" style="color:var(--muted);"></p>
+      <button class="accent" style="width:100%;margin-top:10px;" onclick="setBatchViewMode('cards')">Review &amp; Customize Each</button>
+      <button class="primary" style="width:100%;margin-top:8px;" onclick="finishBulkGenerate()">Done — Start Rendering</button>
+    </div>
+
+    <!-- ---------- Manual per-card list (today's original batch UI) ---------- -->
+    <div id="batchCardsView" style="display:none">
+      <button class="bulk-back-link" onclick="setBatchViewMode('setup')">&larr; Back to bulk generate</button>
+      <div id="batchComposer">
+        <div id="batchCardList"></div>
+        <button class="accent" id="addBatchCardBtn" onclick="addBatchCard()">+ Add Video</button>
+        <div class="batch-controls">
+          <label class="batch-parallelism-label">Parallel renders
+            <select id="batchParallelism"></select>
+          </label>
+          <button class="primary" onclick="renderAllBatch()" id="renderAllBtn">Generate All</button>
+        </div>
+        <p class="batch-hint" id="batchParallelismHint"></p>
+      </div>
+      <div id="resultsGrid"></div>
+    </div>
   </div>
 </div>
 
@@ -549,6 +619,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <div id="mediaLibraryDropZone" class="media-library-drop">Drag video/audio files here, or click to browse</div>
     <input type="file" id="mediaLibraryInput" accept="video/*,audio/*" multiple style="display:none" onchange="handleMediaLibraryUpload(this)">
     <div id="mediaLibraryList" class="media-library-list"></div>
+    <div id="mediaLibraryPickerFooter" style="display:none;">
+      <button class="accent" onclick="cancelMediaLibraryPicker()">Cancel</button>
+      <button class="primary" id="mediaLibraryConfirmBtn" onclick="confirmMediaLibraryPicker()" disabled>Confirm (0 picked)</button>
+    </div>
   </div>
 </div>
 

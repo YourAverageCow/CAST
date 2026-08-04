@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 73;
+const VERSION = 74;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2183,9 +2183,21 @@ function formatFileSize(bytes) {
 }
 
 // null when opened in manage mode (delete-only); a callback when opened as a
-// picker (row click hands the picked File to it and closes the modal).
+// single-pick picker (row click hands the picked File to it and closes the
+// modal) — used by the per-card "Choose from library" links.
 let mediaLibraryPickCallback = null;
 let mediaLibraryPickKind = null; // restricts the picker's list to one kind
+
+// Separate multi-pick ("numbered picker", Instagram-style) state, used only
+// by the bulk-generate screen's "Choose for each" buttons via
+// openMediaLibraryPicker() — an ordered array of ids rather than a single
+// immediate pick, with an explicit Confirm/Cancel footer instead of closing
+// on the first click.
+let mediaLibraryPickerActive = false;
+let mediaLibraryPickerMax = 0;
+let mediaLibraryPickerOnConfirm = null;
+let mediaLibraryPickerSelection = [];
+const mediaLibraryThumbCache = new Map(); // itemId -> data URL, session-lived
 
 function openMediaLibrary(onPick, kind) {
   mediaLibraryPickCallback = onPick || null;
@@ -2193,9 +2205,33 @@ function openMediaLibrary(onPick, kind) {
   $("#mediaLibraryOverlay").classList.add("show");
   renderMediaLibraryList();
 }
+
+function openMediaLibraryPicker({ kind, max, onConfirm }) {
+  mediaLibraryPickCallback = null;
+  mediaLibraryPickKind = kind || null;
+  mediaLibraryPickerActive = true;
+  mediaLibraryPickerMax = max;
+  mediaLibraryPickerOnConfirm = onConfirm;
+  mediaLibraryPickerSelection = [];
+  $("#mediaLibraryOverlay").classList.add("show");
+  $("#mediaLibraryPickerFooter").style.display = "flex";
+  renderMediaLibraryList();
+}
+
 function closeMediaLibrary() {
   $("#mediaLibraryOverlay").classList.remove("show");
   mediaLibraryPickCallback = null;
+  mediaLibraryPickerActive = false;
+  mediaLibraryPickerOnConfirm = null;
+  mediaLibraryPickerSelection = [];
+  $("#mediaLibraryPickerFooter").style.display = "none";
+}
+function cancelMediaLibraryPicker() { closeMediaLibrary(); }
+function confirmMediaLibraryPicker() {
+  const onConfirm = mediaLibraryPickerOnConfirm;
+  const selection = mediaLibraryPickerSelection.slice();
+  closeMediaLibrary();
+  if (onConfirm) onConfirm(selection);
 }
 
 function renderMediaLibraryList() {
@@ -2203,6 +2239,13 @@ function renderMediaLibraryList() {
   const items = mediaLibraryPickKind
     ? mediaLibraryCache[mediaLibraryPickKind]
     : [...mediaLibraryCache.video, ...mediaLibraryCache.audio];
+
+  if (mediaLibraryPickerActive) {
+    renderMediaLibraryPickerGrid(list, items);
+    return;
+  }
+
+  list.className = "media-library-list";
   if (!items.length) {
     list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">${mediaLibraryPickKind ? "No " + mediaLibraryPickKind + " files saved yet." : "No files saved yet."} Drag files above to add them.</p>`;
     return;
@@ -2232,6 +2275,114 @@ function renderMediaLibraryList() {
       showToast("Removed from library.");
     });
   }
+}
+
+// Numbered multi-select grid — click a tile to select it (badge shows its
+// position, 1-based, in click order); click again to deselect (the rest
+// renumber down automatically on re-render, since the badge is just the
+// tile's current index in mediaLibraryPickerSelection).
+function renderMediaLibraryPickerGrid(list, items) {
+  list.className = "media-library-grid";
+  if (!items.length) {
+    list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">No ${mediaLibraryPickKind || ""} files saved yet — add some from the drop zone above first.</p>`;
+    updateMediaLibraryPickerFooter();
+    return;
+  }
+  list.innerHTML = items.map(item => {
+    const pos = mediaLibraryPickerSelection.indexOf(item.id);
+    const selected = pos !== -1;
+    const badge = selected ? `<span class="media-library-tile-badge">${pos + 1}</span>` : "";
+    const thumb = mediaLibraryThumbCache.get(item.id);
+    const preview = thumb
+      ? `<img class="media-library-tile-thumb" src="${thumb}">`
+      : `<span class="media-library-tile-icon">${item.kind === "audio" ? "🎵" : "🎬"}</span>`;
+    return `
+      <div class="media-library-tile${selected ? " selected" : ""}" data-id="${item.id}">
+        ${preview}
+        <span class="media-library-tile-name">${escapeHtml(item.name)}</span>
+        ${badge}
+      </div>`;
+  }).join("");
+
+  for (const tile of list.querySelectorAll(".media-library-tile")) {
+    const id = tile.dataset.id;
+    tile.addEventListener("click", () => toggleMediaLibraryPick(id));
+  }
+  // Thumbnails generate lazily (only for video, only once per item per
+  // session) rather than blocking the grid on every item up front.
+  for (const item of items) {
+    if (item.kind !== "video" || mediaLibraryThumbCache.has(item.id)) continue;
+    getMediaLibraryFile(item.id)
+      .then(file => file && generateVideoThumbnail(file))
+      .then(dataUrl => {
+        if (!dataUrl) return;
+        mediaLibraryThumbCache.set(item.id, dataUrl);
+        const tile = list.querySelector(`.media-library-tile[data-id="${item.id}"]`);
+        const icon = tile && tile.querySelector(".media-library-tile-icon");
+        if (icon) {
+          const img = document.createElement("img");
+          img.className = "media-library-tile-thumb";
+          img.src = dataUrl;
+          icon.replaceWith(img);
+        }
+      })
+      .catch(() => {});
+  }
+  updateMediaLibraryPickerFooter();
+}
+
+function toggleMediaLibraryPick(id) {
+  const idx = mediaLibraryPickerSelection.indexOf(id);
+  if (idx !== -1) {
+    mediaLibraryPickerSelection.splice(idx, 1);
+  } else {
+    if (mediaLibraryPickerSelection.length >= mediaLibraryPickerMax) {
+      showToast(`You can only pick ${mediaLibraryPickerMax}.`);
+      return;
+    }
+    mediaLibraryPickerSelection.push(id);
+  }
+  renderMediaLibraryList();
+}
+
+function updateMediaLibraryPickerFooter() {
+  const btn = $("#mediaLibraryConfirmBtn");
+  if (!btn) return;
+  const n = mediaLibraryPickerSelection.length;
+  btn.textContent = `Confirm (${n}/${mediaLibraryPickerMax} picked)`;
+  btn.disabled = n === 0;
+}
+
+// Off-DOM <video> + <canvas> frame grab — same mechanics as the codec-
+// transcode path's frame extraction, just a single frame instead of a full
+// re-encode. Seeks to a moment early in the clip (but not literally frame 0,
+// which is often a black/fade-in frame) so the thumbnail actually shows
+// something recognizable.
+function generateVideoThumbnail(file) {
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    const url = URL.createObjectURL(file);
+    const cleanup = () => URL.revokeObjectURL(url);
+    video.addEventListener("loadedmetadata", () => {
+      video.currentTime = Math.min(0.3, (video.duration || 1) / 2);
+    });
+    video.addEventListener("seeked", () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 160; canvas.height = 90;
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.7));
+      } catch (e) {
+        resolve(null);
+      } finally {
+        cleanup();
+      }
+    });
+    video.addEventListener("error", () => { cleanup(); resolve(null); });
+    video.src = url;
+  });
 }
 
 // Video files with a codec the in-browser renderer can't read (AV1/VP9/VP8 —
@@ -2306,6 +2457,75 @@ function setFlow(flow) {
 
 const MAX_BULK_GENERATE = 15;
 
+// The Batch page has three mutually-exclusive views: "setup" (the default
+// bulk-generate screen), "done" (shown after Generate Stories finishes),
+// and "cards" (the original per-card list — reached via "Create Separately",
+// "Review & Customize Each", or "Done — Start Rendering"). Nothing about
+// batchJobs/rendering itself depends on which view is showing.
+let batchViewMode = "setup";
+function setBatchViewMode(mode) {
+  batchViewMode = mode;
+  $("#bulkSetupView").style.display = mode === "setup" ? "" : "none";
+  $("#bulkDoneView").style.display = mode === "done" ? "" : "none";
+  $("#batchCardsView").style.display = mode === "cards" ? "" : "none";
+}
+
+// "Create Separately Instead" — skips bulk generation entirely, seeding one
+// blank card the first time (same as this used to happen unconditionally on
+// every Batch-tab visit, before the bulk-generate screen became the default).
+function createBatchSeparately() {
+  if (batchJobs.length === 0) addBatchCard();
+  setBatchViewMode("cards");
+}
+
+// "Done — Start Rendering" on the post-generate screen: go straight into the
+// existing render pipeline (same as clicking "Generate All" from the card
+// list) without requiring a stop in the card list first. Switches to the
+// card-list view first so that if the full-page render overlay gets
+// minimized later, the user lands somewhere sensible instead of a stale
+// summary screen.
+function finishBulkGenerate() {
+  setBatchViewMode("cards");
+  renderAllBatch();
+}
+
+// Ordered lists of library item ids from the numbered multi-select picker
+// (see openMediaLibraryPicker below) — populated when "Choose for each" is
+// picked for video/music on the bulk-generate screen.
+let bulkVideoManualPicks = [];
+let bulkMusicManualPicks = [];
+
+function openBulkVideoPicker() {
+  const count = parseInt($("#bulkGenerateCount").value) || 1;
+  openMediaLibraryPicker({
+    kind: "video", max: count,
+    onConfirm: (ids) => {
+      bulkVideoManualPicks = ids;
+      $("#bulkVideoPicksSummary").textContent = ids.length ? `${ids.length} video${ids.length === 1 ? "" : "s"} chosen.` : "";
+    },
+  });
+}
+function openBulkMusicPicker() {
+  const count = parseInt($("#bulkGenerateCount").value) || 1;
+  openMediaLibraryPicker({
+    kind: "audio", max: count,
+    onConfirm: (ids) => {
+      bulkMusicManualPicks = ids;
+      $("#bulkMusicPicksSummary").textContent = ids.length ? `${ids.length} track${ids.length === 1 ? "" : "s"} chosen.` : "";
+    },
+  });
+}
+function updateBulkVideoSourceUI() {
+  const val = document.querySelector('input[name="bulkVideoSource"]:checked').value;
+  $("#bulkVideoChooseBtn").style.display = val === "manual" ? "" : "none";
+  if (val !== "manual") { $("#bulkVideoPicksSummary").textContent = ""; bulkVideoManualPicks = []; }
+}
+function updateBulkMusicSourceUI() {
+  const val = document.querySelector('input[name="bulkMusicSource"]:checked').value;
+  $("#bulkMusicChooseBtn").style.display = val === "manual" ? "" : "none";
+  if (val !== "manual") { $("#bulkMusicPicksSummary").textContent = ""; bulkMusicManualPicks = []; }
+}
+
 function initBatchUI() {
   const select = $("#batchParallelism");
   const opts = [];
@@ -2325,7 +2545,17 @@ function initBatchUI() {
   countSelect.innerHTML = countOpts.join("");
   countSelect.value = "5";
 
-  if (batchJobs.length === 0) addBatchCard();
+  const engineOpts = Object.values(TTS_ENGINES).map(e => `<option value="${e.id}">${escapeHtml(e.label)}</option>`).join("");
+  $("#bulkTtsEngine").innerHTML = '<option value="">Use settings engine</option>' + engineOpts;
+  populateBatchCardVoices(DEFAULT_TTS_ENGINE, $("#bulkVoice"));
+  $("#bulkTtsEngine").addEventListener("change", () => {
+    populateBatchCardVoices($("#bulkTtsEngine").value || DEFAULT_TTS_ENGINE, $("#bulkVoice"));
+  });
+
+  for (const r of document.querySelectorAll('input[name="bulkVideoSource"]')) r.addEventListener("change", updateBulkVideoSourceUI);
+  for (const r of document.querySelectorAll('input[name="bulkMusicSource"]')) r.addEventListener("change", updateBulkMusicSourceUI);
+
+  setBatchViewMode("setup");
 }
 
 function updateParallelismHint() {
@@ -2626,6 +2856,46 @@ async function applyBulkVideoAssignment(planEntry, job, cardEl) {
   if (file) await setBatchCardBackground(job, file, cardEl);
 }
 
+// Same idea as applyBulkVideoAssignment but for background music — sets
+// job.musicFile directly (no codec/transcode concerns for audio) and updates
+// the card's own status text, mirroring what the per-card music-upload
+// button already does (app.js, .bc-music-status).
+async function applyBulkMusicAssignment(planEntry, job, cardEl) {
+  if (planEntry.source !== "library") return;
+  const file = await getMediaLibraryFile(planEntry.itemId);
+  if (!file) return;
+  job.musicFile = file;
+  const status = cardEl.querySelector(".bc-music-status");
+  if (status) status.textContent = file.name;
+}
+
+// Applies the bulk-generate screen's voice/engine/caption/title-card
+// selections to a freshly-created job, and syncs the card's own DOM
+// controls to match — so if the user later opens "Review & Customize Each"
+// and expands that card's "Customize style" panel, it reflects what was
+// actually used rather than looking unset. Voice population is async per
+// engine (populateBatchCardVoices), so the voice <select>'s options may not
+// exist yet when this runs; setting .value once that resolves is a no-op if
+// the option isn't there yet, so it's re-applied after populate resolves.
+function applyBulkJobDefaults(job, cardEl, { voice, ttsEngine, captionPreset, titleCardEnabled }) {
+  job.voice = voice || null;
+  job.ttsEngine = ttsEngine || null;
+  job.captionPreset = captionPreset || null;
+  job.titleCardEnabled = titleCardEnabled;
+
+  const engineSel = cardEl.querySelector(".bc-ttsEngine");
+  const presetSel = cardEl.querySelector(".bc-captionPreset");
+  const titleChk = cardEl.querySelector(".bc-titleCard");
+  if (engineSel) engineSel.value = ttsEngine || "";
+  if (presetSel) presetSel.value = captionPreset || "";
+  if (titleChk) titleChk.checked = titleCardEnabled;
+
+  const voiceSel = cardEl.querySelector(".bc-voice");
+  if (voice && voiceSel) {
+    populateBatchCardVoices(ttsEngine || DEFAULT_TTS_ENGINE, voiceSel).then(() => { voiceSel.value = voice; });
+  }
+}
+
 // Headless variant of getIdeasForCard + generateStoryForCard: bulk-generate
 // creates all N cards up front (each already mounted in the DOM via
 // addBatchCard()), so this streams straight into that card's own textareas
@@ -2651,9 +2921,11 @@ async function generateIdeaAndStoryForJob(job, cardEl) {
 
 // Bulk-creates `count` cards in one click, each with an auto-generated
 // premise+story (reusing the same story-generation pipeline the per-card
-// "Suggest Ideas"/"Generate Story" buttons use) and — if requested — a
-// background video assigned from the media library, either the same file
-// for every card or a random one per card (web/lib/bulk-assignment.js).
+// "Suggest Ideas"/"Generate Story" buttons use), the bulk screen's voice/
+// engine/caption/title-card selections applied uniformly (applyBulkJobDefaults),
+// and — per the video/music radio choices — either no background video/music,
+// a random one from the library, or the manually-chosen ones from the
+// numbered picker (web/lib/bulk-assignment.js).
 //
 // Sequential, not concurrent: streamChat hits the user's own configured
 // DeepSeek/OpenAI key directly, and firing up to MAX_BULK_GENERATE concurrent
@@ -2663,16 +2935,47 @@ async function generateIdeaAndStoryForJob(job, cardEl) {
 async function bulkGenerateBatch() {
   const count = parseInt($("#bulkGenerateCount").value) || 1;
   const videoMode = $("#bulkVideoMode").value;
-  const useRandomLibrary = $("#bulkUseRandomLibrary").checked;
+  const videoSource = document.querySelector('input[name="bulkVideoSource"]:checked').value;
+  const musicSource = document.querySelector('input[name="bulkMusicSource"]:checked').value;
 
-  if (useRandomLibrary && mediaLibraryCache.video.length === 0) {
-    showToast("Your media library is empty — add a video first, or uncheck 'random from library'.");
+  if (videoSource === "random" && mediaLibraryCache.video.length === 0) {
+    showToast("Your media library has no videos — add one first, or choose a different video option.");
+    return;
+  }
+  if (videoSource === "manual" && bulkVideoManualPicks.length === 0) {
+    showToast("Choose at least one video first.");
+    return;
+  }
+  if (musicSource === "random" && mediaLibraryCache.audio.length === 0) {
+    showToast("Your media library has no music — add some first, or choose a different music option.");
+    return;
+  }
+  if (musicSource === "manual" && bulkMusicManualPicks.length === 0) {
+    showToast("Choose at least one music track first.");
     return;
   }
 
-  const plan = planBulkVideoAssignment({
-    count, videoMode, useRandomLibrary, libraryItems: mediaLibraryCache.video,
-  });
+  const noneplan = () => Array.from({ length: count }, () => ({ source: "none" }));
+  const videoPlan = videoSource === "random"
+    ? planBulkVideoAssignment({ count, videoMode, useRandomLibrary: true, libraryItems: mediaLibraryCache.video })
+    : videoSource === "manual"
+      ? planManualAssignment({ count, orderedItemIds: bulkVideoManualPicks })
+      : noneplan();
+  // Music has no same/separate choice on the bulk screen (always one
+  // independent pick per video) — "separate" is the right videoMode to pass
+  // through to the shared random-assignment planner.
+  const musicPlan = musicSource === "random"
+    ? planBulkVideoAssignment({ count, videoMode: "separate", useRandomLibrary: true, libraryItems: mediaLibraryCache.audio })
+    : musicSource === "manual"
+      ? planManualAssignment({ count, orderedItemIds: bulkMusicManualPicks })
+      : noneplan();
+
+  const defaults = {
+    voice: $("#bulkVoice").value,
+    ttsEngine: $("#bulkTtsEngine").value,
+    captionPreset: $("#bulkCaptionPreset").value,
+    titleCardEnabled: $("#bulkTitleCard").checked,
+  };
 
   const btn = $("#bulkGenerateBtn");
   btn.disabled = true;
@@ -2682,10 +2985,13 @@ async function bulkGenerateBatch() {
       progress.textContent = `Generating story ${i + 1}/${count}...`;
       const job = addBatchCard();
       const cardEl = document.querySelector(`.batch-card[data-job-id="${job.id}"]`);
-      await applyBulkVideoAssignment(plan[i], job, cardEl);
+      applyBulkJobDefaults(job, cardEl, defaults);
+      await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
+      await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
       await generateIdeaAndStoryForJob(job, cardEl);
     }
-    showToast(`Generated ${count} stor${count === 1 ? "y" : "ies"}.`);
+    $("#bulkDoneSummary").textContent = `Generated ${count} stor${count === 1 ? "y" : "ies"}.`;
+    setBatchViewMode("done");
   } catch (e) {
     console.error(e);
     alert("Bulk generation failed: " + (e && e.message ? e.message : String(e)));
