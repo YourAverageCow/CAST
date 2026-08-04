@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 76;
+const VERSION = 77;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2250,14 +2250,40 @@ function renderMediaLibraryList() {
     list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">${mediaLibraryPickKind ? "No " + mediaLibraryPickKind + " files saved yet." : "No files saved yet."} Drag files above to add them.</p>`;
     return;
   }
-  list.innerHTML = items.map(item => `
+  list.innerHTML = items.map(item => {
+    const thumb = mediaLibraryThumbCache.get(item.id);
+    const preview = thumb
+      ? `<img class="media-library-item-thumb" src="${thumb}">`
+      : `<span class="media-library-item-kind">${item.kind === "audio" ? "🎵" : "🎬"}</span>`;
+    return `
     <div class="media-library-item" data-id="${item.id}">
-      <span class="media-library-item-kind">${item.kind === "audio" ? "🎵" : "🎬"}</span>
+      ${preview}
       <span class="media-library-item-name">${escapeHtml(item.name)}</span>
       <span class="media-library-item-size">${formatFileSize(item.size)}</span>
       <button class="media-library-item-delete" title="Delete">&times;</button>
     </div>
-  `).join("");
+  `;
+  }).join("");
+  // Same lazy, session-cached thumbnail generation the numbered picker grid
+  // uses (generateVideoThumbnail) — only for video items, only once per item.
+  for (const item of items) {
+    if (item.kind !== "video" || mediaLibraryThumbCache.has(item.id)) continue;
+    getMediaLibraryFile(item.id)
+      .then(file => file && generateVideoThumbnail(file))
+      .then(dataUrl => {
+        if (!dataUrl) return;
+        mediaLibraryThumbCache.set(item.id, dataUrl);
+        const row = list.querySelector(`.media-library-item[data-id="${item.id}"]`);
+        const icon = row && row.querySelector(".media-library-item-kind");
+        if (icon) {
+          const img = document.createElement("img");
+          img.className = "media-library-item-thumb";
+          img.src = dataUrl;
+          icon.replaceWith(img);
+        }
+      })
+      .catch(() => {});
+  }
   for (const row of list.querySelectorAll(".media-library-item")) {
     const id = row.dataset.id;
     if (mediaLibraryPickCallback) {
