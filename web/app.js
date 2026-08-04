@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 78;
+const VERSION = 79;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2946,11 +2946,16 @@ async function generateIdeaAndStoryForJob(job, cardEl) {
 // progress), then automatically continues straight into rendering once every
 // story is ready — no intermediate "done, now what?" screen or extra click.
 //
-// Sequential, not concurrent: streamChat hits the user's own configured
-// DeepSeek/OpenAI key directly, and firing up to MAX_BULK_GENERATE concurrent
-// completions against one key risks rate-limiting and produces out-of-order,
-// meaningless progress — mirrors this app's existing precedent of
-// serializing TTS calls despite parallel-safe rendering (queueTTS).
+// Concurrent, not sequential: every job already has its own independent card
+// in the progress grid, so N stories streaming in at once updates N separate
+// cards rather than one shared indicator — nothing about the UI depends on
+// completion order anymore (unlike when this was sequential-only, before the
+// per-job progress grid existed). The one real tradeoff: this fires up to
+// MAX_BULK_GENERATE * 2 concurrent requests (ideas + story per job) at the
+// user's own configured provider — a free-tier/low-rate-limit key could get
+// throttled where sequential wouldn't. Worth it for the speedup; if rate
+// limiting turns out to be a common complaint, cap concurrency instead of
+// reverting to fully sequential.
 async function bulkGenerateBatch() {
   const count = parseInt($("#bulkGenerateCount").value) || 1;
   const videoMode = $("#bulkVideoMode").value;
@@ -3012,17 +3017,20 @@ async function bulkGenerateBatch() {
   openBatchProgressPanel(jobs.map(j => j.job));
   $("#batchProgressTitle").textContent = `Generating ${count} stor${count === 1 ? "y" : "ies"}...`;
 
+  const grid = $("#batchProgressGrid");
+  for (const { job } of jobs) {
+    job.progressLabel = "Generating story...";
+    renderResultCard(job, grid);
+  }
+
   try {
-    for (let i = 0; i < jobs.length; i++) {
-      const { job, cardEl } = jobs[i];
-      job.progressLabel = "Generating story...";
-      renderResultCard(job, $("#batchProgressGrid"));
+    await Promise.all(jobs.map(async ({ job, cardEl }, i) => {
       await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
       await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
       await generateIdeaAndStoryForJob(job, cardEl);
       job.progressLabel = "Story ready";
-      renderResultCard(job, $("#batchProgressGrid"));
-    }
+      renderResultCard(job, grid);
+    }));
   } catch (e) {
     console.error(e);
     alert("Bulk generation failed: " + (e && e.message ? e.message : String(e)));
