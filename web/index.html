@@ -56,7 +56,7 @@ body {
 .subtitle { color: var(--muted); font-size: 0.75rem; margin-bottom: 16px; }
 
 h2 { font-size: 0.78rem; font-weight: 600; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; display: flex; align-items: center; gap: 8px; }
-h2 .step-num { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #0d1117; font-size: 0.7rem; font-weight: 700; flex: none; }
+.step-num { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #0d1119; font-size: 0.7rem; font-weight: 700; flex: none; }
 h2 .step-bar { flex: 1; height: 1px; background: var(--border); }
 h2:first-of-type { margin-top: 8px; }
 
@@ -136,10 +136,32 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 #batchCardsView { width: 100%; max-width: 900px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
 #batchComposer { width: 100%; max-width: 700px; display: flex; flex-direction: column; gap: 12px; }
 #batchCardList { display: flex; flex-direction: column; gap: 14px; }
-.bulk-source-choice { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-.bulk-source-choice label { font-size: 0.8rem; color: var(--text); display: flex; align-items: center; gap: 6px; margin: 0; }
-.bulk-choose-btn { width: auto; align-self: flex-start; margin-top: 8px; padding: 7px 14px; }
-.bulk-picks-summary { font-size: 0.75rem; color: var(--muted); margin: 4px 0 0; }
+
+.bulk-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.bulk-library-link { width: auto; background: transparent; border: 1px solid var(--border); color: var(--muted); font-size: 0.7rem; text-transform: none; letter-spacing: 0; font-weight: 500; padding: 5px 10px; border-radius: 6px; cursor: pointer; }
+.bulk-library-link:hover { color: var(--accent); border-color: var(--accent); }
+
+.bulk-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+.bulk-card h3 { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; font-weight: 600; color: var(--text); margin: 0 0 4px; text-transform: none; letter-spacing: 0; }
+.bulk-card label { margin-top: 10px; }
+.bulk-checkbox-row { display: flex !important; align-items: center; gap: 6px; margin-top: 10px !important; font-size: 0.8rem; color: var(--text); }
+.bulk-checkbox-row input { width: auto; }
+
+.pill-group { display: flex; gap: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 4px; margin-top: 8px; }
+.pill-option { flex: 1; margin: 0; }
+.pill-option input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.pill-option span { display: block; text-align: center; padding: 7px 6px; border-radius: 6px; font-size: 0.74rem; color: var(--muted); cursor: pointer; transition: background 0.15s, color 0.15s; }
+.pill-option:has(input:checked) span { background: var(--accent); color: #fff; }
+.pill-option:not(:has(input:checked)):hover span { color: var(--text); }
+
+.bulk-choose-btn { width: 100%; margin-top: 10px; padding: 8px 14px; }
+.bulk-picks-summary { font-size: 0.75rem; color: var(--muted); margin: 6px 0 0; }
+.bulk-finegrain-note { font-size: 0.72rem; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
+.bulk-secondary-btn { width: 100%; margin-top: 10px; background: transparent; border: 1px dashed var(--border); color: var(--muted); padding: 10px 14px; }
+.bulk-secondary-btn:hover { color: var(--text); border-color: #444c56; }
+.bulk-done-card { text-align: center; }
+.bulk-done-card h3 { justify-content: center; font-size: 1rem; margin-bottom: 6px; }
+
 .bulk-back-link { align-self: flex-start; background: transparent; border: none; color: var(--accent); font-size: 0.8rem; cursor: pointer; padding: 4px 0; margin-bottom: 8px; }
 .bulk-back-link:hover { text-decoration: underline; }
 .batch-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
@@ -507,63 +529,75 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
     <!-- ---------- Bulk-generate screen (default view) ---------- -->
     <div id="bulkSetupView">
-      <h2 style="margin-top:0;">Bulk Generate</h2>
-      <label>Generate
-        <select id="bulkGenerateCount"></select>
-        stories
-      </label>
+      <h2 class="bulk-title" style="margin-top:0;">Bulk Generate<button class="bulk-library-link" onclick="openMediaLibrary()">Media Library</button></h2>
 
-      <label style="margin-top:14px;">Background video</label>
-      <select id="bulkVideoMode">
-        <option value="separate">Separate videos</option>
-        <option value="same">Same video for all</option>
-      </select>
-      <div class="bulk-source-choice">
-        <label><input type="radio" name="bulkVideoSource" value="none" checked style="width:auto;"> Leave blank (upload later)</label>
-        <label><input type="radio" name="bulkVideoSource" value="random" style="width:auto;"> Random from library</label>
-        <label><input type="radio" name="bulkVideoSource" value="manual" style="width:auto;"> Choose for each</label>
+      <div class="bulk-card">
+        <h3><span class="step-num">1</span> How many</h3>
+        <label style="margin-top:0;">Generate
+          <select id="bulkGenerateCount"></select>
+          stories
+        </label>
       </div>
-      <button class="accent bulk-choose-btn" id="bulkVideoChooseBtn" style="display:none;" onclick="openBulkVideoPicker()">Choose Videos</button>
-      <p class="bulk-picks-summary" id="bulkVideoPicksSummary"></p>
 
-      <label style="margin-top:14px;">Voice</label>
-      <select id="bulkVoice"><option value="">Use settings voice</option></select>
-      <label>TTS engine</label>
-      <select id="bulkTtsEngine"><option value="">Use settings engine</option></select>
-
-      <label style="margin-top:14px;">Caption style</label>
-      <select id="bulkCaptionPreset">
-        <option value="">Use settings preset</option>
-        <option value="capcut">CapCut (one word at a time)</option>
-        <option value="classic">Classic (grouped phrases)</option>
-      </select>
-      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
-        <input type="checkbox" id="bulkTitleCard" checked style="width:auto;"> Title card
-      </label>
-
-      <label style="margin-top:14px;">Background music</label>
-      <div class="bulk-source-choice">
-        <label><input type="radio" name="bulkMusicSource" value="none" checked style="width:auto;"> No music</label>
-        <label><input type="radio" name="bulkMusicSource" value="random" style="width:auto;"> Random from library</label>
-        <label><input type="radio" name="bulkMusicSource" value="manual" style="width:auto;"> Choose for each</label>
+      <div class="bulk-card">
+        <h3><span class="step-num">2</span> Background video</h3>
+        <label style="margin-top:0;">Assignment</label>
+        <select id="bulkVideoMode">
+          <option value="separate">Separate videos</option>
+          <option value="same">Same video for all</option>
+        </select>
+        <div class="pill-group">
+          <label class="pill-option"><input type="radio" name="bulkVideoSource" value="none" checked><span>Leave blank</span></label>
+          <label class="pill-option"><input type="radio" name="bulkVideoSource" value="random"><span>Random</span></label>
+          <label class="pill-option"><input type="radio" name="bulkVideoSource" value="manual"><span>Choose each</span></label>
+        </div>
+        <button class="accent bulk-choose-btn" id="bulkVideoChooseBtn" style="display:none;" onclick="openBulkVideoPicker()">Choose Videos</button>
+        <p class="bulk-picks-summary" id="bulkVideoPicksSummary"></p>
       </div>
-      <button class="accent bulk-choose-btn" id="bulkMusicChooseBtn" style="display:none;" onclick="openBulkMusicPicker()">Choose Music</button>
-      <p class="bulk-picks-summary" id="bulkMusicPicksSummary"></p>
 
-      <p style="font-size:0.72rem;color:var(--muted);margin-top:14px;">Fine-grained per-video style (font, colors, resolution...) isn't set here — use "Review & Customize Each" after generating, or "Create Separately" below, to adjust an individual video.</p>
+      <div class="bulk-card">
+        <h3><span class="step-num">3</span> Voice &amp; style</h3>
+        <label style="margin-top:0;">Voice</label>
+        <select id="bulkVoice"><option value="">Use settings voice</option></select>
+        <label>TTS engine</label>
+        <select id="bulkTtsEngine"><option value="">Use settings engine</option></select>
+        <label>Caption style</label>
+        <select id="bulkCaptionPreset">
+          <option value="">Use settings preset</option>
+          <option value="capcut">CapCut (one word at a time)</option>
+          <option value="classic">Classic (grouped phrases)</option>
+        </select>
+        <label class="bulk-checkbox-row">
+          <input type="checkbox" id="bulkTitleCard" checked> Title card
+        </label>
+      </div>
 
-      <button class="primary bulk-generate-btn" id="bulkGenerateBtn" onclick="bulkGenerateBatch()" style="margin-top:14px;width:100%;">Generate Stories</button>
+      <div class="bulk-card">
+        <h3><span class="step-num">4</span> Background music</h3>
+        <div class="pill-group">
+          <label class="pill-option"><input type="radio" name="bulkMusicSource" value="none" checked><span>No music</span></label>
+          <label class="pill-option"><input type="radio" name="bulkMusicSource" value="random"><span>Random</span></label>
+          <label class="pill-option"><input type="radio" name="bulkMusicSource" value="manual"><span>Choose each</span></label>
+        </div>
+        <button class="accent bulk-choose-btn" id="bulkMusicChooseBtn" style="display:none;" onclick="openBulkMusicPicker()">Choose Music</button>
+        <p class="bulk-picks-summary" id="bulkMusicPicksSummary"></p>
+      </div>
+
+      <p class="bulk-finegrain-note">Fine-grained per-video style (font, colors, resolution...) isn't set here — use "Review &amp; Customize Each" after generating, or "Create Separately" below, to adjust an individual video.</p>
+
+      <button class="primary bulk-generate-btn" id="bulkGenerateBtn" onclick="bulkGenerateBatch()">Generate Stories</button>
       <p id="bulkGenerateProgress"></p>
-      <button class="accent" style="width:100%;margin-top:20px;" onclick="createBatchSeparately()">Create Separately Instead</button>
-      <button class="accent" style="width:100%;margin-top:8px;" onclick="openMediaLibrary()">Media Library</button>
+      <button class="bulk-secondary-btn" onclick="createBatchSeparately()">Create Separately Instead</button>
     </div>
 
     <!-- ---------- "Done generating" screen ---------- -->
     <div id="bulkDoneView" style="display:none">
-      <h2 style="margin-top:0;">Stories Ready</h2>
-      <p id="bulkDoneSummary" style="color:var(--muted);"></p>
-      <button class="accent" style="width:100%;margin-top:10px;" onclick="setBatchViewMode('cards')">Review &amp; Customize Each</button>
-      <button class="primary" style="width:100%;margin-top:8px;" onclick="finishBulkGenerate()">Done — Start Rendering</button>
+      <div class="bulk-card bulk-done-card">
+        <h3 style="color:var(--green);">Stories Ready</h3>
+        <p id="bulkDoneSummary" style="color:var(--muted);margin:0 0 14px;"></p>
+        <button class="accent" style="width:100%;" onclick="setBatchViewMode('cards')">Review &amp; Customize Each</button>
+        <button class="primary" style="width:100%;margin-top:8px;" onclick="finishBulkGenerate()">Done — Start Rendering</button>
+      </div>
     </div>
 
     <!-- ---------- Manual per-card list (today's original batch UI) ---------- -->
