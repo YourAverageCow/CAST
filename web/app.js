@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 79;
+const VERSION = 80;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -218,11 +218,23 @@ function initPerformanceUI(savedData) {
 async function postPerformanceSettings() {
   if (!nativeRenderAvailable) return;
   const n = parseInt($("#renderConcurrency").value, 10) || nativeCpuCount;
+  await applyRenderConcurrency(n);
+}
+
+// Shared by the Settings -> Performance slider (postPerformanceSettings,
+// above) and the batch screen's own "Parallel renders" dropdown
+// (renderAllBatch/retryBatchJob below) — both are really just ways to set
+// the same server-side renderLimiter, so route them through one function
+// rather than each POSTing /performance-settings independently. Only
+// renderConcurrency is set here (transcribeConcurrency is left alone) since
+// "Parallel renders" is specifically about render throughput.
+async function applyRenderConcurrency(n) {
+  if (!nativeRenderAvailable) return;
   try {
     await fetch("/performance-settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ renderConcurrency: n, transcribeConcurrency: n }),
+      body: JSON.stringify({ renderConcurrency: n }),
     });
   } catch (e) { /* best-effort — a failed update just leaves the server's previous setting in place */ }
 }
@@ -282,6 +294,7 @@ async function init() {
   initCaptionDrag();
   initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
   initPanelResize("settingsPanel", "settingsResizeHandle", -1, "slopdaddy_settingsWidth");
+  initSidebarToggle();
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
   new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
@@ -415,6 +428,22 @@ function initPanelResize(panelId, handleId, sign, storageKey) {
   }
   handle.addEventListener("pointerup", stop);
   handle.addEventListener("pointercancel", stop);
+}
+
+const SIDEBAR_COLLAPSED_KEY = "slopdaddy_sidebarCollapsed";
+function setSidebarCollapsed(collapsed) {
+  $("#sidebar").classList.toggle("collapsed", collapsed);
+  const btn = $("#sidebarToggleBtn");
+  btn.innerHTML = collapsed ? "&raquo;" : "&laquo;";
+  btn.title = collapsed ? "Expand sidebar" : "Collapse sidebar";
+}
+function toggleSidebar() {
+  const collapsed = !$("#sidebar").classList.contains("collapsed");
+  setSidebarCollapsed(collapsed);
+  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+}
+function initSidebarToggle() {
+  if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1") setSidebarCollapsed(true);
 }
 
 // Rebuilds #voice/#voiceQuick from the given engine's own voice list —
@@ -1139,21 +1168,34 @@ async function generateSpeech(text, voice, engineId) {
   if (!text) throw new Error("Story text is empty after cleaning.");
   const config = getEngineConfig(engineId);
   if (engine.needsApiKey && !config) return Promise.reject(new Error("Missing API key for " + engine.label));
-  return queueTTS(async () => {
-    showDownloadToast(`Generating voice (${engine.label})...`);
-    try {
-      const { audioBlob, durationSec, wordTimings } = await engine.generate(text, voice, config);
-      hideDownloadToast();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const words = await resolveWordTimings(text, audioBlob, durationSec, wordTimings);
-      return { audioUrl, words };
-    } catch (e) {
-      hideDownloadToast();
-      console.error("generateSpeech failed:", e);
-      const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
-      throw new Error((e && e.message ? e.message : "TTS failed") + detail);
-    }
-  });
+  // Only the actual engine call needs queueTTS's one-at-a-time lock —
+  // Piper/Kokoro's shared singleton isn't verified concurrency-safe, and
+  // BrowserSpeech genuinely can't speak two utterances through one
+  // speechSynthesis instance at once. resolveWordTimings() (which may do a
+  // real native-Whisper subprocess round trip via /transcribe) has no such
+  // constraint, so it runs after the lock releases — this lets multiple
+  // batch jobs' transcriptions run concurrently, bounded by the server's own
+  // independent transcribeLimiter instead of being serialized behind every
+  // other job's TTS+transcription combined.
+  let generated;
+  try {
+    generated = await queueTTS(async () => {
+      showDownloadToast(`Generating voice (${engine.label})...`);
+      try {
+        return await engine.generate(text, voice, config);
+      } finally {
+        hideDownloadToast();
+      }
+    });
+  } catch (e) {
+    console.error("generateSpeech failed:", e);
+    const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
+    throw new Error((e && e.message ? e.message : "TTS failed") + detail);
+  }
+  const { audioBlob, durationSec, wordTimings } = generated;
+  const audioUrl = URL.createObjectURL(audioBlob);
+  const words = await resolveWordTimings(text, audioBlob, durationSec, wordTimings);
+  return { audioUrl, words };
 }
 
 // computeWordTimings / buildSubsFromWords live in lib/captions.js (pure,
@@ -1278,6 +1320,14 @@ async function renderVideoNatively(payload, onProgress) {
   try {
     const hasMusic = !!payload.music;
     const hasTitleCard = !!(payload.titleCard && payload.titleCard.imageBytes);
+    // When runJob() has already uploaded these bytes via ensureAssetCached
+    // (see hashAssetBytes/ensureAssetCached), the actual bg/music bytes are
+    // omitted from this request entirely — the server already has them
+    // cached by hash (server.js's BG_CACHE_DIR) and copies from there
+    // instead of expecting a fresh upload, which is what avoids re-sending
+    // the same background video N times across a batch that shares one.
+    const bgCached = !!payload.bgCached;
+    const musicCached = hasMusic && !!payload.musicCached;
     const meta = {
       subs: payload.subs, style: payload.style,
       w: payload.w, h: payload.h, fps: payload.fps, bgW: payload.bgW, bgH: payload.bgH,
@@ -1286,16 +1336,20 @@ async function renderVideoNatively(payload, onProgress) {
       titleCard: hasTitleCard
         ? { cardDurationSec: payload.titleCard.cardDurationSec, narrationDelaySec: payload.titleCard.narrationDelaySec }
         : null,
-      bgLen: payload.bg.byteLength,
+      bgHash: payload.bgHash || null, bgCached,
+      bgLen: bgCached ? 0 : payload.bg.byteLength,
       audioLen: payload.audio.byteLength,
-      musicLen: hasMusic ? payload.music.byteLength : 0,
+      musicHash: hasMusic ? (payload.musicHash || null) : null, musicCached,
+      musicLen: hasMusic ? (musicCached ? 0 : payload.music.byteLength) : 0,
       titleCardImageLen: hasTitleCard ? payload.titleCard.imageBytes.byteLength : 0,
     };
     const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
     const header = new Uint8Array(4);
     new DataView(header.buffer).setUint32(0, metaBytes.byteLength, true);
-    const parts = [header, metaBytes, payload.bg, payload.audio];
-    if (hasMusic) parts.push(payload.music);
+    const parts = [header, metaBytes];
+    if (!bgCached) parts.push(payload.bg);
+    parts.push(payload.audio);
+    if (hasMusic && !musicCached) parts.push(payload.music);
     if (hasTitleCard) parts.push(new Uint8Array(payload.titleCard.imageBytes));
 
     const resp = await fetch(`/render?id=${id}`, { method: "POST", body: new Blob(parts) });
@@ -1404,6 +1458,46 @@ async function onEngineChangeUI() {
 // touching the DOM directly, so this is equally usable from the single-video
 // sidebar (a "batch of one") and the batch composer. Never throws — check
 // job.status/job.error after it resolves.
+// Memoizes the decoded background-video bytes per File object — when a
+// batch shares one background across many jobs (bulk-generate's "same video
+// for all", or the numbered picker cycling through fewer picks than the
+// story count), every job holds the exact same File reference, so this
+// avoids re-reading/re-decoding identical bytes once per job.
+const bgBufferCache = new WeakMap(); // File -> Promise<Uint8Array>
+function readBgFileBytes(file) {
+  let p = bgBufferCache.get(file);
+  if (!p) {
+    p = file.arrayBuffer().then(b => new Uint8Array(b));
+    bgBufferCache.set(file, p);
+  }
+  return p;
+}
+
+// Server-side counterpart: server.js's BG_CACHE_DIR + POST /cache-asset. A
+// batch sharing one background (or music track) across many jobs only needs
+// to upload it once — every other job just references the hash. Hashing is
+// fast/hardware-accelerated via Web Crypto (already available since this
+// app requires a secure/cross-origin-isolated context anyway).
+async function hashAssetBytes(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// One upload attempt per hash, ever, for the life of the page session —
+// concurrent jobs sharing a hash (batch jobs run concurrently) all await the
+// SAME promise instead of racing into duplicate uploads. Native-render only;
+// the WASM path never uploads anywhere, so it has nothing to dedupe.
+const assetUploadPromises = new Map(); // hash -> Promise<void>
+function ensureAssetCached(hash, bytes) {
+  let p = assetUploadPromises.get(hash);
+  if (!p) {
+    p = fetch(`/cache-asset?hash=${hash}`, { method: "POST", body: new Blob([bytes]) })
+      .then(resp => { if (!resp.ok) throw new Error("Failed to cache asset (" + resp.status + ")"); });
+    assetUploadPromises.set(hash, p);
+  }
+  return p;
+}
+
 async function runJob(job, globalSettings, onUpdate) {
   const update = (patch) => { Object.assign(job, patch); if (onUpdate) onUpdate(job); };
   try {
@@ -1431,12 +1525,27 @@ async function runJob(job, globalSettings, onUpdate) {
       bgFile = job.bgTranscoded;
     }
 
-    update({ status: "voice", progressPct: 0, progressLabel: "Generating voice..." });
-    const { audioUrl, words } = await generateSpeech(story, settings.voice, settings.ttsEngine);
-
     const w = parseInt(settings.resW) || 1080;
     const h = parseInt(settings.resH) || 1920;
     const fps = parseInt(settings.fps) || 30;
+
+    // Title-card image generation has zero data dependency on TTS output —
+    // it only needs title/channelName/w/h, all already available — so it
+    // runs concurrently with generateSpeech() instead of waiting for it.
+    // Only the post-processing below (slicing narrationWords by how long
+    // the title takes to say) actually needs `words`, once TTS resolves.
+    const isAutoTitle = job.titleCardEnabled && !job.titleCardText;
+    const titleText = job.titleCardEnabled
+      ? (job.titleCardText || extractTitleFromStory(story) || "Untitled").trim()
+      : null;
+
+    update({ status: "voice", progressPct: 0, progressLabel: job.titleCardEnabled ? "Generating voice & title card..." : "Generating voice..." });
+    const [{ audioUrl, words }, cardBlob] = await Promise.all([
+      generateSpeech(story, settings.voice, settings.ttsEngine),
+      job.titleCardEnabled
+        ? renderTitleCardImage({ title: titleText, channelName: globalSettings.channelName, w, h })
+        : Promise.resolve(null),
+    ]);
 
     let titleCardPayload = null;
     let cardDurationSec = 0;
@@ -1452,10 +1561,6 @@ async function runJob(job, globalSettings, onUpdate) {
       // long that line takes to say. A user-typed custom title isn't
       // guaranteed to match anything in the story, so that case keeps the
       // old fixed-duration/fixed-delay behavior.
-      const isAutoTitle = !job.titleCardText;
-      const titleText = (job.titleCardText || extractTitleFromStory(story) || "Untitled").trim();
-      const cardBlob = await renderTitleCardImage({ title: titleText, channelName: globalSettings.channelName, w, h });
-
       if (isAutoTitle && words.length) {
         const titleWordCount = Math.min(countFirstParagraphWords(story), words.length);
         const lastTitleWord = words[titleWordCount - 1];
@@ -1484,8 +1589,31 @@ async function runJob(job, globalSettings, onUpdate) {
     }
 
     update({ status: "render", progressPct: 30, progressLabel: "Rendering..." });
-    const bg = new Uint8Array(await bgFile.arrayBuffer());
-    const audioData = new Uint8Array(await (await fetch(audioUrl)).arrayBuffer());
+    const [bg, audioData] = await Promise.all([
+      readBgFileBytes(bgFile),
+      fetch(audioUrl).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+    ]);
+
+    // Content-hash dedup (native only — see hashAssetBytes/ensureAssetCached
+    // above): when a batch shares a background/music file across jobs, only
+    // the first job for a given hash actually uploads the bytes to
+    // /cache-asset — every other job's ensureAssetCached() call just awaits
+    // that same in-flight upload instead of starting a new one. Either way,
+    // once it resolves the server is guaranteed to have the asset cached, so
+    // every job's own /render payload always references it by hash and
+    // omits the raw bytes — no "am I the first uploader" branching needed.
+    let bgHash = null, bgCached = false, musicHash = null, musicCached = false;
+    if (nativeRenderAvailable) {
+      bgHash = await hashAssetBytes(bg);
+      await ensureAssetCached(bgHash, bg);
+      bgCached = true;
+      if (musicPayload) {
+        musicHash = await hashAssetBytes(musicPayload);
+        await ensureAssetCached(musicHash, musicPayload);
+        musicCached = true;
+      }
+    }
+
     const style = {
       fontSize: parseInt(settings.fontSize) || 68,
       textColor: settings.textColor,
@@ -1503,6 +1631,7 @@ async function runJob(job, globalSettings, onUpdate) {
       bg, audio: audioData, subs, style, w, h, fps, bgW, bgH,
       music: musicPayload, musicVolume: job.musicVolume,
       titleCard: titleCardPayload,
+      bgHash, bgCached, musicHash, musicCached,
     }, (pct) => update({ progressPct: pct, progressLabel: "Rendering..." }));
 
     const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
@@ -2574,6 +2703,10 @@ function initBatchUI() {
 
 function updateParallelismHint() {
   const n = parseInt($("#batchParallelism").value) || 1;
+  if (nativeRenderAvailable) {
+    $("#batchParallelismHint").textContent = `Renders up to ${n} at once via your native ffmpeg backend, each getting a share of your CPU cores. Higher than your machine can handle may slow individual renders down — start lower and raise it if it's stable.`;
+    return;
+  }
   $("#batchParallelismHint").textContent = n > 1
     ? `Renders ${n} at once, using the single-core video engine per render to avoid overloading your CPU. Higher than your machine can handle may slow things down or crash the tab — start lower and raise it if it's stable.`
     : "Renders one video at a time, using the faster multi-core video engine.";
@@ -3153,6 +3286,10 @@ async function renderAllBatch() {
 
   try {
     await ensureRenderBackend(parallelism);
+    // ensureRenderBackend ignores poolSize on the native path (it's a no-op
+    // there) — apply the batch screen's own "Parallel renders" choice as
+    // the actual native concurrency cap too, so this control isn't cosmetic.
+    await applyRenderConcurrency(parallelism);
     jobsToRun.forEach(j => {
       j.status = "queued"; j.progressLabel = "Queued...";
       renderResultCard(j, grid);
@@ -3183,7 +3320,9 @@ async function retryBatchJob(job) {
   if ($("#batchProgressGrid").querySelector(`[data-job-id="${job.id}"]`)) {
     renderResultCard(job, $("#batchProgressGrid"));
   }
-  await ensureRenderBackend(parseInt($("#batchParallelism").value) || 1);
+  const parallelism = parseInt($("#batchParallelism").value) || 1;
+  await ensureRenderBackend(parallelism);
+  await applyRenderConcurrency(parallelism);
   await runJob(job, getGlobalSettings(), (j) => {
     renderResultCard(j, $("#resultsGrid"));
     if ($("#batchProgressGrid").querySelector(`[data-job-id="${j.id}"]`)) {

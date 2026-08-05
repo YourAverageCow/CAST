@@ -35,6 +35,42 @@ const PORT = 8123;
 const ROOT = path.join(__dirname, "web");
 const FONT_PATH = path.join(ROOT, "vendor", "fonts", "DejaVuSans.ttf");
 
+// ---------- Background/music asset cache ----------
+// A bulk batch frequently reuses the exact same background video (or music
+// track) across many jobs — "same video for all", or the numbered picker
+// cycling through fewer picks than the story count. Without this, every job
+// independently re-uploads identical bytes to /render. The client hashes
+// each asset (SHA-256, Web Crypto) once per distinct File and only sends
+// the full bytes for the first job that needs a given hash; every other job
+// just references the hash (meta.bgCached/meta.musicCached) and this server
+// copies the already-cached file instead of expecting a fresh upload.
+// Wiped on every server start so it can never grow unbounded across app
+// launches — within one running session (including across multiple batches)
+// it persists and keeps paying off.
+const BG_CACHE_DIR = path.join(os.tmpdir(), "slopdaddy-bg-cache");
+fs.rmSync(BG_CACHE_DIR, { recursive: true, force: true });
+fs.mkdirSync(BG_CACHE_DIR, { recursive: true });
+
+// Writes `filename` into the job's temp `dir`, either by copying a
+// previously-cached asset (when `cached` is true — the client is telling us
+// it already uploaded these exact bytes for an earlier job in this batch)
+// or by writing the freshly-uploaded `bytes` and best-effort persisting a
+// copy into the cache keyed by `hash` for any later job that references it.
+function writeAssetFile(dir, filename, bytes, hash, cached) {
+  const cachePath = hash ? path.join(BG_CACHE_DIR, hash) : null;
+  if (cached) {
+    if (!cachePath || !fs.existsSync(cachePath)) {
+      throw new Error(`Missing cached asset for hash ${hash} — retry this job to re-upload it.`);
+    }
+    fs.copyFileSync(cachePath, path.join(dir, filename));
+    return;
+  }
+  fs.writeFileSync(path.join(dir, filename), bytes);
+  if (cachePath) {
+    try { fs.copyFileSync(path.join(dir, filename), cachePath); } catch (e) { /* best-effort — a failed cache write just means the next job re-uploads */ }
+  }
+}
+
 const {
   safeColor, buildCaptionCues, buildDrawtextFilterChain,
   buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
@@ -172,13 +208,13 @@ function parseRenderBody(body) {
 // inputs into `dir` and returns the full ffmpeg CLI args array plus the
 // expected total output duration (for progress-percentage math).
 function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
-  fs.writeFileSync(path.join(dir, "bg.mp4"), bg);
+  writeAssetFile(dir, "bg.mp4", bg, meta.bgHash, meta.bgCached);
   fs.writeFileSync(path.join(dir, "audio.wav"), audio);
   const hasMusic = !!music;
   const hasTitleCard = !!titleCardImage;
   const cardDurationSec = hasTitleCard ? (meta.titleCard.cardDurationSec || 0) : 0;
   const narrationDelaySec = hasTitleCard ? (meta.titleCard.narrationDelaySec || 0) : 0;
-  if (hasMusic) fs.writeFileSync(path.join(dir, "music.mp3"), music);
+  if (hasMusic) writeAssetFile(dir, "music.mp3", music, meta.musicHash, meta.musicCached);
   if (hasTitleCard) fs.writeFileSync(path.join(dir, "titlecard.png"), titleCardImage);
 
   fs.mkdirSync(path.join(dir, "fonts"));
@@ -427,6 +463,37 @@ const server = http.createServer((req, res) => {
     });
     progressChannels.set(id, res);
     req.on("close", () => { progressChannels.delete(id); });
+    return;
+  }
+  // Decoupled from /render on purpose: caching an asset by hash is quick
+  // (just a disk write), while a render can take a while — a batch job
+  // sharing a background with an earlier job only needs to wait for that
+  // earlier job's upload to land in the cache, not for its entire render to
+  // finish. Idempotent — if the hash is already cached, the body is read
+  // and discarded without rewriting the file.
+  if (urlNoQuery === "/cache-asset" && req.method === "POST") {
+    const hash = new URL(req.url, "http://localhost").searchParams.get("hash") || "";
+    if (!/^[0-9a-f]{16,128}$/.test(hash)) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing or malformed hash query param" }));
+      return;
+    }
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const cachePath = path.join(BG_CACHE_DIR, hash);
+      if (!fs.existsSync(cachePath)) {
+        try {
+          fs.writeFileSync(cachePath, Buffer.concat(chunks));
+        } catch (e) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Failed to cache asset: " + e.message }));
+          return;
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
     return;
   }
   if (urlNoQuery === "/render" && req.method === "POST") {
