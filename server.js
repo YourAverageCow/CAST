@@ -146,6 +146,7 @@ function makeSlotLimiter(max) {
       while (active < state.max && queue.length) queue.shift()();
     },
     getMax() { return state.max; },
+    getActive() { return active; },
   };
 }
 // Default to every core — the user explicitly wants max resource usage by
@@ -173,9 +174,9 @@ function threadBudget(limiter) {
 // on /render-progress/:id BEFORE posting the binary payload to /render, so
 // the id correlates the two requests. Plain Node http, no ws/sse library.
 const progressChannels = new Map();
-function sendProgress(id, pct) {
+function sendProgress(id, data) {
   const res = progressChannels.get(id);
-  if (res) res.write(`data: ${JSON.stringify({ pct })}\n\n`);
+  if (res) res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 function closeProgressChannel(id) {
   const res = progressChannels.get(id);
@@ -283,36 +284,61 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     "-shortest", ...durationArgs,
     "-progress", "pipe:1", "-y", "out.mp4",
   ];
-  return { args, expectedDurationSec };
+  return { args, expectedDurationSec, threads: parseInt(threads, 10) };
+}
+
+// ffmpeg's `-progress pipe:1` emits repeated key=value lines, one block per
+// tick, each block terminated by a `progress=continue`/`progress=end` line —
+// accumulate a block's keys and only report once it closes, rather than
+// firing on every individual line (which used to only look at out_time_ms
+// and ignore everything else ffmpeg was already telling us for free).
+function parseProgressBlock(line, tick) {
+  const eq = line.indexOf("=");
+  if (eq === -1) return null;
+  const key = line.slice(0, eq).trim();
+  const value = line.slice(eq + 1).trim();
+  if (key !== "progress") { tick[key] = value; return null; }
+  return { ...tick };
 }
 
 function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respond) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-render-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
-  let args, expectedDurationSec;
+  let args, expectedDurationSec, threads;
   try {
-    ({ args, expectedDurationSec } = buildRenderArgs(dir, meta, bg, audio, music, titleCardImage));
+    ({ args, expectedDurationSec, threads } = buildRenderArgs(dir, meta, bg, audio, music, titleCardImage));
   } catch (e) {
     cleanup();
     respond(500, { error: "Failed to build render: " + e.message });
     return;
   }
+  sendProgress(renderId, { phase: "starting", threads, cores: CPU_COUNT });
   const proc = spawn("ffmpeg", args, { cwd: dir });
   let stderrTail = "";
   proc.stderr.on("data", (chunk) => {
     stderrTail = (stderrTail + chunk.toString()).slice(-4000);
   });
   let stdoutBuf = "";
+  let tick = {};
   proc.stdout.on("data", (chunk) => {
     stdoutBuf += chunk.toString();
     const lines = stdoutBuf.split("\n");
     stdoutBuf = lines.pop();
     for (const line of lines) {
-      const m = /^out_time_ms=(\d+)/.exec(line);
-      if (m && expectedDurationSec > 0) {
-        const pct = Math.min(99, Math.round((parseInt(m[1], 10) / 1e6 / expectedDurationSec) * 100));
-        sendProgress(renderId, pct);
-      }
+      const block = parseProgressBlock(line, tick);
+      if (!block) continue;
+      tick = {};
+      if (!(expectedDurationSec > 0 && block.out_time_ms)) continue;
+      const pct = Math.min(99, Math.round((parseInt(block.out_time_ms, 10) / 1e6 / expectedDurationSec) * 100));
+      sendProgress(renderId, {
+        phase: "encoding",
+        pct,
+        threads,
+        frame: block.frame ? parseInt(block.frame, 10) : null,
+        fps: block.fps ? parseFloat(block.fps) : null,
+        speed: block.speed && block.speed !== "N/A" ? parseFloat(block.speed) : null,
+        bitrate: block.bitrate && block.bitrate !== "N/A" ? block.bitrate : null,
+      });
     }
   });
   proc.on("error", (err) => {
@@ -325,7 +351,7 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
       respond(500, { error: `ffmpeg exited with code ${code}\n${stderrTail.slice(-1000)}` });
       return;
     }
-    sendProgress(renderId, 100);
+    sendProgress(renderId, { phase: "done", pct: 100 });
     let data;
     try {
       data = fs.readFileSync(path.join(dir, "out.mp4"));
@@ -516,6 +542,7 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ error: "Malformed render request: " + e.message }));
           return;
         }
+        sendProgress(id, { phase: "queued", activeRenders: renderLimiter.getActive(), renderSlots: renderLimiter.getMax() });
         await renderLimiter.acquire();
         const respond = (status, data, contentType) => {
           renderLimiter.release();

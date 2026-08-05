@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 80;
+const VERSION = 81;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1314,7 +1314,7 @@ async function renderVideoNatively(payload, onProgress) {
   if (onProgress) {
     es = new EventSource(`/render-progress/${id}`);
     es.onmessage = (e) => {
-      try { onProgress(JSON.parse(e.data).pct); } catch (err) { /* ignore malformed tick */ }
+      try { onProgress(JSON.parse(e.data)); } catch (err) { /* ignore malformed tick */ }
     };
   }
   try {
@@ -1359,7 +1359,7 @@ async function renderVideoNatively(payload, onProgress) {
       throw new Error(msg);
     }
     const buf = await resp.arrayBuffer();
-    if (onProgress) onProgress(100);
+    if (onProgress) onProgress({ phase: "done", pct: 100 });
     return new Uint8Array(buf);
   } finally {
     if (es) es.close();
@@ -1498,6 +1498,43 @@ function ensureAssetCached(hash, bytes) {
   return p;
 }
 
+// Turns one render-progress tick into a patch for the job. The native
+// backend (server.js's runNativeRender) reports a rich object — phase plus
+// whatever ffmpeg's own `-progress` output included that tick (fps/speed/
+// bitrate/frame, thread budget, queue depth); the WASM fallback only ever
+// reports a bare percentage number, so that shape is normalized separately
+// rather than pretending it carries the same detail.
+function describeRenderProgress(data) {
+  if (typeof data === "number") return { progressPct: data, progressLabel: "Rendering..." };
+  const { phase, pct, fps, speed, bitrate, frame, threads, activeRenders, renderSlots } = data;
+  const patch = {};
+  if (pct != null) patch.progressPct = pct;
+  patch.renderFps = fps || null;
+  patch.renderSpeed = speed || null;
+  patch.renderBitrate = bitrate || null;
+  patch.renderFrame = frame || null;
+  patch.renderThreads = threads || null;
+  patch.renderPhase = phase || null;
+  if (phase === "queued") {
+    patch.progressLabel = renderSlots
+      ? `Waiting for a render slot (${activeRenders}/${renderSlots} busy)...`
+      : "Waiting for a render slot...";
+  } else if (phase === "starting") {
+    patch.progressLabel = threads ? `Starting ffmpeg (${threads} threads)...` : "Starting ffmpeg...";
+  } else if (phase === "encoding") {
+    const details = [];
+    if (speed) details.push(`${speed}x speed`);
+    if (fps) details.push(`${Math.round(fps)} fps`);
+    if (bitrate) details.push(bitrate);
+    patch.progressLabel = "Rendering..." + (details.length ? ` (${details.join(", ")})` : "");
+  } else if (phase === "done") {
+    patch.progressLabel = "Finalizing...";
+  } else {
+    patch.progressLabel = "Rendering...";
+  }
+  return patch;
+}
+
 async function runJob(job, globalSettings, onUpdate) {
   const update = (patch) => { Object.assign(job, patch); if (onUpdate) onUpdate(job); };
   try {
@@ -1632,7 +1669,7 @@ async function runJob(job, globalSettings, onUpdate) {
       music: musicPayload, musicVolume: job.musicVolume,
       titleCard: titleCardPayload,
       bgHash, bgCached, musicHash, musicCached,
-    }, (pct) => update({ progressPct: pct, progressLabel: "Rendering..." }));
+    }, (data) => update(describeRenderProgress(data)));
 
     const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
     if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
@@ -3233,15 +3270,34 @@ function updateBatchProgressStats() {
     ? `${Math.round(performance.memory.usedJSHeapSize / 1048576)} MB`
     : "n/a";
 
-  $("#batchProgressStats").innerHTML = [
+  const tiles = [
     ["Elapsed", formatElapsed(elapsedMs)],
     ["Est. remaining", etaLabel],
     ["Videos done", `${doneCount} / ${totalJobs}`],
-    ["Active renders", `${activeCount} / ${concurrency}`],
-    ["CPU cores", cores],
-    ["Render backend", backendLabel],
-    ["Page memory", memInfo],
-  ].map(([label, value]) => `
+  ];
+  // The native backend's own render slots (renderLimiter, capped by
+  // "Parallel renders") are what actually gate concurrency — split the
+  // client-side "active" count into "really encoding right now" vs "waiting
+  // its turn for a slot" instead of one opaque number, since a job can sit
+  // in job.status === "render" for a while just waiting on renderLimiter.
+  if (nativeRenderAvailable) {
+    const encoding = jobs.filter(j => j.renderPhase === "encoding");
+    const waiting = jobs.filter(j => j.renderPhase === "queued" || j.renderPhase === "starting").length;
+    tiles.push(["Encoding now", `${encoding.length} / ${concurrency}`]);
+    tiles.push(["Waiting for slot", waiting]);
+    const speeds = encoding.map(j => j.renderSpeed).filter(s => s != null);
+    if (speeds.length) {
+      const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      tiles.push(["Avg. encode speed", `${avgSpeed.toFixed(2)}x`]);
+    }
+  } else {
+    tiles.push(["Active renders", `${activeCount} / ${concurrency}`]);
+  }
+  tiles.push(["CPU cores", cores]);
+  tiles.push(["Render backend", backendLabel]);
+  tiles.push(["Page memory", memInfo]);
+
+  $("#batchProgressStats").innerHTML = tiles.map(([label, value]) => `
     <div class="batch-stat-tile">
       <div class="stat-label">${label}</div>
       <div class="stat-value">${value}</div>
