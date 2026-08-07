@@ -8,7 +8,10 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
+    "dev": "node server.js",
     "test": "node --test web/lib/*.test.js",
+    "smoke": "node scripts/smoke-test.js",
+    "free-port": "lsof -ti:${SLOPDADDY_PORT:-8123} | xargs kill -9 2>/dev/null || true",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",

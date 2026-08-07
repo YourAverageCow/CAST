@@ -31,7 +31,13 @@ const os = require("os");
 const crypto = require("crypto");
 const { execFile, spawn } = require("child_process");
 
-const PORT = 8123;
+// SLOPDADDY_PORT lets a second instance run alongside a live Electron app
+// (which binds the default 8123 the same way `node server.js` does) — handy
+// for testing a server.js change without quitting the real app first.
+const PORT = parseInt(process.env.SLOPDADDY_PORT, 10) || 8123;
+// SLOPDADDY_DEBUG logs the real ffmpeg/whisper spawn args and per-request
+// status/timing — off by default so normal runs stay quiet.
+const DEBUG = !!process.env.SLOPDADDY_DEBUG;
 const ROOT = path.join(__dirname, "web");
 const FONT_PATH = path.join(ROOT, "vendor", "fonts", "DejaVuSans.ttf");
 
@@ -312,6 +318,7 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
     respond(500, { error: "Failed to build render: " + e.message });
     return;
   }
+  if (DEBUG) console.log("[ffmpeg]", args.join(" "));
   sendProgress(renderId, { phase: "starting", threads, cores: CPU_COUNT });
   const proc = spawn("ffmpeg", args, { cwd: dir });
   let stderrTail = "";
@@ -379,7 +386,7 @@ function runNativeTranscribe(transcribeId, audio, model, respond) {
   fs.writeFileSync(path.join(dir, "audio.wav"), audio);
 
   sendProgress(transcribeId, 10);
-  const proc = spawn("whisper", [
+  const whisperArgs = [
     path.join(dir, "audio.wav"),
     "--model", WHISPER_MODELS.includes(model) ? model : "tiny.en",
     "--word_timestamps", "True",
@@ -387,7 +394,9 @@ function runNativeTranscribe(transcribeId, audio, model, respond) {
     "--output_dir", dir,
     "--fp16", "False",
     "--threads", String(threadBudget(transcribeLimiter)),
-  ], { cwd: dir });
+  ];
+  if (DEBUG) console.log("[whisper]", whisperArgs.join(" "));
+  const proc = spawn("whisper", whisperArgs, { cwd: dir });
   let stderrTail = "";
   proc.stderr.on("data", (chunk) => {
     stderrTail = (stderrTail + chunk.toString()).slice(-4000);
@@ -441,12 +450,18 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
-function log(req) {
+function log(req, res) {
   console.log(`[${new Date().toISOString()}] ${req.socket.remoteAddress} ${req.method} ${req.url}`);
+  if (DEBUG) {
+    const start = Date.now();
+    res.on("finish", () => {
+      console.log(`  -> ${res.statusCode} (${Date.now() - start}ms)`);
+    });
+  }
 }
 
 const server = http.createServer((req, res) => {
-  log(req);
+  log(req, res);
 
   const urlNoQuery = req.url.split("?")[0];
 

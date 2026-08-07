@@ -16,6 +16,12 @@ npm start                    # (main branch only) launches the standalone Electr
 node --test web/lib/*.test.js   # run all tests (Node's built-in test runner, zero dependencies)
 node --test web/lib/foo.test.js # run a single test file
 node -c web/app.js           # syntax-check a file (no linter configured — this is the closest thing)
+
+# Dev/diagnostic tooling (main only) — see scripts/smoke-test.js
+SLOPDADDY_PORT=8199 node server.js   # run a second instance without quitting a live Electron app first
+SLOPDADDY_DEBUG=1 node server.js     # log real ffmpeg/whisper spawn args + per-request status/timing
+npm run smoke                        # scripted round-trip check against /render, /transcribe, cache endpoints — exits non-zero on failure
+npm run free-port                    # kill whatever's holding SLOPDADDY_PORT (default 8123) — mac/linux only
 ```
 
 `web/` itself has no build step, no bundler, no lint config — everything there is served as-is, and `server.js`'s render/transcribe backends shell out to native `ffmpeg`/`whisper` rather than adding npm dependencies to bundle them. **`main`'s `package.json`/`package-lock.json`/`node_modules/` are new** (first-ever npm dependency in this repo's history) — `electron` only, for the standalone app wrapper; `web/` stays dependency-free regardless. Double-clicking `Open AITAH Creator Web.command` runs `node run.js`, which starts `server.js` and opens the browser for you — this still works identically on `main`, independent of the Electron app.
