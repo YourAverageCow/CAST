@@ -243,23 +243,19 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
   if (hasMusic) writeAssetFile(dir, "music.mp3", music, meta.musicHash, meta.musicCached);
   if (hasTitleCard) fs.writeFileSync(path.join(dir, "titlecard.png"), titleCardImage);
 
-  // Copies every vendored font (not just the selected one) — cheap (a few
-  // small local files) and means this render dir never needs to know which
-  // one drawtext will actually reference, same as before this was
-  // selectable at all.
-  fs.mkdirSync(path.join(dir, "fonts"));
-  for (const f of CAPTION_FONTS) {
-    fs.copyFileSync(path.join(FONTS_DIR, f.file), path.join(dir, "fonts", f.file));
-  }
-
   const style = meta.style || {};
   // fontId -> real filename is already resolved client-side (app.js, the
-  // one place both the native and WASM render calls originate from) so
-  // both backends receive an already-usable fontFile — this file only
-  // needs CAPTION_FONTS to know which files to copy into the render dir,
-  // not to do the id->file lookup itself.
-  const fontFile = /^[A-Za-z0-9_.-]+\.ttf$/.test(style.fontFile || "") ? style.fontFile : "DejaVuSans.ttf";
+  // one place both the native and WASM render calls originate from) so both
+  // backends receive an already-usable fontFile — validated against
+  // CAPTION_FONTS (not just filename shape) since that's the actual list of
+  // files present in FONTS_DIR to copy from.
+  const fontFile = CAPTION_FONTS.some(f => f.file === style.fontFile) ? style.fontFile : "DejaVuSans.ttf";
   const grouping = style.captionGrouping || "phrase";
+
+  // Only the selected font ever gets referenced by drawtext — copy just that
+  // one file into the render dir instead of all vendored fonts.
+  fs.mkdirSync(path.join(dir, "fonts"));
+  fs.copyFileSync(path.join(FONTS_DIR, fontFile), path.join(dir, "fonts", fontFile));
   const cues = grouping === "karaoke"
     ? buildKaraokeCues(meta.karaokeGroups || [], !!style.uppercase)
     : buildCaptionCues(meta.subs || [], !!style.uppercase);

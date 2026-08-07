@@ -1253,8 +1253,7 @@ function getPreviewScale() {
   return (container.clientWidth || 240) / outputW;
 }
 function currentCaptionGrouping() {
-  const p = $("#captionPreset").value;
-  return p === "phrase" || p === "classic" ? "phrase" : p === "karaoke" ? "karaoke" : "word";
+  return resolveCaptionGrouping($("#captionPreset").value);
 }
 function updateCaptionStyle() {
   const el = $("#captionOverlay");
@@ -2306,11 +2305,7 @@ async function runJob(job, globalSettings, onUpdate) {
     // highlighted. word/phrase both feed the same flat per-cue
     // drawtext+enable() render path; karaoke needs richer per-word group
     // data (section D/E) instead of flattened {start,end,text} subs.
-    // "classic" is the old pre-migration value for phrase grouping — kept
-    // as an alias so an existing batch job/saved setting with that value
-    // doesn't silently fall back to word-by-word.
-    const grouping = (settings.captionPreset === "phrase" || settings.captionPreset === "classic") ? "phrase"
-      : settings.captionPreset === "karaoke" ? "karaoke" : "word";
+    const grouping = resolveCaptionGrouping(settings.captionPreset);
     const captionFont = getCaptionFont(settings.font);
     let subs = null, karaokeGroups = null;
     if (grouping === "karaoke") {
@@ -2727,10 +2722,7 @@ function drawShareIcon(ctx, cx, cy, size, color) {
 // @font-face to have already loaded (see ensureCaptionFontLoaded) — until
 // then, canvas measureText silently falls back to a generic font and the
 // offsets would be wrong for whatever the real render actually uses.
-function measureWordOffsets(words, cssFontFamily, fontSizePx) {
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
-  ctx.font = `${fontSizePx}px ${cssFontFamily}`;
+function measureWordOffsets(ctx, words, fontSizePx) {
   const gap = fontSizePx * 0.35;
   const widths = words.map(w => ctx.measureText(w.text).width);
   const totalWidth = widths.reduce((a, b) => a + b, 0) + gap * Math.max(0, words.length - 1);
@@ -2742,10 +2734,14 @@ function measureWordOffsets(words, cssFontFamily, fontSizePx) {
   });
 }
 // Mutates each group's words in place with a computed xOffset — called once
-// per karaoke render right before building cues.
+// per karaoke render right before building cues. One canvas/context is
+// created and reused across every group instead of one per group, since the
+// font/size is identical for the whole render.
 function applyKaraokeOffsets(groups, cssFontFamily, fontSizePx) {
+  const ctx = document.createElement("canvas").getContext("2d");
+  ctx.font = `${fontSizePx}px ${cssFontFamily}`;
   for (const g of groups) {
-    const offsets = measureWordOffsets(g.words, cssFontFamily, fontSizePx);
+    const offsets = measureWordOffsets(ctx, g.words, fontSizePx);
     g.words.forEach((w, i) => { w.xOffset = offsets[i]; });
   }
   return groups;
@@ -3060,8 +3056,7 @@ async function runDebugTestRender() {
     } else {
       words = computeWordTimings(sampleText, 0); // ~150wpm fallback timing, no TTS needed
     }
-    const grouping = (globalSettings.captionPreset === "phrase" || globalSettings.captionPreset === "classic") ? "phrase"
-      : globalSettings.captionPreset === "karaoke" ? "karaoke" : "word";
+    const grouping = resolveCaptionGrouping(globalSettings.captionPreset);
     const captionFont = getCaptionFont(globalSettings.font);
     let subs = null, karaokeGroups = null;
     if (grouping === "karaoke") {

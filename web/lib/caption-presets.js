@@ -77,6 +77,20 @@ function getCaptionPreset(id) {
   return CAPTION_PRESETS.find(p => p.id === id) || DEFAULT_CAPTION_STYLE;
 }
 
+// Normalizes the #captionPreset field's raw value ("word"/"phrase"/"karaoke",
+// plus "classic" — the pre-migration alias for "phrase") to an actual
+// grouping mode. Single source of truth for this mapping; every call site
+// that used to hand-roll this ternary should call this instead.
+function resolveCaptionGrouping(presetValue) {
+  if (presetValue === "phrase" || presetValue === "classic") return "phrase";
+  if (presetValue === "karaoke") return "karaoke";
+  return "word";
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { CAPTION_FONTS, DEFAULT_FONT_ID, getCaptionFont, CAPTION_PRESETS, DEFAULT_CAPTION_STYLE, getCaptionPreset };
+  module.exports = {
+    CAPTION_FONTS, DEFAULT_FONT_ID, getCaptionFont,
+    CAPTION_PRESETS, DEFAULT_CAPTION_STYLE, getCaptionPreset,
+    resolveCaptionGrouping,
+  };
 }
