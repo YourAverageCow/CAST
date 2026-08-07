@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 81;
+const VERSION = 82;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -48,11 +48,55 @@ function showToast(msg, duration) {
   t.classList.add("show");
   setTimeout(() => t.classList.remove("show"), duration || 2500);
 }
-function openSettings() { $("#settingsOverlay").classList.add("show"); $("#settingsPanel").classList.add("open"); }
+const SETTINGS_TAB_KEY = "slopdaddy_settingsTab";
+function setSettingsTab(tab) {
+  document.querySelectorAll(".settings-tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll(".settings-tab-panel").forEach(p => p.classList.toggle("active", p.dataset.tab === tab));
+  localStorage.setItem(SETTINGS_TAB_KEY, tab);
+  if (tab === "debug") { refreshSystemDiagnostics(); refreshCacheInfo(); }
+}
+function openSettings() {
+  $("#settingsOverlay").classList.add("show");
+  $("#settingsPanel").classList.add("open");
+  setSettingsTab(localStorage.getItem(SETTINGS_TAB_KEY) || "story");
+}
 function closeSettings() { $("#settingsOverlay").classList.remove("show"); $("#settingsPanel").classList.remove("open"); }
 function toggleSettings() {
   if ($("#settingsPanel").classList.contains("open")) closeSettings();
   else openSettings();
+}
+// Dispatching real input events (rather than just setting .value) lets the
+// existing SETTINGS_FIELDS auto-save listener and the live caption-preview
+// listener both react exactly as they would to a manual edit.
+function applyResolutionPreset(w, h) {
+  const resW = $("#resW"), resH = $("#resH");
+  resW.value = w; resH.value = h;
+  resW.dispatchEvent(new Event("input", { bubbles: true }));
+  resH.dispatchEvent(new Event("input", { bubbles: true }));
+}
+const CRF_BY_QUALITY = { small: 28, balanced: 23, high: 18 };
+
+// index.html's own inline <script> (in <head>) already applied the saved
+// theme before first paint to avoid a flash — this re-applies it from the
+// live #theme select (so switching it updates immediately) and wires the
+// "system" mode to actually track OS theme changes, which the one-shot
+// inline script can't do on its own.
+let systemThemeMediaQuery = null;
+function applyTheme(value) {
+  if (systemThemeMediaQuery) { systemThemeMediaQuery.onchange = null; systemThemeMediaQuery = null; }
+  if (value === "system") {
+    systemThemeMediaQuery = matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => {
+      if (systemThemeMediaQuery.matches) delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = "light";
+    };
+    sync();
+    systemThemeMediaQuery.onchange = sync;
+  } else if (value === "light") {
+    document.documentElement.dataset.theme = "light";
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
 }
 
 // ---------- API config ----------
@@ -117,13 +161,14 @@ $("#provider").addEventListener("change", populateModels);
 // Persist all settings in localStorage so they survive page reloads / hard resets.
 const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "modelCustom", "customBaseUrl", "storyLength",
-  "resW", "resH", "fps",
+  "resW", "resH", "fps", "encodingQuality",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset",
   "channelName",
   "ttsEngine", "ttsOpenaiKey", "ttsElevenlabsKey",
-  "enableBrowserAsr",
-  "renderConcurrency",
+  "enableBrowserAsr", "whisperModel",
+  "renderConcurrency", "transcribeConcurrency",
+  "theme", "outputFolder",
 ];
 function saveSettings() {
   try {
@@ -158,6 +203,70 @@ function loadSettings() {
     }
     return data;
   } catch (e) { return null; }
+}
+
+// Applies whatever's in localStorage's "slopdaddy_settings" blob to the live
+// DOM — the same sequence init() runs once at startup, factored out so
+// "Import Settings" and "Reset to Defaults" (which both rewrite that blob
+// and then need the UI to reflect it, exactly like a fresh page load would)
+// don't have to duplicate it.
+async function applyLoadedSettings() {
+  const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
+  populateModels();
+  await populateVoices(getEngine());
+  if (savedData && savedData.voice) {
+    const hasOption = [...$("#voice").options].some(o => o.value === savedData.voice);
+    if (hasOption) { $("#voice").value = savedData.voice; $("#voiceQuick").value = savedData.voice; }
+  }
+  onEngineChangeUI();
+  initPerformanceUI(savedData);
+  applyTheme($("#theme").value || "dark");
+  return savedData;
+}
+
+function exportSettings() {
+  const raw = localStorage.getItem("slopdaddy_settings");
+  const data = raw ? JSON.parse(raw) : {};
+  data._exportedFromVersion = VERSION;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `slopdaddy-settings-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+}
+
+function importSettingsFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const data = JSON.parse(reader.result);
+      delete data._exportedFromVersion;
+      localStorage.setItem("slopdaddy_settings", JSON.stringify(data));
+      await applyLoadedSettings();
+      showToast("Settings imported.");
+    } catch (e) {
+      alert("Couldn't import that file: " + (e && e.message ? e.message : String(e)));
+    }
+  };
+  reader.readAsText(file);
+  input.value = "";
+}
+
+// Deliberately leaves the channel profile picture and panel-width/collapsed-
+// state localStorage keys untouched — this resets *settings*, not branding
+// or layout, so it can't silently delete an uploaded profile picture.
+// Reloads rather than re-running applyLoadedSettings() in place: with no
+// saved blob, loadSettings() has nothing to restore and would leave every
+// field showing whatever was on screen a moment ago instead of its actual
+// HTML-attribute default — a fresh load is what actually applies defaults.
+function resetSettingsToDefaults() {
+  if (!confirm("Reset all settings to their defaults? This can't be undone.")) return;
+  localStorage.removeItem("slopdaddy_settings");
+  location.reload();
 }
 
 // ---------- Init ----------
@@ -213,12 +322,39 @@ function initPerformanceUI(savedData) {
   slider.value = String(Math.max(1, Math.min(nativeCpuCount, current || nativeCpuCount)));
   $("#renderConcurrencyValue").textContent = slider.value;
   postPerformanceSettings();
+
+  const tSection = $("#transcribeConcurrencySection");
+  if (!nativeWhisperAvailable) { tSection.style.display = "none"; }
+  else {
+    tSection.style.display = "";
+    const tSlider = $("#transcribeConcurrency");
+    tSlider.max = String(nativeCpuCount);
+    $("#transcribeConcurrencyMax").textContent = String(nativeCpuCount);
+    const tHasSaved = savedData && savedData.transcribeConcurrency !== undefined;
+    const tCurrent = tHasSaved ? parseInt(tSlider.value, 10) : nativeCpuCount;
+    tSlider.value = String(Math.max(1, Math.min(nativeCpuCount, tCurrent || nativeCpuCount)));
+    $("#transcribeConcurrencyValue").textContent = tSlider.value;
+    postTranscribeConcurrencySettings();
+  }
+  $("#whisperModelRow").style.display = nativeWhisperAvailable ? "" : "none";
 }
 
 async function postPerformanceSettings() {
   if (!nativeRenderAvailable) return;
   const n = parseInt($("#renderConcurrency").value, 10) || nativeCpuCount;
   await applyRenderConcurrency(n);
+}
+
+async function postTranscribeConcurrencySettings() {
+  if (!nativeWhisperAvailable) return;
+  const n = parseInt($("#transcribeConcurrency").value, 10) || nativeCpuCount;
+  try {
+    await fetch("/performance-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcribeConcurrency: n }),
+    });
+  } catch (e) { /* best-effort */ }
 }
 
 // Shared by the Settings -> Performance slider (postPerformanceSettings,
@@ -266,16 +402,8 @@ async function init() {
   ]);
   buildEngineSelect();
   buildProviderSelect();
-  const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
-  populateModels();
-  await populateVoices(getEngine());
-  if (savedData && savedData.voice) {
-    const hasOption = [...$("#voice").options].some(o => o.value === savedData.voice);
-    if (hasOption) { $("#voice").value = savedData.voice; $("#voiceQuick").value = savedData.voice; }
-  }
-  onEngineChangeUI();
+  const savedData = await applyLoadedSettings();
   buildPresetSelects();
-  initPerformanceUI(savedData);
   // Save on any settings change
   for (const id of SETTINGS_FIELDS) {
     const el = document.getElementById(id);
@@ -286,6 +414,11 @@ async function init() {
     $("#renderConcurrencyValue").textContent = $("#renderConcurrency").value;
     postPerformanceSettings();
   });
+  $("#transcribeConcurrency").addEventListener("input", () => {
+    $("#transcribeConcurrencyValue").textContent = $("#transcribeConcurrency").value;
+    postTranscribeConcurrencySettings();
+  });
+  $("#theme").addEventListener("change", () => applyTheme($("#theme").value));
   // Keep the caption preview live when style fields are edited by hand
   for (const id of ["font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth", "resW"]) {
     const el = document.getElementById(id);
@@ -293,7 +426,6 @@ async function init() {
   }
   initCaptionDrag();
   initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
-  initPanelResize("settingsPanel", "settingsResizeHandle", -1, "slopdaddy_settingsWidth");
   initSidebarToggle();
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
@@ -311,9 +443,18 @@ async function init() {
 // (including the deployed GitHub Pages build) has no such bridge and can't
 // self-update anyway, so this whole section stays hidden rather than
 // showing buttons that would do nothing.
+async function chooseOutputFolder() {
+  if (!window.electronAPI || !window.electronAPI.isElectron) return;
+  const folder = await window.electronAPI.chooseOutputFolder();
+  if (!folder) return;
+  $("#outputFolder").value = folder;
+  saveSettings();
+}
+
 function initAppUpdates() {
   if (!window.electronAPI || !window.electronAPI.isElectron) return;
   $("#appUpdatesSection").style.display = "";
+  $("#outputFolderSection").style.display = "";
   // Shows this codebase's own v-number (the same VERSION shown in
   // #versionBadge everywhere else in the app), not package.json's semver —
   // that field exists purely for electron-updater's release-tag comparison,
@@ -1331,7 +1472,7 @@ async function renderVideoNatively(payload, onProgress) {
     const meta = {
       subs: payload.subs, style: payload.style,
       w: payload.w, h: payload.h, fps: payload.fps, bgW: payload.bgW, bgH: payload.bgH,
-      musicVolume: payload.musicVolume,
+      musicVolume: payload.musicVolume, crf: payload.crf,
       hasMusic, hasTitleCard,
       titleCard: hasTitleCard
         ? { cardDurationSec: payload.titleCard.cardDurationSec, narrationDelaySec: payload.titleCard.narrationDelaySec }
@@ -1385,8 +1526,9 @@ function renderVideoInWorker(payload, onProgress) {
 // falls through to the next tier cleanly.
 async function transcribeNatively(audioBlob) {
   const id = crypto.randomUUID();
+  const model = $("#whisperModel") ? $("#whisperModel").value : "tiny.en";
   try {
-    const resp = await fetch(`/transcribe?id=${id}`, { method: "POST", body: audioBlob });
+    const resp = await fetch(`/transcribe?id=${id}&model=${encodeURIComponent(model)}`, { method: "POST", body: audioBlob });
     if (!resp.ok) return null;
     const data = await resp.json();
     return (data && data.words && data.words.length) ? data.words : null;
@@ -1413,6 +1555,7 @@ function getGlobalSettings() {
     captionPreset: $("#captionPreset").value || "capcut",
     channelName: $("#channelName").value.trim() || "Anonymous",
     ttsEngine: getEngine(),
+    encodingQuality: $("#encodingQuality").value || "balanced",
   };
 }
 
@@ -1669,6 +1812,7 @@ async function runJob(job, globalSettings, onUpdate) {
       music: musicPayload, musicVolume: job.musicVolume,
       titleCard: titleCardPayload,
       bgHash, bgCached, musicHash, musicCached,
+      crf: CRF_BY_QUALITY[globalSettings.encodingQuality] || undefined,
     }, (data) => update(describeRenderProgress(data)));
 
     const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
@@ -1715,7 +1859,7 @@ function renderResultCard(job, container, opts) {
         <button data-action="copy">Copy Link</button>
       </div>`;
     div.querySelector('[data-action="preview"]').onclick = () => previewExported(job.resultUrl);
-    div.querySelector('[data-action="download"]').onclick = () => downloadVideo(job.resultUrl);
+    div.querySelector('[data-action="download"]').onclick = () => downloadVideo(job.resultUrl, videoFilenameFor(job));
     div.querySelector('[data-action="copy"]').onclick = () => copyVideoLink(job.resultUrl);
   } else if (job.status === "error") {
     div.innerHTML = title +
@@ -1795,10 +1939,28 @@ function closePlayer() {
   player.load();
   overlay.classList.remove("show");
 }
-function downloadVideo(url) {
+function videoFilenameFor(job) {
+  const slug = (job && (job.premise || job.story) || "aitah-story")
+    .slice(0, 50).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return (slug || "aitah-story") + ".mp4";
+}
+async function downloadVideo(url, filename) {
   if (!url) { alert("Nothing to download yet."); return; }
+  filename = filename || "aitah-story.mp4";
+  const outputFolder = $("#outputFolder") ? $("#outputFolder").value : "";
+  if (window.electronAPI && window.electronAPI.isElectron && outputFolder) {
+    try {
+      const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+      const result = await window.electronAPI.saveVideoFile(bytes, outputFolder, filename);
+      if (result.ok) { showToast("Saved to " + result.path); return; }
+      alert("Couldn't save to " + outputFolder + ": " + result.error);
+    } catch (e) {
+      alert("Couldn't save video: " + (e && e.message ? e.message : String(e)));
+    }
+    return;
+  }
   const a = document.createElement("a");
-  a.href = url; a.download = "aitah-story.mp4";
+  a.href = url; a.download = filename;
   document.body.appendChild(a);
   a.click();
   // Some browsers (notably Firefox) can drop a programmatic download if the
@@ -2120,6 +2282,75 @@ async function renderTitleCardImage({ title, channelName, w, h }) {
 function extractTitleFromStory(story) {
   const firstLine = (story || "").split("\n").find(l => l.trim());
   return (firstLine || "").trim().slice(0, 140);
+}
+
+// ---------- System diagnostics + cache management (Debug tab) ----------
+let lastSystemDiagnostics = null;
+function formatBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+async function refreshSystemDiagnostics() {
+  const grid = $("#systemDiagnosticsGrid");
+  if (!grid) return;
+  grid.innerHTML = `<div class="batch-stat-tile"><div class="stat-label">Status</div><div class="stat-value">Checking...</div></div>`;
+  try {
+    const resp = await fetch("/system-info");
+    const data = await resp.json();
+    lastSystemDiagnostics = data;
+    grid.innerHTML = [
+      ["ffmpeg", data.ffmpegAvailable ? (data.ffmpegVersion || "available") : "not found"],
+      ["whisper", data.whisperAvailable ? "available" : "not found"],
+      ["CPU", `${data.cpuCount} cores`],
+      ["Platform", `${data.platform}/${data.arch}`],
+      ["Node", data.nodeVersion],
+      ["Render slots", `${data.renderActive} / ${data.renderMax} busy`],
+      ["Transcribe slots", `${data.transcribeActive} / ${data.transcribeMax} busy`],
+    ].map(([label, value]) => `
+      <div class="batch-stat-tile">
+        <div class="stat-label">${escapeHtml(label)}</div>
+        <div class="stat-value" style="font-size:0.85rem;">${escapeHtml(String(value))}</div>
+      </div>`).join("");
+  } catch (e) {
+    grid.innerHTML = `<div class="batch-stat-tile"><div class="stat-label">Status</div><div class="stat-value">No backend server (browser-only build)</div></div>`;
+  }
+}
+function copyDiagnostics() {
+  const lines = [
+    `Slopdaddy v${VERSION}`,
+    `User agent: ${navigator.userAgent}`,
+    `Native render backend: ${nativeRenderAvailable} (cpuCount=${nativeCpuCount})`,
+    `Native whisper backend: ${nativeWhisperAvailable}`,
+  ];
+  if (lastSystemDiagnostics) {
+    for (const [k, v] of Object.entries(lastSystemDiagnostics)) lines.push(`${k}: ${v}`);
+  }
+  navigator.clipboard.writeText(lines.join("\n")).then(
+    () => showToast("Diagnostics copied."),
+    () => alert("Couldn't copy to clipboard.")
+  );
+}
+async function refreshCacheInfo() {
+  const el = $("#cacheInfoText");
+  if (!el) return;
+  try {
+    const resp = await fetch("/cache-info");
+    const data = await resp.json();
+    el.textContent = `${data.fileCount} file${data.fileCount === 1 ? "" : "s"}, ${formatBytes(data.totalBytes)}`;
+  } catch (e) {
+    el.textContent = "Unavailable (no backend server).";
+  }
+}
+async function clearAssetCache() {
+  if (!confirm("Clear the cached background/music assets? Batches sharing a file will re-upload it once on the next render.")) return;
+  try {
+    await fetch("/cache-clear", { method: "POST" });
+    await refreshCacheInfo();
+    showToast("Cache cleared.");
+  } catch (e) {
+    alert("Couldn't clear cache: " + (e && e.message ? e.message : String(e)));
+  }
 }
 
 // ---------- Debug tools ----------

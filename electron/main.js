@@ -5,7 +5,7 @@
 // requiring server.js runs its top-level `server.listen(...)` as a side
 // effect, starting the exact same HTTP server this process then points a
 // BrowserWindow at.
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
@@ -72,6 +72,22 @@ ipcMain.handle("quit-and-install", () => {
 });
 
 ipcMain.handle("open-releases-page", () => shell.openExternal(RELEASES_URL));
+
+ipcMain.handle("choose-output-folder", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, { properties: ["openDirectory", "createDirectory"] });
+  return result.canceled ? null : result.filePaths[0];
+});
+
+ipcMain.handle("save-video-file", async (_event, bytes, folder, filename) => {
+  try {
+    const filePath = path.join(folder, filename);
+    fs.writeFileSync(filePath, Buffer.from(bytes));
+    return { ok: true, path: filePath };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
 // Packaged builds get their icon from electron-builder's mac/win/linux
 // config (build/icon.icns|ico|png) automatically — this is only for the
 // window/taskbar icon during unpackaged `npm start` runs, where Electron

@@ -189,7 +189,7 @@ self.onmessage = async (e) => {
         ...inputArgs,
         "-filter_complex", filterComplex,
         "-map", `[${videoOutLabel}]`, "-map", `[${audio.outLabel}]`,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", ...threadArgs,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", String(msg.crf || 28), ...threadArgs,
         "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
         "-r", String(msg.fps),
         "-shortest", ...durationArgs, "-y", "out.mp4",

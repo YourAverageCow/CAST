@@ -278,7 +278,7 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     "-filter_complex_threads", threads,
     "-filter_complex", filterComplex,
     "-map", `[${videoOutLabel}]`, "-map", `[${audioChain.outLabel}]`,
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", threads,
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", String(meta.crf || 23), "-threads", threads,
     "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
     "-r", String(meta.fps),
     "-shortest", ...durationArgs,
@@ -371,7 +371,9 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
 // conventions exactly; only the subprocess and output-parsing differ.
 // --fp16 False avoids a CPU-only slowdown/warning (confirmed live on this
 // machine: fp16 needs CUDA, and warns+degrades on CPU/Apple Silicon).
-function runNativeTranscribe(transcribeId, audio, respond) {
+const WHISPER_MODELS = ["tiny.en", "base.en", "small.en"];
+
+function runNativeTranscribe(transcribeId, audio, model, respond) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-transcribe-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   fs.writeFileSync(path.join(dir, "audio.wav"), audio);
@@ -379,7 +381,7 @@ function runNativeTranscribe(transcribeId, audio, respond) {
   sendProgress(transcribeId, 10);
   const proc = spawn("whisper", [
     path.join(dir, "audio.wav"),
-    "--model", "tiny.en",
+    "--model", WHISPER_MODELS.includes(model) ? model : "tiny.en",
     "--word_timestamps", "True",
     "--output_format", "json",
     "--output_dir", dir,
@@ -454,6 +456,51 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ available, cpuCount: CPU_COUNT }));
     });
+    return;
+  }
+  // Debug-tab "System Diagnostics" — deliberately spawns fresh ffmpeg/whisper
+  // checks on every call instead of reusing checkFfmpeg/checkWhisper's cached
+  // booleans, so the panel's "Recheck" button actually re-probes (e.g. after
+  // installing ffmpeg-full without restarting the server) instead of
+  // reporting a server-startup-time snapshot forever.
+  if (urlNoQuery === "/system-info" && req.method === "GET") {
+    execFile("ffmpeg", ["-version"], (ferr, fstdout) => {
+      const ffmpegVersion = !ferr && fstdout ? fstdout.split("\n")[0].trim() : null;
+      execFile("ffmpeg", ["-filters"], (ferr2, fstdout2) => {
+        const ffmpegAvailable = !ferr2 && /drawtext/.test(fstdout2 || "");
+        execFile("whisper", ["--help"], (werr, wstdout) => {
+          const whisperAvailable = !werr && /word_timestamps/.test(wstdout || "");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ffmpegAvailable, ffmpegVersion,
+            whisperAvailable,
+            cpuCount: CPU_COUNT, cpuModel: (os.cpus()[0] || {}).model || "unknown",
+            platform: os.platform(), arch: os.arch(), nodeVersion: process.version,
+            renderActive: renderLimiter.getActive(), renderMax: renderLimiter.getMax(),
+            transcribeActive: transcribeLimiter.getActive(), transcribeMax: transcribeLimiter.getMax(),
+          }));
+        });
+      });
+    });
+    return;
+  }
+  if (urlNoQuery === "/cache-info" && req.method === "GET") {
+    let fileCount = 0, totalBytes = 0;
+    try {
+      for (const name of fs.readdirSync(BG_CACHE_DIR)) {
+        totalBytes += fs.statSync(path.join(BG_CACHE_DIR, name)).size;
+        fileCount++;
+      }
+    } catch (e) { /* cache dir missing/unreadable — report empty */ }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ fileCount, totalBytes }));
+    return;
+  }
+  if (urlNoQuery === "/cache-clear" && req.method === "POST") {
+    fs.rmSync(BG_CACHE_DIR, { recursive: true, force: true });
+    fs.mkdirSync(BG_CACHE_DIR, { recursive: true });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
   if (urlNoQuery === "/performance-settings" && req.method === "POST") {
@@ -581,7 +628,10 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (urlNoQuery === "/transcribe" && req.method === "POST") {
-    const id = new URL(req.url, "http://localhost").searchParams.get("id") || crypto.randomUUID();
+    const reqUrl = new URL(req.url, "http://localhost");
+    const id = reqUrl.searchParams.get("id") || crypto.randomUUID();
+    const requestedModel = reqUrl.searchParams.get("model");
+    const model = WHISPER_MODELS.includes(requestedModel) ? requestedModel : "tiny.en";
     checkWhisper((available) => {
       if (!available) {
         res.writeHead(503, { "Content-Type": "application/json" });
@@ -603,7 +653,7 @@ const server = http.createServer((req, res) => {
           res.writeHead(status, { "Content-Type": "application/json" });
           res.end(JSON.stringify(data));
         };
-        runNativeTranscribe(id, audio, respond);
+        runNativeTranscribe(id, audio, model, respond);
       });
     });
     return;

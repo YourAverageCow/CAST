@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   downloadUpdate: () => ipcRenderer.invoke("download-update"),
   quitAndInstall: () => ipcRenderer.invoke("quit-and-install"),
   openReleasesPage: () => ipcRenderer.invoke("open-releases-page"),
+  chooseOutputFolder: () => ipcRenderer.invoke("choose-output-folder"),
+  saveVideoFile: (bytes, folder, filename) => ipcRenderer.invoke("save-video-file", bytes, folder, filename),
   // Returns an unsubscribe function, same convention as DOM addEventListener.
   onUpdateStatus: (callback) => {
     const handler = (_event, status) => callback(status);
