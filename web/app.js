@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 83;
+const VERSION = 84;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -358,11 +358,16 @@ $("#provider").addEventListener("change", populateModels);
 // Persist all settings in localStorage so they survive page reloads / hard resets.
 const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "modelCustom", "customBaseUrl", "storyLength",
+  "storySystemPromptOverride",
   "resW", "resH", "fps", "encodingQuality",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset",
   "channelName",
   "ttsEngine", "ttsOpenaiKey", "ttsElevenlabsKey",
+  "piperSpeed", "kokoroSpeed",
+  "openaiTtsModel", "openaiTtsSpeed",
+  "elevenlabsModel", "elevenlabsStability", "elevenlabsSimilarity",
+  "browserSpeechRate", "browserSpeechPitch",
   "enableBrowserAsr", "whisperModel",
   "renderConcurrency", "transcribeConcurrency",
   "theme", "outputFolder",
@@ -409,6 +414,13 @@ function loadSettings() {
 // don't have to duplicate it.
 async function applyLoadedSettings() {
   const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
+  // First-ever run (nothing saved yet) starts the textarea pre-filled with
+  // the real default prompt, not an empty box — resetStorySystemPrompt()
+  // and a later loadSettings() (Import) both already set a non-empty value
+  // through the normal path, so this only ever fires once per fresh install.
+  if (!$("#storySystemPromptOverride").value.trim()) {
+    $("#storySystemPromptOverride").value = DEFAULT_STORY_SYSTEM_PROMPT;
+  }
   populateModels();
   await populateVoices(getEngine());
   if (savedData && savedData.voice) {
@@ -420,6 +432,20 @@ async function applyLoadedSettings() {
   applyTheme($("#theme").value || "dark");
   syncColorSwatchDisplay("textColor");
   syncColorSwatchDisplay("strokeColor");
+  // loadSettings() above restores each slider's raw .value from storage
+  // without dispatching input events, so their live value-label <span>s
+  // (wired in init(), see the "Per-engine TTS sliders" loop) need an
+  // explicit resync here or they'd keep showing each slider's HTML default
+  // even after a restored/imported value has been applied.
+  for (const id of [
+    "piperSpeed", "kokoroSpeed", "openaiTtsSpeed",
+    "elevenlabsStability", "elevenlabsSimilarity",
+    "browserSpeechRate", "browserSpeechPitch",
+  ]) {
+    const el = document.getElementById(id);
+    const valueEl = document.getElementById(id + "Value");
+    if (el && valueEl) valueEl.textContent = parseFloat(el.value).toFixed(2);
+  }
   return savedData;
 }
 
@@ -618,6 +644,19 @@ async function init() {
     postTranscribeConcurrencySettings();
   });
   $("#theme").addEventListener("change", () => applyTheme($("#theme").value));
+  // Per-engine TTS sliders (Settings -> Voice) — same "live value label next
+  // to the slider" pattern as renderConcurrency/transcribeConcurrency above.
+  for (const id of [
+    "piperSpeed", "kokoroSpeed", "openaiTtsSpeed",
+    "elevenlabsStability", "elevenlabsSimilarity",
+    "browserSpeechRate", "browserSpeechPitch",
+  ]) {
+    const el = document.getElementById(id);
+    const valueEl = document.getElementById(id + "Value");
+    if (el && valueEl) {
+      el.addEventListener("input", () => { valueEl.textContent = parseFloat(el.value).toFixed(2); });
+    }
+  }
   // Keep the caption preview live when style fields are edited by hand
   for (const id of ["font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth", "resW"]) {
     const el = document.getElementById(id);
@@ -1247,6 +1286,21 @@ async function waitForIsolation(timeoutMs = 15000) {
   return true;
 }
 
+// Piper's real speed knob is `length_scale` inside the voice's own config
+// JSON (fed into the ONNX model as part of the "scales" tensor), not a
+// generate()-call argument — and PiperWebEngine.generate() calls
+// voiceProvider.fetch(voice) fresh on every single generate, not just once,
+// so reading the live #piperSpeed value here (rather than needing to thread
+// it through PiperEngine.generate()'s signature) picks up a mid-session
+// change on the very next narration. length_scale is inversely proportional
+// to speed (Piper convention: larger length_scale = longer/slower audio).
+function applyPiperSpeed(json) {
+  const el = $("#piperSpeed");
+  const speed = el ? parseFloat(el.value) || 1 : 1;
+  if (!json || !json.inference || speed === 1) return json;
+  return { ...json, inference: { ...json.inference, length_scale: (json.inference.length_scale || 1) / speed } };
+}
+
 async function ensurePiper() {
   if (piperEngine) return piperEngine;
   showDownloadToast("Preparing TTS engine...");
@@ -1271,7 +1325,7 @@ async function ensurePiper() {
           if (!onnxRes.ok) throw new Error(`Vendored voice file missing: ${onnxRes.url} (${onnxRes.status})`);
           const json = await jsonRes.json();
           const onnx = URL.createObjectURL(await onnxRes.blob());
-          return [json, onnx];
+          return [applyPiperSpeed(json), onnx];
         }
         // Correct HuggingFace path for piper voices.
         const parts = voice.split("-");
@@ -1283,7 +1337,7 @@ async function ensurePiper() {
         const onnxUrl = `${base}${sub}/${stem}.onnx`;
         const json = await (await fetch(jsonUrl)).json();
         const onnx = URL.createObjectURL(await (await fetch(onnxUrl)).blob());
-        return [json, onnx];
+        return [applyPiperSpeed(json), onnx];
       },
     };
     piperEngine = new PiperWebEngine({
@@ -1766,12 +1820,25 @@ function getEngineConfig(engineId) {
   if (engineId === "openaiTts") {
     const key = $("#ttsOpenaiKey").value.trim();
     if (!key) { alert("Enter an OpenAI API key in Settings → Narration Voice first."); return null; }
-    return { apiKey: key };
+    return { apiKey: key, model: $("#openaiTtsModel").value || "tts-1", speed: parseFloat($("#openaiTtsSpeed").value) || 1 };
   }
   if (engineId === "elevenlabs") {
     const key = $("#ttsElevenlabsKey").value.trim();
     if (!key) { alert("Enter an ElevenLabs API key in Settings → Narration Voice first."); return null; }
-    return { apiKey: key };
+    return {
+      apiKey: key, modelId: $("#elevenlabsModel").value || "eleven_multilingual_v2",
+      stability: parseFloat($("#elevenlabsStability").value), similarityBoost: parseFloat($("#elevenlabsSimilarity").value),
+    };
+  }
+  // Piper's speed is read directly from #piperSpeed by ensurePiper()'s
+  // voiceProvider closure (see applyPiperSpeed()) rather than through this
+  // config bundle — returned here anyway so every engine's config shape
+  // stays consistent/self-documenting rather than Piper being a silent
+  // special case.
+  if (engineId === "piper") return { speed: parseFloat($("#piperSpeed").value) || 1 };
+  if (engineId === "kokoro") return { speed: parseFloat($("#kokoroSpeed").value) || 1 };
+  if (engineId === "browserSpeech") {
+    return { rate: parseFloat($("#browserSpeechRate").value) || 1, pitch: parseFloat($("#browserSpeechPitch").value) || 1 };
   }
   return {};
 }
@@ -1785,6 +1852,11 @@ async function onEngineChangeUI() {
   const engine = TTS_ENGINES[engineId];
   $("#ttsOpenaiKeyRow").style.display = engineId === "openaiTts" ? "" : "none";
   $("#ttsElevenlabsKeyRow").style.display = engineId === "elevenlabs" ? "" : "none";
+  $("#piperSpeedRow").style.display = engineId === "piper" ? "" : "none";
+  $("#kokoroSpeedRow").style.display = engineId === "kokoro" ? "" : "none";
+  $("#openaiTtsExtraRow").style.display = engineId === "openaiTts" ? "" : "none";
+  $("#elevenlabsExtraRow").style.display = engineId === "elevenlabs" ? "" : "none";
+  $("#browserSpeechExtraRow").style.display = engineId === "browserSpeech" ? "" : "none";
   const notes = {
     piper: "Runs fully offline in your browser. Free, no API key.",
     kokoro: "Runs fully offline in your browser, higher quality than Piper. Free, no API key — model is bundled, no download needed.",
@@ -3819,10 +3891,13 @@ async function retryBatchJob(job) {
   });
 }
 
-// ---------- Prompts (mirror prompts.txt) ----------
-function storySystemPrompt() {
-  const wc = parseInt($("#storyLength").value) || 400;
-  return `You are a master of writing fake-but-believable AITAH (Am I The Asshole Here) Reddit posts.
+// ---------- Prompts ----------
+// The word-count rule is deliberately NOT part of this template — it's
+// always appended separately by storySystemPrompt() below, based on the
+// Story Length setting, so the editable Settings -> Story textarea never
+// needs to contain `${wc}`-style syntax a user could break while tweaking
+// the writing-style rules.
+const DEFAULT_STORY_SYSTEM_PROMPT = `You are a master of writing fake-but-believable AITAH (Am I The Asshole Here) Reddit posts.
 Your stories must follow these rules:
 
 1. Casual, slightly dramatic first-person storytelling
@@ -3832,15 +3907,29 @@ Your stories must follow these rules:
 5. Short paragraphs (2-4 sentences) — Reddit style
 6. Family/friend/relationship/financial drama
 7. A clear conflict where the narrator might actually be wrong
-8. Keep it around ${wc} words
-9. End with "So Reddit AITAH" — no question mark, nothing after
-10. Write in a natural slightly messy style — as if typed on a phone at 2am
-11. DO NOT make it obviously AI-generated
-12. CRITICAL: Your very first line MUST be the title in "AITAH for [doing the thing]" format
-13. Use natural punctuation — commas, periods, quotes.
-14. Break the story into short paragraphs separated by blank lines.
+8. End with "So Reddit AITAH" — no question mark, nothing after
+9. Write in a natural slightly messy style — as if typed on a phone at 2am
+10. DO NOT make it obviously AI-generated
+11. CRITICAL: Your very first line MUST be the title in "AITAH for [doing the thing]" format
+12. Use natural punctuation — commas, periods, quotes.
+13. Break the story into short paragraphs separated by blank lines.
 
 IMPORTANT: First line is ALWAYS the AITAH title. Then a blank line, then the story. NEVER use a "Throwaway because" opener. Plain text only.`;
+
+// Settings -> Story's textarea holds the actual live prompt (pre-filled
+// with the default above on first run by applyLoadedSettings(), not an
+// empty box) — this reads whatever's currently there, falling back to the
+// default if it's ever empty, and always appends the word-count rule.
+function storySystemPrompt() {
+  const wc = parseInt($("#storyLength").value) || 400;
+  const base = ($("#storySystemPromptOverride").value || "").trim() || DEFAULT_STORY_SYSTEM_PROMPT;
+  return `${base}\n\nKeep it around ${wc} words.`;
+}
+function resetStorySystemPrompt() {
+  const ta = $("#storySystemPromptOverride");
+  ta.value = DEFAULT_STORY_SYSTEM_PROMPT;
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+  showToast("Story prompt reset to default.");
 }
 function storyUserPrompt(premise) {
   return `Write an AITAH Reddit post about: ${premise}

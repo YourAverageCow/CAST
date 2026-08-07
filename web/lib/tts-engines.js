@@ -120,9 +120,9 @@ const KokoroEngine = {
   requiresOncePerSessionPermission: false,
   listVoices() { return KOKORO_VOICES; },
   defaultVoice() { return KOKORO_VOICES[0].id; },
-  async generate(text, voice) {
+  async generate(text, voice, config) {
     const tts = await ensureKokoro();
-    const audio = await tts.generate(text, { voice });
+    const audio = await tts.generate(text, { voice, speed: (config && config.speed) || 1 });
     const wavBuffer = audio.toWav();
     const audioBlob = new Blob([wavBuffer], { type: "audio/wav" });
     // Parse the WAV header directly (same parseWavDurationSec the ffmpeg
@@ -154,7 +154,7 @@ const OpenAIEngine = {
     const resp = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${config.apiKey}` },
-      body: JSON.stringify({ model: "tts-1", voice, input: text }),
+      body: JSON.stringify({ model: config.model || "tts-1", voice, input: text, speed: config.speed || 1 }),
     });
     if (!resp.ok) throw new Error(`OpenAI TTS error: ${resp.status} — check your API key.`);
     const audioBlob = await resp.blob();
@@ -196,7 +196,10 @@ const ElevenLabsEngine = {
     const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "xi-api-key": config.apiKey },
-      body: JSON.stringify({ text, model_id: "eleven_multilingual_v2" }),
+      body: JSON.stringify({
+        text, model_id: config.modelId || "eleven_multilingual_v2",
+        voice_settings: { stability: config.stability ?? 0.5, similarity_boost: config.similarityBoost ?? 0.75 },
+      }),
     });
     if (!resp.ok) throw new Error(`ElevenLabs error: ${resp.status} — check your API key.`);
     const data = await resp.json();
@@ -276,7 +279,7 @@ const BrowserSpeechEngine = {
     return voices.map(v => ({ id: v.name, label: `${v.name} (${v.lang})` }));
   },
   defaultVoice() { return null; }, // resolved async — caller falls back to whatever listVoices()[0] is
-  async generate(text, voiceName) {
+  async generate(text, voiceName, config) {
     const stream = await ensureSpeechCaptureStream();
     const recorder = new MediaRecorder(stream);
     const chunks = [];
@@ -299,6 +302,8 @@ const BrowserSpeechEngine = {
       const utter = new SpeechSynthesisUtterance(text);
       const voice = voices.find(v => v.name === voiceName);
       if (voice) utter.voice = voice;
+      utter.rate = (config && config.rate) || 1;
+      utter.pitch = (config && config.pitch) || 1;
       utter.onboundary = (e) => {
         if (e.name && e.name !== "word") return; // some browsers also fire sentence boundaries
         boundaries.push({ charIndex: e.charIndex, elapsedTime: e.elapsedTime });
