@@ -307,6 +307,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .voice-preview-row { display: flex; gap: 8px; align-items: end; }
 .voice-preview-row select { flex: 1; }
 .voice-preview-row button { width: auto; padding: 7px 12px; font-size: 0.75rem; }
+.voice-row { display: flex; gap: 6px; align-items: center; }
+.voice-row select { flex: 1; }
+.voice-row .voice-preview-btn { width: auto; flex: none; padding: 7px 10px; font-size: 0.75rem; white-space: nowrap; }
 
 .app-gear { position: fixed; top: 16px; right: 16px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; z-index: 220; padding: 0; }
 .app-gear:hover { color: var(--text); border-color: var(--accent); background: var(--hover-bg); }
@@ -461,7 +464,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <input type="text" id="ttsElevenlabsKey" placeholder="Your ElevenLabs API key">
           </div>
           <label style="margin-top:8px;">Voice</label>
-          <select id="voice"></select>
+          <div class="voice-row">
+            <select id="voice"></select>
+            <button type="button" class="voice-preview-btn" id="voicePreviewBtn" onclick="previewSettingsVoice(this)">&#9654; Preview</button>
+          </div>
 
           <div id="piperSpeedRow" style="display:none;margin-top:10px;">
             <label>Speed (<span id="piperSpeedValue">1.0</span>x)</label>
@@ -754,6 +760,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <select id="voiceQuick" onchange="syncVoiceQuick()" style="flex:1;">
       <option value="">Use settings voice</option>
     </select>
+    <button type="button" onclick="previewQuickVoice(this)">&#9654;</button>
   </div>
   <div class="row" style="align-items:center;margin-top:4px;">
     <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--text);margin:0;">

@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 84;
+const VERSION = 85;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1591,6 +1591,45 @@ async function generateSpeech(text, voice, engineId) {
   const audioUrl = URL.createObjectURL(audioBlob);
   const words = await resolveWordTimings(text, audioBlob, durationSec, wordTimings);
   return { audioUrl, words };
+}
+
+// ---------- Voice preview ----------
+// A quick "hear this voice" button next to every voice dropdown — generates
+// a short fixed line and plays it immediately, bypassing generateSpeech()'s
+// resolveWordTimings() caption-sync cascade entirely (no captions needed for
+// a one-off preview, and skipping it avoids a pointless native-Whisper round
+// trip). Still goes through queueTTS since Piper/Kokoro's shared engine
+// instance isn't verified safe for concurrent calls.
+let previewAudio = null;
+async function previewVoice(engineId, voice, btn) {
+  const engine = TTS_ENGINES[engineId];
+  if (!engine) return;
+  if (!voice) { showToast("No voice selected."); return; }
+  const config = getEngineConfig(engineId);
+  if (engine.needsApiKey && !config) return; // getEngineConfig() already alerted
+  if (previewAudio) { previewAudio.pause(); previewAudio = null; }
+  const originalLabel = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; btn.textContent = "..."; }
+  try {
+    const { audioBlob } = await queueTTS(() => engine.generate("This is a preview.", voice, config));
+    const url = URL.createObjectURL(audioBlob);
+    previewAudio = new Audio(url);
+    previewAudio.addEventListener("ended", () => URL.revokeObjectURL(url));
+    await previewAudio.play();
+  } catch (e) {
+    console.error("previewVoice failed:", e);
+    alert("Voice preview failed: " + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
+  }
+}
+function previewSettingsVoice(btn) {
+  previewVoice(getEngine(), $("#voice").value, btn);
+}
+function previewQuickVoice(btn) {
+  const engineId = $("#ttsEngineQuick").value || getEngine();
+  const voice = $("#voiceQuick").value || getVoice();
+  previewVoice(engineId, voice, btn);
 }
 
 // computeWordTimings / buildSubsFromWords live in lib/captions.js (pure,
