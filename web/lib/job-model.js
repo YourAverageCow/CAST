@@ -8,10 +8,21 @@
 // between "global defaults" (the existing settings panel, untouched) and
 // "per-job overrides" — nothing else needs to know both exist.
 
+// captionPreset now holds the caption GROUPING mode ("word"/"phrase"/
+// "karaoke") — repurposed from its old "capcut"/"classic" values rather
+// than adding a parallel field, since it's always meant exactly one thing:
+// how words get grouped on screen. `font` similarly now holds a
+// web/lib/caption-presets.js CAPTION_FONTS id (e.g. "anton") instead of a
+// CSS font-family name — see that file for why the old font list never
+// actually affected the render.
 const JOB_OVERRIDE_FIELDS = [
   "voice", "resW", "resH", "fps",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
-  "captionPreset", "ttsEngine",
+  "captionPreset", "captionUppercase", "highlightColor",
+  "captionBox", "boxColor", "boxAlpha", "boxBorderW",
+  "captionShadow", "shadowColor", "shadowX", "shadowY",
+  "captionEntrance",
+  "ttsEngine",
 ];
 
 // Inert today — reserved so a future scheduled-upload feature doesn't need

@@ -11,7 +11,7 @@ let ffmpeg = null;
 let loaded = false;
 let usingMT = false;
 
-async function ensureLoaded(base, font, forceST) {
+async function ensureLoaded(base, fonts, forceST) {
   if (loaded) return;
   // Set by the worker pool whenever more than one ffmpeg-worker.js instance
   // is running at once — the mt core's own pthread pool (sized to
@@ -38,13 +38,15 @@ async function ensureLoaded(base, font, forceST) {
     // fall back to the single-thread core instead of a hard failure.
     self.createFFmpegCore = undefined;
     usingMT = false;
-    return ensureLoaded(base, font, true);
+    return ensureLoaded(base, fonts, true);
   }
   if (!ffmpeg || !ffmpeg.FS || typeof ffmpeg.FS.writeFile !== "function") {
     throw new Error("ffmpeg module did not expose FS");
   }
   ffmpeg.FS.mkdir("fonts");
-  if (font) ffmpeg.FS.writeFile("fonts/DejaVuSans.ttf", new Uint8Array(font));
+  if (fonts) {
+    for (const f of fonts) ffmpeg.FS.writeFile("fonts/" + f.file, new Uint8Array(f.buf));
+  }
   // Wire ffmpeg's own progress reporting (progress 0..1, time in seconds).
   if (typeof ffmpeg.setProgress === "function") {
     ffmpeg.setProgress(({ progress, time }) => {
@@ -86,14 +88,17 @@ function safeUnlink(name) {
 // building live in lib/ffmpeg-filters.js (pure, no ffmpeg.FS dependency,
 // unit-tested in web/lib/*.test.js) — this is just the thin FS-writing
 // wrapper around it.
-function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
+function buildCaptionFilter(subs, karaokeGroups, style, w, h, bgW, bgH) {
   const fontSize = parseInt(style.fontSize) || 68;
   const textColor = safeColor(style.textColor, "white");
   const strokeColor = safeColor(style.strokeColor, "black");
   const strokeWidth = Math.max(0, Math.min(10, parseInt(style.strokeWidth) || 3));
   const positionY = Math.max(0.05, Math.min(0.95, parseFloat(style.positionY) || 0.55));
+  const grouping = style.captionGrouping || "phrase";
 
-  const cues = buildCaptionCues(subs);
+  const cues = grouping === "karaoke"
+    ? buildKaraokeCues(karaokeGroups || [], !!style.uppercase)
+    : buildCaptionCues(subs, !!style.uppercase);
   const writtenFiles = [];
   for (const cue of cues) {
     ffmpeg.FS.writeFile(cue.file, new TextEncoder().encode(cue.text));
@@ -101,7 +106,16 @@ function buildCaptionFilter(subs, style, w, h, bgW, bgH) {
   }
 
   const { filterComplex, outLabel } = buildDrawtextFilterChain({
-    w, h, bgW, bgH, fontSize, textColor, strokeColor, strokeWidth, positionY, cues,
+    w, h, bgW, bgH, fontFile: style.fontFile || "DejaVuSans.ttf",
+    fontSize, textColor, strokeColor, strokeWidth, positionY,
+    highlightColor: safeColor(style.highlightColor, "yellow"),
+    box: !!style.box, boxColor: safeColor(style.boxColor, "black"),
+    boxAlpha: typeof style.boxAlpha === "number" ? style.boxAlpha : 0.5,
+    boxBorderW: parseInt(style.boxBorderW) || 16,
+    shadow: !!style.shadow, shadowColor: safeColor(style.shadowColor, "black"),
+    shadowX: parseInt(style.shadowX) || 2, shadowY: parseInt(style.shadowY) || 2,
+    entrance: ["none", "fade", "pop"].includes(style.entrance) ? style.entrance : "none",
+    grouping, cues,
   });
 
   return { filterComplex, outLabel, writtenFiles };
@@ -128,7 +142,7 @@ self.onmessage = async (e) => {
       if (hasTitleCard) ffmpeg.FS.writeFile("titlecard.png", new Uint8Array(msg.titleCard.imageBytes));
 
       let { filterComplex: videoFC, outLabel: videoOutLabel, writtenFiles } =
-        buildCaptionFilter(msg.subs || [], msg.style || {}, msg.w, msg.h, msg.bgW, msg.bgH);
+        buildCaptionFilter(msg.subs || [], msg.karaokeGroups, msg.style || {}, msg.w, msg.h, msg.bgW, msg.bgH);
 
       // Input indices: 0=bg (looped), 1=narration, then whichever of
       // music/title-card are actually present, in that order.
@@ -203,7 +217,7 @@ self.onmessage = async (e) => {
       if (hasTitleCard) safeUnlink("titlecard.png");
       writtenFiles.forEach(safeUnlink);
     } else if (msg.type === "ready") {
-      await ensureLoaded(msg.base, msg.font, msg.forceST);
+      await ensureLoaded(msg.base, msg.fonts, msg.forceST);
       self.postMessage({ type: "ready", mt: usingMT });
 
     // ---- Frame-sequence conversion path: used to re-encode codecs (AV1,

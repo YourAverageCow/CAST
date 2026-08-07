@@ -232,21 +232,57 @@ function alignWordsFromCharacters(text, characters, startTimes, endTimes) {
   return times;
 }
 
-function buildSubsFromWords(words) {
-  const subs = [];
+// Groups consecutive words into phrases, extending a group only while every
+// constraint still holds: the combined text stays under maxChars, the gap
+// to the next word is under maxGapSec, and the group hasn't hit maxWords.
+// Generalizes what buildSubsFromWords used to do inline (maxWords:2,
+// maxChars:14, maxGapSec:0.35) so buildKaraokeGroups can reuse the exact
+// same grouping decision with a wider group size instead of duplicating it.
+function groupWords(words, opts) {
+  opts = opts || {};
+  const maxWords = opts.maxWords || 2;
+  const maxChars = opts.maxChars == null ? 14 : opts.maxChars;
+  const maxGapSec = opts.maxGapSec == null ? 0.35 : opts.maxGapSec;
+  const groups = [];
   let i = 0;
-  const maxChars = 14;
   while (i < words.length) {
-    let takeTwo = false;
-    if (i + 1 < words.length) {
-      const combined = words[i].text + " " + words[i + 1].text;
-      if (combined.length <= maxChars && (words[i + 1].start - words[i].end) < 0.35) takeTwo = true;
+    const g = [words[i]];
+    let combinedText = words[i].text;
+    let j = i + 1;
+    while (g.length < maxWords && j < words.length) {
+      const candidate = combinedText + " " + words[j].text;
+      if (candidate.length > maxChars) break;
+      if ((words[j].start - words[j - 1].end) >= maxGapSec) break;
+      g.push(words[j]);
+      combinedText = candidate;
+      j++;
     }
-    const g = takeTwo ? [words[i], words[i + 1]] : [words[i]];
-    subs.push({ start: g[0].start, end: g[g.length - 1].end, text: g.map(w => w.text).join(" ") });
+    groups.push(g);
     i += g.length;
   }
-  return subs;
+  return groups;
+}
+
+function buildSubsFromWords(words) {
+  return groupWords(words, { maxWords: 2, maxChars: 14, maxGapSec: 0.35 }).map(g => ({
+    start: g[0].start, end: g[g.length - 1].end, text: g.map(w => w.text).join(" "),
+  }));
+}
+
+// "Karaoke" grouping: like buildSubsFromWords but wider groups (2-3 words
+// visible at once) and keeps each member word's own {text,start,end} intact
+// instead of flattening to one string — the render step needs each word's
+// own timing window to gate its highlight layer, and needs the full word
+// list to compute per-word x-offsets (see measureWordOffsets in app.js).
+function buildKaraokeGroups(words, opts) {
+  opts = opts || {};
+  const maxWords = opts.maxWords || 3;
+  const maxChars = opts.maxChars == null ? 24 : opts.maxChars;
+  const maxGapSec = opts.maxGapSec == null ? 0.35 : opts.maxGapSec;
+  return groupWords(words, { maxWords, maxChars, maxGapSec }).map(g => ({
+    start: g[0].start, end: g[g.length - 1].end,
+    words: g.map(w => ({ text: w.text, start: w.start, end: w.end })),
+  }));
 }
 
 // "CapCut style" preset: one word on screen at a time, each shown exactly
@@ -282,6 +318,6 @@ function sanitizeText(s) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     computeWordTimings, alignWordsFromCharacters, alignWordsBySequence, snapPausesToWords,
-    countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText,
+    countFirstParagraphWords, groupWords, buildSubsFromWords, buildKaraokeGroups, buildWordCues, sanitizeText,
   };
 }

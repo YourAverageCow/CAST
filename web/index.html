@@ -43,6 +43,15 @@
   --hover-bg: #eaeef2;
   --hover-border: #afb8c1;
 }
+/* Same TTF files vendored for the actual render (web/vendor/fonts/) —
+   declared here so the caption preview uses the exact face that will
+   render, not a generic system-font approximation of "Anton"/"Bebas Neue"
+   (browsers don't ship those). Family names match CAPTION_FONTS'
+   cssFamily in web/lib/caption-presets.js. */
+@font-face { font-family: "SlopdaddyDejaVu"; src: url("vendor/fonts/DejaVuSans.ttf") format("truetype"); }
+@font-face { font-family: "SlopdaddyAnton"; src: url("vendor/fonts/Anton-Regular.ttf") format("truetype"); }
+@font-face { font-family: "SlopdaddyBebas"; src: url("vendor/fonts/BebasNeue-Regular.ttf") format("truetype"); }
+@font-face { font-family: "SlopdaddyArchivoBlack"; src: url("vendor/fonts/ArchivoBlack-Regular.ttf") format("truetype"); }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -350,6 +359,15 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .stat-tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin: 10px 0; }
 .stat-tile-grid .batch-stat-tile { padding: 8px 10px; }
 
+/* Caption live preview, embedded directly in Settings -> Video & Captions */
+.caption-live-preview { display: flex; justify-content: center; margin: 10px 0; }
+#captionLivePreviewBg { position: relative; width: 240px; aspect-ratio: 9/16; background: #1a1d24 center/cover no-repeat; border-radius: 8px; border: 1px solid var(--border); overflow: hidden; }
+.clp-word { display: inline-block; }
+#captionOverlay.entrance-fade { animation: clpFade 0.2s ease; }
+#captionOverlay.entrance-pop { animation: clpPop 0.15s ease; }
+@keyframes clpFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes clpPop { from { transform: translate(-50%, -50%) scale(0.6); } to { transform: translate(-50%, -50%) scale(1); } }
+
 /* Color swatch trigger + shared picker popup */
 .color-swatch-btn { display: flex; align-items: center; gap: 8px; padding: 5px 8px; width: 100%; }
 .color-swatch { width: 20px; height: 20px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); flex: none; background-image: linear-gradient(45deg, #666 25%, transparent 25%), linear-gradient(-45deg, #666 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #666 75%), linear-gradient(-45deg, transparent 75%, #666 75%); background-size: 8px 8px; background-position: 0 0, 0 4px, 4px -4px, -4px 0px; }
@@ -546,30 +564,38 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         </div>
         <div class="settings-section">
           <h3>Caption Style</h3>
-          <label>Preset</label>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Pick a preset as a starting point, then tweak anything below — presets just fill in these same fields, they aren't a separate locked mode.</p>
+          <div class="preset-btn-row" id="captionPresetRow"></div>
+
+          <div id="captionLivePreview" class="caption-live-preview">
+            <div id="captionLivePreviewBg">
+              <div id="captionOverlay">
+                <span id="captionText"></span>
+                <span id="captionKaraokeWrap" style="display:none"></span>
+                <div id="captionResizeHandle"></div>
+              </div>
+            </div>
+          </div>
+          <div id="captionEditHint" style="display:none">Drag the caption up/down to move it, drag the dot to resize</div>
+
+          <label style="margin-top:10px;">Caption Grouping</label>
           <select id="captionPreset">
-            <option value="capcut" selected>CapCut (one word at a time)</option>
-            <option value="classic">Classic (grouped phrases)</option>
+            <option value="word">Word-by-word</option>
+            <option value="phrase">Phrase (2-3 words)</option>
+            <option value="karaoke">Karaoke (multi-word highlight)</option>
           </select>
           <div class="caption-grid" style="margin-top:8px;">
             <div>
               <label>Font</label>
-              <select id="font">
-                <option value="Arial" selected>Arial</option>
-                <option value="Helvetica">Helvetica</option>
-                <option value="Georgia">Georgia</option>
-                <option value="Times New Roman">Times New Roman</option>
-                <option value="Verdana">Verdana</option>
-                <option value="Tahoma">Tahoma</option>
-                <option value="Trebuchet MS">Trebuchet MS</option>
-                <option value="Courier New">Courier New</option>
-                <option value="Impact">Impact</option>
-                <option value="Comic Sans MS">Comic Sans MS</option>
-                <option value="DejaVu Sans">DejaVu Sans</option>
-              </select>
+              <select id="font"></select>
             </div>
             <div><label>Font Size</label><input type="number" id="fontSize" value="68" min="24" max="120"></div>
             <div><label>Position Y</label><input type="number" id="positionY" value="0.55" min="0.05" max="0.95" step="0.01"></div>
+            <div>
+              <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+                <input type="checkbox" id="captionUppercase" style="width:auto;"> ALL CAPS
+              </label>
+            </div>
             <div>
               <label>Text Color</label>
               <button type="button" class="color-swatch-btn" id="textColorBtn" onclick="openColorPicker('textColor', this)">
@@ -587,6 +613,54 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
               <input type="hidden" id="strokeColor" value="black">
             </div>
             <div><label>Stroke Width</label><input type="number" id="strokeWidth" value="3" min="0" max="10"></div>
+            <div>
+              <label>Highlight Color <span style="font-weight:400;color:var(--muted);">(karaoke)</span></label>
+              <button type="button" class="color-swatch-btn" id="highlightColorBtn" onclick="openColorPicker('highlightColor', this)">
+                <span class="color-swatch" id="highlightColorSwatch"></span>
+                <span class="color-swatch-label" id="highlightColorLabel"></span>
+              </button>
+              <input type="hidden" id="highlightColor" value="yellow">
+            </div>
+            <div>
+              <label>Entrance Animation</label>
+              <select id="captionEntrance">
+                <option value="none">None (instant)</option>
+                <option value="fade">Fade in</option>
+                <option value="pop">Pop (scale in)</option>
+              </select>
+            </div>
+          </div>
+
+          <label style="display:flex;align-items:center;gap:6px;margin-top:12px;">
+            <input type="checkbox" id="captionBox" style="width:auto;"> Background box behind text
+          </label>
+          <div class="caption-grid" id="captionBoxRow" style="display:none;margin-top:8px;">
+            <div>
+              <label>Box Color</label>
+              <button type="button" class="color-swatch-btn" id="boxColorBtn" onclick="openColorPicker('boxColor', this)">
+                <span class="color-swatch" id="boxColorSwatch"></span>
+                <span class="color-swatch-label" id="boxColorLabel"></span>
+              </button>
+              <input type="hidden" id="boxColor" value="black">
+            </div>
+            <div><label>Box Opacity</label><input type="range" id="boxAlpha" min="0" max="1" step="0.05" value="0.5"></div>
+            <div><label>Box Padding</label><input type="number" id="boxBorderW" value="16" min="0" max="60"></div>
+          </div>
+
+          <label style="display:flex;align-items:center;gap:6px;margin-top:12px;">
+            <input type="checkbox" id="captionShadow" style="width:auto;"> Drop shadow
+          </label>
+          <div class="caption-grid" id="captionShadowRow" style="display:none;margin-top:8px;">
+            <div>
+              <label>Shadow Color</label>
+              <button type="button" class="color-swatch-btn" id="shadowColorBtn" onclick="openColorPicker('shadowColor', this)">
+                <span class="color-swatch" id="shadowColorSwatch"></span>
+                <span class="color-swatch-label" id="shadowColorLabel"></span>
+              </button>
+              <input type="hidden" id="shadowColor" value="black">
+            </div>
+            <div><label>Shadow X</label><input type="number" id="shadowX" value="2" min="-20" max="20"></div>
+            <div><label>Shadow Y</label><input type="number" id="shadowY" value="2" min="-20" max="20"></div>
           </div>
         </div>
       </div>
@@ -809,9 +883,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <div class="preview-wrapper" id="previewContainer">
       <video id="videoPreview" loop muted playsinline style="display:none"></video>
       <div id="previewPlaceholder">Upload a background video</div>
-      <div id="captionOverlay"><span id="captionText"></span><div id="captionResizeHandle"></div></div>
     </div>
-    <div id="captionEditHint" style="display:none">Drag the caption up/down to move it, drag the dot to resize</div>
     <div id="outputContainer"></div>
   </div>
 
@@ -852,11 +924,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <select id="bulkVoice"><option value="">Use settings voice</option></select>
           <label>TTS engine</label>
           <select id="bulkTtsEngine"><option value="">Use settings engine</option></select>
-          <label>Caption style</label>
+          <label>Caption grouping</label>
           <select id="bulkCaptionPreset">
-            <option value="">Use settings preset</option>
-            <option value="capcut">CapCut (one word at a time)</option>
-            <option value="classic">Classic (grouped phrases)</option>
+            <option value="">Use settings grouping</option>
+            <option value="word">Word-by-word</option>
+            <option value="phrase">Phrase</option>
+            <option value="karaoke">Karaoke (multi-word highlight)</option>
           </select>
           <label class="bulk-checkbox-row">
             <input type="checkbox" id="bulkTitleCard" checked> Title card
@@ -956,6 +1029,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <button class="primary" id="batchProgressReopenBtn" onclick="reopenBatchProgress()">View Batch Progress</button>
 
 <script src="lib/captions.js"></script>
+<script src="lib/caption-presets.js"></script>
 <script src="lib/video-utils.js"></script>
 <script src="lib/job-model.js"></script>
 <script src="lib/media-library-model.js"></script>

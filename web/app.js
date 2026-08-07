@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 86;
+const VERSION = 87;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -15,6 +15,7 @@ let currentVideoUrl = null;
 let currentVideoUnsupportedCodec = null; // e.g. "AV1" if sniffed as unsupported
 let currentVideoTranscoded = null;       // cached H.264 Blob once auto-converted
 let subtitles = [];           // [{start, end, text}]
+let previewKaraokeGroups = null; // [{start, end, words:[{text,start,end}]}] when captionPreset === "karaoke"
 let previewActive = false;
 let previewRAF = null;
 let ttsAudio = null;
@@ -54,6 +55,7 @@ function setSettingsTab(tab) {
   document.querySelectorAll(".settings-tab-panel").forEach(p => p.classList.toggle("active", p.dataset.tab === tab));
   localStorage.setItem(SETTINGS_TAB_KEY, tab);
   if (tab === "debug") { refreshSystemDiagnostics(); refreshCacheInfo(); }
+  if (tab === "video") { updateCaptionPreviewBackground(); showCaptionSample(); }
 }
 function openSettings() {
   $("#settingsOverlay").classList.add("show");
@@ -75,6 +77,61 @@ function applyResolutionPreset(w, h) {
   resH.dispatchEvent(new Event("input", { bubbles: true }));
 }
 const CRF_BY_QUALITY = { small: 28, balanced: 23, high: 18 };
+
+// ---------- Caption presets ----------
+// Populated once from CAPTION_PRESETS (web/lib/caption-presets.js) — same
+// "build UI from the registry" pattern as buildFontSelect()/buildEngineSelect().
+function buildCaptionPresetButtons() {
+  $("#captionPresetRow").innerHTML = CAPTION_PRESETS.map(p =>
+    `<button type="button" onclick="applyCaptionPreset('${p.id}')">${escapeHtml(p.label)}</button>`
+  ).join("");
+}
+// A preset is just "fill in these fields" — same dispatched-input-event
+// pattern as applyResolutionPreset(), not a separate locked mode. Editing
+// any field afterward simply diverges from the preset with no tracking of
+// which one was last picked (consistent with how every other preset button
+// in this app already works).
+function applyCaptionPreset(presetId) {
+  const p = getCaptionPreset(presetId);
+  const fields = {
+    captionPreset: p.grouping, font: p.fontId, fontSize: p.fontSize,
+    textColor: p.textColor, strokeColor: p.strokeColor, strokeWidth: p.strokeWidth,
+    highlightColor: p.highlightColor || "yellow",
+    boxColor: p.boxColor, boxAlpha: p.boxAlpha, boxBorderW: p.boxBorderW,
+    shadowColor: p.shadowColor, shadowX: p.shadowX, shadowY: p.shadowY,
+    captionEntrance: p.entrance,
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    const el = $("#" + id);
+    if (!el || value === undefined) continue;
+    el.value = value;
+  }
+  $("#captionUppercase").checked = !!p.uppercase;
+  $("#captionBox").checked = !!p.box;
+  $("#captionShadow").checked = !!p.shadow;
+  // Dispatch on everything touched so SETTINGS_FIELDS auto-save, the color
+  // swatches, and the box/shadow conditional rows all update in one go.
+  for (const id of Object.keys(fields)) {
+    const el = $("#" + id);
+    if (el) el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  $("#captionUppercase").dispatchEvent(new Event("change", { bubbles: true }));
+  $("#captionBox").dispatchEvent(new Event("change", { bubbles: true }));
+  $("#captionShadow").dispatchEvent(new Event("change", { bubbles: true }));
+  // Dispatching "input" on the hidden color inputs above persists/updates
+  // the live caption preview, but the swatch buttons' own visible color/
+  // label are only ever refreshed by syncColorSwatchDisplay() (normally
+  // called from the color-picker popup) — without this, a preset would set
+  // the right value invisibly while the swatch still shows its old color.
+  for (const id of ["textColor", "strokeColor", "highlightColor", "boxColor", "shadowColor"]) {
+    if (fields[id] !== undefined) syncColorSwatchDisplay(id);
+  }
+  updateCaptionBoxShadowRows();
+}
+function updateCaptionBoxShadowRows() {
+  $("#captionBoxRow").style.display = $("#captionBox").checked ? "" : "none";
+  $("#captionShadowRow").style.display = $("#captionShadow").checked ? "" : "none";
+}
 
 // ---------- Color picker (Settings -> Video & Captions: Text/Stroke Color) ----------
 // The hidden #textColor/#strokeColor inputs remain the single source of
@@ -361,7 +418,10 @@ const SETTINGS_FIELDS = [
   "storySystemPromptOverride",
   "resW", "resH", "fps", "encodingQuality",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
-  "voice", "captionPreset",
+  "voice", "captionPreset", "captionUppercase", "highlightColor",
+  "captionBox", "boxColor", "boxAlpha", "boxBorderW",
+  "captionShadow", "shadowColor", "shadowX", "shadowY",
+  "captionEntrance",
   "channelName",
   "ttsEngine", "ttsOpenaiKey", "ttsElevenlabsKey",
   "piperSpeed", "kokoroSpeed",
@@ -432,6 +492,10 @@ async function applyLoadedSettings() {
   applyTheme($("#theme").value || "dark");
   syncColorSwatchDisplay("textColor");
   syncColorSwatchDisplay("strokeColor");
+  syncColorSwatchDisplay("highlightColor");
+  syncColorSwatchDisplay("boxColor");
+  syncColorSwatchDisplay("shadowColor");
+  updateCaptionBoxShadowRows();
   // loadSettings() above restores each slider's raw .value from storage
   // without dispatching input events, so their live value-label <span>s
   // (wired in init(), see the "Per-engine TTS sliders" loop) need an
@@ -508,6 +572,13 @@ function buildEngineSelect() {
   }).join("");
   $("#ttsEngine").innerHTML = opts;
   $("#ttsEngineQuick").innerHTML = '<option value="">Use settings engine</option>' + opts;
+}
+// Real vendored fonts only (web/vendor/fonts/) — every option here actually
+// changes the render (fontfile lookup by id, see getCaptionFont()), unlike
+// the old hardcoded list of common system font names that only ever
+// affected the CSS preview and had zero effect on the exported video.
+function buildFontSelect() {
+  $("#font").innerHTML = CAPTION_FONTS.map(f => `<option value="${f.id}">${escapeHtml(f.label)}</option>`).join("");
 }
 // Probed once at startup: is a real local backend (server.js's /render,
 // shelling out to the user's own installed ffmpeg) reachable? True only
@@ -652,6 +723,8 @@ async function init() {
   ]);
   buildEngineSelect();
   buildProviderSelect();
+  buildFontSelect();
+  buildCaptionPresetButtons();
   const savedData = await applyLoadedSettings();
   buildPresetSelects();
   // Save on any settings change
@@ -669,6 +742,8 @@ async function init() {
     postTranscribeConcurrencySettings();
   });
   $("#theme").addEventListener("change", () => applyTheme($("#theme").value));
+  $("#captionBox").addEventListener("change", updateCaptionBoxShadowRows);
+  $("#captionShadow").addEventListener("change", updateCaptionBoxShadowRows);
   // Per-engine TTS sliders (Settings -> Voice) — same "live value label next
   // to the slider" pattern as renderConcurrency/transcribeConcurrency above.
   for (const id of [
@@ -683,17 +758,24 @@ async function init() {
     }
   }
   // Keep the caption preview live when style fields are edited by hand
-  for (const id of ["font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth", "resW"]) {
+  for (const id of [
+    "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth", "resW",
+    "captionUppercase", "highlightColor", "captionBox", "boxColor", "boxAlpha", "boxBorderW",
+    "captionShadow", "shadowColor", "shadowX", "shadowY", "captionEntrance",
+  ]) {
     const el = document.getElementById(id);
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
+  // Grouping choice changes which sample renders, not just style
+  $("#captionPreset").addEventListener("input", showCaptionSample);
+  $("#videoPreview").addEventListener("loadeddata", updateCaptionPreviewBackground);
   initCaptionDrag();
   initColorPickerEvents();
   initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
   initSidebarToggle();
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
-  new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
+  new ResizeObserver(() => updateCaptionStyle()).observe($("#captionLivePreviewBg"));
   initMediaLibraryUI();
   refreshMediaLibraryCache();
   initBatchUI();
@@ -1166,38 +1248,99 @@ async function setBackground(file, label) {
 // actual output. Scale every pixel value (font size, stroke) by the same
 // factor so the preview is a true-to-scale mockup of the real export.
 function getPreviewScale() {
-  const container = $("#previewContainer");
+  const container = $("#captionLivePreviewBg");
   const outputW = parseInt($("#resW").value) || 1080;
-  return (container.clientWidth || 400) / outputW;
+  return (container.clientWidth || 240) / outputW;
+}
+function currentCaptionGrouping() {
+  const p = $("#captionPreset").value;
+  return p === "phrase" || p === "classic" ? "phrase" : p === "karaoke" ? "karaoke" : "word";
 }
 function updateCaptionStyle() {
   const el = $("#captionOverlay");
   const scale = getPreviewScale();
-  el.style.fontFamily = $("#font").value + ", sans-serif";
-  el.style.fontSize = ((parseInt($("#fontSize").value) || 68) * scale) + "px";
+  const fontId = $("#font").value;
+  const fontDef = getCaptionFont(fontId);
+  el.style.fontFamily = (fontDef ? fontDef.cssFamily : "SlopdaddyDejaVu") + ", sans-serif";
+  const fontSize = (parseInt($("#fontSize").value) || 68) * scale;
+  el.style.fontSize = fontSize + "px";
   el.style.color = $("#textColor").value;
+  el.style.textTransform = $("#captionUppercase").checked ? "uppercase" : "none";
   const sw = (parseInt($("#strokeWidth").value) || 0) * scale;
   const sc = $("#strokeColor").value;
   // 8-direction shadow (4 corners + 4 edges) so the outline fully surrounds
   // each glyph — 4 corners alone leaves visible gaps at the top/bottom/
   // left/right of the strokes, which is what looked "broken" in the preview.
-  el.style.textShadow = sw
+  const shadows = sw
     ? [
         `-${sw}px -${sw}px 0 ${sc}`, `0 -${sw}px 0 ${sc}`, `${sw}px -${sw}px 0 ${sc}`,
         `${sw}px 0 0 ${sc}`,
         `${sw}px ${sw}px 0 ${sc}`, `0 ${sw}px 0 ${sc}`, `-${sw}px ${sw}px 0 ${sc}`,
         `-${sw}px 0 0 ${sc}`,
-      ].join(", ")
-    : "none";
+      ]
+    : [];
+  // Approximate ffmpeg's real box/shadow with CSS — square corners (no fake
+  // rounded pill the render can't reproduce) and a directional text-shadow.
+  if ($("#captionBox").checked) {
+    const rgb = hexToRgba($("#boxColor").value) || { r: 0, g: 0, b: 0 };
+    const alpha = parseFloat($("#boxAlpha").value);
+    el.style.backgroundColor = `rgba(${rgb.r},${rgb.g},${rgb.b},${isFinite(alpha) ? alpha : 0.5})`;
+    el.style.padding = Math.max(2, ((parseInt($("#boxBorderW").value) || 16) * scale) / 2) + "px " + (fontSize * 0.3) + "px";
+    el.style.borderRadius = "2px";
+  } else {
+    el.style.backgroundColor = "transparent";
+    el.style.padding = "8px 12px";
+    el.style.borderRadius = "6px";
+  }
+  if ($("#captionShadow").checked) {
+    const shC = $("#shadowColor").value;
+    const shX = (parseFloat($("#shadowX").value) || 0) * scale;
+    const shY = (parseFloat($("#shadowY").value) || 0) * scale;
+    shadows.push(`${shX}px ${shY}px 3px ${shC}`);
+  }
+  el.style.textShadow = shadows.length ? shadows.join(", ") : "none";
   const y = parseFloat($("#positionY").value);
   el.style.left = "50%";
   el.style.top = ((isFinite(y) ? y : 0.55) * 100) + "%";
   el.style.transform = "translate(-50%, -50%)";
+  const entrance = $("#captionEntrance").value;
+  el.classList.remove("entrance-fade", "entrance-pop");
+  if (entrance === "fade") el.classList.add("entrance-fade");
+  else if (entrance === "pop") el.classList.add("entrance-pop");
+}
+// Renders one <span> per word into #captionKaraokeWrap, toggling a
+// highlight color on whichever word's own [start,end] window contains
+// `time` — a CSS-flex approximation of the render's dual-drawtext-layer
+// technique (no need to replicate the canvas x-offset math here, only the
+// actual ffmpeg output needs pixel-exact positions).
+function renderKaraokeCaption(group, time) {
+  const wrap = $("#captionKaraokeWrap");
+  const highlightColor = $("#highlightColor").value || "yellow";
+  const uppercase = $("#captionUppercase").checked;
+  wrap.innerHTML = group.words.map(w => {
+    const active = time >= w.start && time <= w.end;
+    const text = uppercase ? w.text.toUpperCase() : w.text;
+    return `<span class="clp-word" style="${active ? `color:${highlightColor};` : ""}">${escapeHtml(text)}</span>`;
+  }).join(" ");
 }
 function renderCaption(time) {
+  const grouping = currentCaptionGrouping();
+  const overlay = $("#captionOverlay");
+  if (grouping === "karaoke" && previewKaraokeGroups && previewKaraokeGroups.length) {
+    const group = previewKaraokeGroups.find(g => time >= g.start && time <= g.end);
+    if (group) {
+      $("#captionText").style.display = "none";
+      $("#captionKaraokeWrap").style.display = "inline";
+      renderKaraokeCaption(group, time);
+      overlay.classList.add("show");
+      return;
+    }
+  }
+  $("#captionKaraokeWrap").style.display = "none";
+  $("#captionText").style.display = "inline";
   const cap = subtitles.find(s => time >= s.start && time <= s.end);
-  if (cap) { $("#captionText").textContent = cap.text; $("#captionOverlay").classList.add("show"); }
-  else { $("#captionText").textContent = ""; $("#captionOverlay").classList.remove("show"); }
+  if (cap) { $("#captionText").textContent = cap.text; overlay.classList.add("show"); }
+  else { $("#captionText").textContent = ""; overlay.classList.remove("show"); }
 }
 function captionsLoop() {
   if (!previewActive) return;
@@ -1206,12 +1349,53 @@ function captionsLoop() {
 }
 // Shows a static, draggable sample caption whenever nothing is actively
 // narrating — lets the user position/size captions without needing a
-// generated story or a running preview first.
+// generated story or a running preview first. Works even with no background
+// video uploaded, since the preview now lives in Settings, not on the main
+// page next to the upload area.
 function showCaptionSample() {
-  if (!currentVideo) return;
-  $("#captionText").textContent = "Your Caption Here";
+  const grouping = currentCaptionGrouping();
+  if (grouping === "karaoke") {
+    const sample = [
+      { text: "This", start: 0, end: 1 },
+      { text: "is", start: 1, end: 2 },
+      { text: "karaoke", start: 2, end: 3 },
+    ];
+    $("#captionText").style.display = "none";
+    $("#captionKaraokeWrap").style.display = "inline";
+    renderKaraokeCaption({ start: 0, end: 3, words: sample }, 1.5);
+  } else {
+    $("#captionKaraokeWrap").style.display = "none";
+    $("#captionText").style.display = "inline";
+    $("#captionText").textContent = $("#captionUppercase").checked ? "YOUR CAPTION HERE" : "Your Caption Here";
+  }
   $("#captionOverlay").classList.add("show");
   updateCaptionStyle();
+}
+// Shows a frozen frame of the uploaded background video (or a neutral
+// placeholder when none is uploaded) as the in-Settings preview's
+// background — object-fit:cover math via canvas, mirroring how the main
+// page's own upload preview crops a video.
+function updateCaptionPreviewBackground() {
+  const bg = $("#captionLivePreviewBg");
+  if (!bg) return;
+  const vid = $("#videoPreview");
+  if (!currentVideo || !vid || !vid.videoWidth) {
+    bg.style.backgroundImage = "none";
+    return;
+  }
+  try {
+    const canvas = document.createElement("canvas");
+    const targetW = 240, targetH = Math.round(240 * 16 / 9);
+    canvas.width = targetW; canvas.height = targetH;
+    const ctx = canvas.getContext("2d");
+    const vw = vid.videoWidth, vh = vid.videoHeight;
+    const scale = Math.max(targetW / vw, targetH / vh);
+    const dw = vw * scale, dh = vh * scale;
+    ctx.drawImage(vid, (targetW - dw) / 2, (targetH - dh) / 2, dw, dh);
+    bg.style.backgroundImage = `url(${canvas.toDataURL("image/jpeg", 0.85)})`;
+  } catch (e) {
+    bg.style.backgroundImage = "none";
+  }
 }
 function stopPreview() {
   previewActive = false;
@@ -1228,7 +1412,7 @@ let captionDragState = null;
 function initCaptionDrag() {
   const el = $("#captionOverlay");
   const handle = $("#captionResizeHandle");
-  const container = $("#previewContainer");
+  const container = $("#captionLivePreviewBg");
 
   el.classList.add("editable");
   $("#captionEditHint").style.display = "block";
@@ -1672,8 +1856,18 @@ async function startPreview() {
   btn.disabled = true;
   try {
     const { audioUrl, words } = await generateSpeech(story);
-    subtitles = buildSubsFromWords(words);
-    if (!subtitles.length) { alert("No caption timing produced."); btn.textContent = "Preview"; btn.disabled = false; return; }
+    const grouping = currentCaptionGrouping();
+    if (grouping === "karaoke") {
+      previewKaraokeGroups = buildKaraokeGroups(words);
+      subtitles = [];
+    } else if (grouping === "word") {
+      subtitles = buildWordCues(words);
+      previewKaraokeGroups = null;
+    } else {
+      subtitles = buildSubsFromWords(words);
+      previewKaraokeGroups = null;
+    }
+    if (!subtitles.length && !(previewKaraokeGroups && previewKaraokeGroups.length)) { alert("No caption timing produced."); btn.textContent = "Preview"; btn.disabled = false; return; }
 
     updateCaptionStyle();
     const vid = $("#videoPreview");
@@ -1719,11 +1913,14 @@ function ensureFFmpeg(poolSize) {
   );
   const base = new URL("./", document.baseURI).href;
   ffmpegPoolReady = (async () => {
-    // Captions are burned in via drawtext, which needs an exact font FILE
-    // (there's no OS font store inside the WASM sandbox) — ship one bundled
-    // font once here so every worker has it in its virtual FS.
-    const fontBuf = await (await fetch(BASE + "vendor/fonts/DejaVuSans.ttf")).arrayBuffer();
-    ffmpegPool = new FFmpegWorkerPool(poolSize, base, fontBuf);
+    // Captions are burned in via drawtext, which needs exact font FILES
+    // (there's no OS font store inside the WASM sandbox) — ship every
+    // vendored caption font once here so each worker has all of them in its
+    // virtual FS and can render whichever one a job actually selects.
+    const fonts = await Promise.all(CAPTION_FONTS.map(async (f) => ({
+      file: f.file, buf: await (await fetch(BASE + "vendor/fonts/" + f.file)).arrayBuffer(),
+    })));
+    ffmpegPool = new FFmpegWorkerPool(poolSize, base, fonts);
     try {
       let readyCount = 0;
       await ffmpegPool.warmUp(() => {
@@ -1788,7 +1985,7 @@ async function renderVideoNatively(payload, onProgress) {
     const bgCached = !!payload.bgCached;
     const musicCached = hasMusic && !!payload.musicCached;
     const meta = {
-      subs: payload.subs, style: payload.style,
+      subs: payload.subs, karaokeGroups: payload.karaokeGroups, style: payload.style,
       w: payload.w, h: payload.h, fps: payload.fps, bgW: payload.bgW, bgH: payload.bgH,
       musicVolume: payload.musicVolume, crf: payload.crf,
       hasMusic, hasTitleCard,
@@ -1870,7 +2067,18 @@ function getGlobalSettings() {
     textColor: $("#textColor").value,
     strokeColor: $("#strokeColor").value,
     strokeWidth: parseInt($("#strokeWidth").value) || 3,
-    captionPreset: $("#captionPreset").value || "capcut",
+    captionPreset: $("#captionPreset").value || "word",
+    captionUppercase: $("#captionUppercase").checked,
+    highlightColor: $("#highlightColor").value || "yellow",
+    captionBox: $("#captionBox").checked,
+    boxColor: $("#boxColor").value || "black",
+    boxAlpha: parseFloat($("#boxAlpha").value) || 0.5,
+    boxBorderW: parseInt($("#boxBorderW").value) || 16,
+    captionShadow: $("#captionShadow").checked,
+    shadowColor: $("#shadowColor").value || "black",
+    shadowX: parseInt($("#shadowX").value) || 2,
+    shadowY: parseInt($("#shadowY").value) || 2,
+    captionEntrance: $("#captionEntrance").value || "none",
     channelName: $("#channelName").value.trim() || "Anonymous",
     ttsEngine: getEngine(),
     encodingQuality: $("#encodingQuality").value || "balanced",
@@ -2092,14 +2300,39 @@ async function runJob(job, globalSettings, onUpdate) {
       titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec, narrationDelaySec };
     }
 
-    // "capcut" = one bold word at a time; "classic" = grouped phrases
-    // (the original style). Both feed the same per-cue drawtext+enable()
-    // render path — this only changes how cues are grouped, not how
-    // they're rendered.
-    const rawSubs = settings.captionPreset === "classic" ? buildSubsFromWords(narrationWords) : buildWordCues(narrationWords);
-    const subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
-    if (narrationDelaySec > 0) {
-      for (const s of subs) { s.start += narrationDelaySec; s.end += narrationDelaySec; }
+    // captionPreset holds the GROUPING mode: "word" = one bold word at a
+    // time, "phrase" = grouped phrases (the original "classic" style),
+    // "karaoke" = 2-3 words visible at once with the current one
+    // highlighted. word/phrase both feed the same flat per-cue
+    // drawtext+enable() render path; karaoke needs richer per-word group
+    // data (section D/E) instead of flattened {start,end,text} subs.
+    // "classic" is the old pre-migration value for phrase grouping — kept
+    // as an alias so an existing batch job/saved setting with that value
+    // doesn't silently fall back to word-by-word.
+    const grouping = (settings.captionPreset === "phrase" || settings.captionPreset === "classic") ? "phrase"
+      : settings.captionPreset === "karaoke" ? "karaoke" : "word";
+    const captionFont = getCaptionFont(settings.font);
+    let subs = null, karaokeGroups = null;
+    if (grouping === "karaoke") {
+      const groups = buildKaraokeGroups(narrationWords);
+      for (const g of groups) {
+        for (const w of g.words) w.text = sanitizeText(w.text);
+      }
+      await ensureCaptionFontLoaded(captionFont.cssFamily);
+      applyKaraokeOffsets(groups, captionFont.cssFamily, parseInt(settings.fontSize) || 68);
+      if (narrationDelaySec > 0) {
+        for (const g of groups) {
+          g.start += narrationDelaySec; g.end += narrationDelaySec;
+          for (const w of g.words) { w.start += narrationDelaySec; w.end += narrationDelaySec; }
+        }
+      }
+      karaokeGroups = groups;
+    } else {
+      const rawSubs = grouping === "phrase" ? buildSubsFromWords(narrationWords) : buildWordCues(narrationWords);
+      subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
+      if (narrationDelaySec > 0) {
+        for (const s of subs) { s.start += narrationDelaySec; s.end += narrationDelaySec; }
+      }
     }
 
     let musicPayload = null;
@@ -2134,11 +2367,24 @@ async function runJob(job, globalSettings, onUpdate) {
     }
 
     const style = {
+      fontFile: captionFont.file,
       fontSize: parseInt(settings.fontSize) || 68,
       textColor: settings.textColor,
       strokeColor: settings.strokeColor,
       strokeWidth: parseInt(settings.strokeWidth) || 3,
       positionY: parseFloat(settings.positionY) || 0.55,
+      captionGrouping: grouping,
+      uppercase: !!settings.captionUppercase,
+      highlightColor: settings.highlightColor || "yellow",
+      box: !!settings.captionBox,
+      boxColor: settings.boxColor || "black",
+      boxAlpha: typeof settings.boxAlpha === "number" ? settings.boxAlpha : 0.5,
+      boxBorderW: parseInt(settings.boxBorderW) || 16,
+      shadow: !!settings.captionShadow,
+      shadowColor: settings.shadowColor || "black",
+      shadowX: parseInt(settings.shadowX) || 2,
+      shadowY: parseInt(settings.shadowY) || 2,
+      entrance: settings.captionEntrance || "none",
     };
     // Lets the worker skip the scale/crop filter entirely when the
     // background is already at the export resolution.
@@ -2147,7 +2393,7 @@ async function runJob(job, globalSettings, onUpdate) {
     const outBytes = await renderVideoInWorker({
       type: "render",
       base: new URL("./", document.baseURI).href,
-      bg, audio: audioData, subs, style, w, h, fps, bgW, bgH,
+      bg, audio: audioData, subs, karaokeGroups, style, w, h, fps, bgW, bgH,
       music: musicPayload, musicVolume: job.musicVolume,
       titleCard: titleCardPayload,
       bgHash, bgCached, musicHash, musicCached,
@@ -2469,6 +2715,52 @@ function drawShareIcon(ctx, cx, cy, size, color) {
   ctx.stroke();
 }
 
+// ---------- Karaoke caption layout ----------
+// The actual ffmpeg render can't lay out multiple words itself — each
+// drawtext instance draws one independently-positioned string, with no
+// built-in multi-run text flow — so karaoke mode's per-word x positions are
+// measured once client-side (same off-screen-canvas technique already used
+// for title-card text fitting above) using the exact font/size that will
+// actually render, then baked into each word as `xOffset` (signed pixels
+// from the group's horizontal center) before the cues ever reach
+// buildKaraokeCues()/buildDrawtextFilterChain(). Requires the matching
+// @font-face to have already loaded (see ensureCaptionFontLoaded) — until
+// then, canvas measureText silently falls back to a generic font and the
+// offsets would be wrong for whatever the real render actually uses.
+function measureWordOffsets(words, cssFontFamily, fontSizePx) {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.font = `${fontSizePx}px ${cssFontFamily}`;
+  const gap = fontSizePx * 0.35;
+  const widths = words.map(w => ctx.measureText(w.text).width);
+  const totalWidth = widths.reduce((a, b) => a + b, 0) + gap * Math.max(0, words.length - 1);
+  let x = -totalWidth / 2;
+  return widths.map((width) => {
+    const offset = x + width / 2;
+    x += width + gap;
+    return offset;
+  });
+}
+// Mutates each group's words in place with a computed xOffset — called once
+// per karaoke render right before building cues.
+function applyKaraokeOffsets(groups, cssFontFamily, fontSizePx) {
+  for (const g of groups) {
+    const offsets = measureWordOffsets(g.words, cssFontFamily, fontSizePx);
+    g.words.forEach((w, i) => { w.xOffset = offsets[i]; });
+  }
+  return groups;
+}
+// Waits for a specific @font-face to actually be loaded/usable — canvas
+// measureText() and CSS font-family both silently fall back to a generic
+// font until this resolves, which would desync karaoke's x-offsets from
+// what ffmpeg actually renders with the real TTF file.
+async function ensureCaptionFontLoaded(cssFontFamily) {
+  try {
+    await document.fonts.load(`16px ${cssFontFamily}`);
+    await document.fonts.ready;
+  } catch (e) { /* best-effort — worst case measureText uses a fallback font */ }
+}
+
 // Returns a PNG Blob sized w x h (matching the output resolution), with a
 // transparent background outside the card itself.
 async function renderTitleCardImage({ title, channelName, w, h }) {
@@ -2768,9 +3060,24 @@ async function runDebugTestRender() {
     } else {
       words = computeWordTimings(sampleText, 0); // ~150wpm fallback timing, no TTS needed
     }
-    const rawSubs = globalSettings.captionPreset === "classic" ? buildSubsFromWords(words) : buildWordCues(words);
-    let subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
-    const narrationSec = Math.max(1, (subs.length ? subs[subs.length - 1].end : 3) + 0.5);
+    const grouping = (globalSettings.captionPreset === "phrase" || globalSettings.captionPreset === "classic") ? "phrase"
+      : globalSettings.captionPreset === "karaoke" ? "karaoke" : "word";
+    const captionFont = getCaptionFont(globalSettings.font);
+    let subs = null, karaokeGroups = null;
+    if (grouping === "karaoke") {
+      const groups = buildKaraokeGroups(words);
+      for (const g of groups) { for (const w of g.words) w.text = sanitizeText(w.text); }
+      await ensureCaptionFontLoaded(captionFont.cssFamily);
+      applyKaraokeOffsets(groups, captionFont.cssFamily, parseInt(globalSettings.fontSize) || 68);
+      karaokeGroups = groups;
+    } else {
+      const rawSubs = grouping === "phrase" ? buildSubsFromWords(words) : buildWordCues(words);
+      subs = rawSubs.map(s => ({ start: s.start, end: s.end, text: sanitizeText(s.text) }));
+    }
+    const lastEnd = karaokeGroups
+      ? (karaokeGroups.length ? karaokeGroups[karaokeGroups.length - 1].end : 3)
+      : (subs.length ? subs[subs.length - 1].end : 3);
+    const narrationSec = Math.max(1, lastEnd + 0.5);
 
     const w = 640, h = 360; // small + fast — this is a style/timing check, not a real export
     await ensureRenderBackend(1);
@@ -2796,7 +3103,14 @@ async function runDebugTestRender() {
       const title = extractTitleFromStory($("#storyText").value.trim()) || "AITAH for a debug test";
       const cardBlob = await renderTitleCardImage({ title, channelName: globalSettings.channelName, w, h });
       titleCardPayload = { imageBytes: await cardBlob.arrayBuffer(), cardDurationSec, narrationDelaySec: cardDurationSec };
-      subs = subs.map(s => ({ start: s.start + cardDurationSec, end: s.end + cardDurationSec, text: s.text }));
+      if (karaokeGroups) {
+        for (const g of karaokeGroups) {
+          g.start += cardDurationSec; g.end += cardDurationSec;
+          for (const w of g.words) { w.start += cardDurationSec; w.end += cardDurationSec; }
+        }
+      } else {
+        subs = subs.map(s => ({ start: s.start + cardDurationSec, end: s.end + cardDurationSec, text: s.text }));
+      }
     }
 
     const bg = new Uint8Array(await bgFile.arrayBuffer());
@@ -2804,20 +3118,33 @@ async function runDebugTestRender() {
       ? new Uint8Array(await (await fetch(audioUrl)).arrayBuffer())
       : makeSilentWavBytes(narrationSec);
     const style = {
+      fontFile: captionFont.file,
       fontSize: parseInt(globalSettings.fontSize) || 68,
       textColor: globalSettings.textColor,
       strokeColor: globalSettings.strokeColor,
       strokeWidth: parseInt(globalSettings.strokeWidth) || 3,
       positionY: parseFloat(globalSettings.positionY) || 0.55,
+      captionGrouping: grouping,
+      uppercase: !!globalSettings.captionUppercase,
+      highlightColor: globalSettings.highlightColor || "yellow",
+      box: !!globalSettings.captionBox,
+      boxColor: globalSettings.boxColor || "black",
+      boxAlpha: typeof globalSettings.boxAlpha === "number" ? globalSettings.boxAlpha : 0.5,
+      boxBorderW: parseInt(globalSettings.boxBorderW) || 16,
+      shadow: !!globalSettings.captionShadow,
+      shadowColor: globalSettings.shadowColor || "black",
+      shadowX: parseInt(globalSettings.shadowX) || 2,
+      shadowY: parseInt(globalSettings.shadowY) || 2,
+      entrance: globalSettings.captionEntrance || "none",
     };
 
     const outBytes = await renderVideoInWorker({
       type: "render",
       base: new URL("./", document.baseURI).href,
-      bg, audio, subs, style, w, h, fps: 24, bgW, bgH,
+      bg, audio, subs, karaokeGroups, style, w, h, fps: 24, bgW, bgH,
       music: null, musicVolume: 0,
       titleCard: titleCardPayload,
-    }, (pct) => { statusEl.textContent = `Rendering test clip... ${pct}%`; });
+    }, (data) => { statusEl.textContent = `Rendering test clip... ${(data && data.pct != null) ? data.pct : data}%`; });
 
     const url = URL.createObjectURL(new Blob([outBytes.buffer], { type: "video/mp4" }));
     previewExported(url);
@@ -3399,11 +3726,12 @@ function buildBatchCardElement(job) {
           ${engineOpts}
         </select>
       </div>
-      <div class="field-full"><label>Caption preset</label>
+      <div class="field-full"><label>Caption grouping</label>
         <select class="bc-captionPreset">
-          <option value="">Use settings preset</option>
-          <option value="capcut">CapCut (one word at a time)</option>
-          <option value="classic">Classic (grouped phrases)</option>
+          <option value="">Use settings grouping</option>
+          <option value="word">Word-by-word</option>
+          <option value="phrase">Phrase</option>
+          <option value="karaoke">Karaoke (multi-word highlight)</option>
         </select>
       </div>
       <div><label>Width</label><input type="number" class="bc-resW" min="480" max="2160" step="2"></div>

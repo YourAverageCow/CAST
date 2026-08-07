@@ -17,49 +17,149 @@ function safeColor(c, fallback) {
 // One cue per caption: {start, end, text, file}. Cues under 40ms or with
 // empty/whitespace-only text are skipped as not worth rendering. `file` is
 // an internally-generated name (cap00000.txt, ...) — never derived from
-// user text — so there is nothing here that needs escaping.
-function buildCaptionCues(subs) {
+// user text — so there is nothing here that needs escaping. `uppercase`
+// transforms the text before it's written to that file (not at
+// filter-string build time) — keeps the drawtext builder itself unaware of
+// text-casing concerns entirely.
+function buildCaptionCues(subs, uppercase) {
   const cues = [];
   let i = 0;
   for (const s of subs) {
     if (s.end - s.start < 0.04) continue;
-    const text = (s.text || "").trim();
+    let text = (s.text || "").trim();
     if (!text) continue;
+    if (uppercase) text = text.toUpperCase();
     cues.push({ start: s.start, end: s.end, text, file: "cap" + String(i).padStart(5, "0") + ".txt" });
     i++;
   }
   return cues;
 }
 
-// One drawtext filter per cue, gated by enable='between(t,start,end)' so it
-// only draws while the playhead is inside that cue's window — outside it,
-// drawtext no-ops and passes the frame through unchanged. This is the
-// standard, well-documented ffmpeg pattern for burning in timed text
-// without a subtitle-rendering library (libass), and everything here is a
-// build-time filter OPTION, not a runtime command sent via sendcmd — no
-// dependency on which AVOptions happen to be flagged runtime-settable
-// (the exact landmine that made captions silently never render at all: an
-// earlier sendcmd-based version sent `textfile` as a bare runtime command,
-// which drawtext's AVOption table doesn't mark as such, so ffmpeg silently
-// rejected every one of those commands). Costs one filter node per cue
-// instead of two total — slower to build/run for a very long story, but
-// nothing here depends on subtle runtime-command semantics, which is worth
-// the tradeoff after that class of bug.
-function buildDrawtextFilterChain({ w, h, bgW, bgH, fontSize, textColor, strokeColor, strokeWidth, positionY, cues }) {
+// Karaoke grouping's cue builder: one cue PER WORD (not per group) since
+// each word needs its own textfile, but carries both the group's whole
+// on-screen window (groupStart/groupEnd, for the always-visible base layer)
+// and its own speaking window (wordStart/wordEnd, for the highlight layer
+// drawn on top only while it's actually being said) — see
+// buildDrawtextFilterChain's karaoke branch. `xOffset` (signed pixels from
+// frame-center) comes from measureWordOffsets() in app.js — a pure
+// DOM-free module can't measure real glyph widths itself.
+function buildKaraokeCues(groups, uppercase) {
+  const cues = [];
+  let i = 0;
+  for (const g of groups) {
+    if (g.end - g.start < 0.04) continue;
+    for (const w of g.words) {
+      let text = (w.text || "").trim();
+      if (!text) continue;
+      if (uppercase) text = text.toUpperCase();
+      cues.push({
+        file: "kar" + String(i).padStart(5, "0") + ".txt", text,
+        groupStart: g.start, groupEnd: g.end,
+        wordStart: w.start, wordEnd: w.end,
+        xOffset: typeof w.xOffset === "number" ? w.xOffset : 0,
+      });
+      i++;
+    }
+  }
+  return cues;
+}
+
+// Verified live (ffmpeg -h filter=drawtext + a real render, inspected
+// frame-by-frame) that fontsize/alpha both accept per-frame `t`-based
+// expressions — real pop/fade entrance animation, not an approximation.
+// Both expressions are no-ops outside their own cue's `enable` window (a
+// disabled timeline filter isn't evaluated for that frame at all), so it's
+// safe to key them off each cue's own start time without an explicit
+// end-of-animation clamp beyond what's written here.
+function entranceFontSizeExpr(entrance, startSec, fontSize) {
+  if (entrance !== "pop") return String(fontSize);
+  const s = startSec.toFixed(3);
+  const minSize = (fontSize * 0.6).toFixed(1);
+  const delta = (fontSize * 0.4).toFixed(1);
+  return `if(lt(t\\,${s}+0.15)\\,${minSize}+min(t-${s}\\,0.15)/0.15*${delta}\\,${fontSize})`;
+}
+function entranceAlphaExpr(entrance, startSec) {
+  if (entrance !== "fade") return "1";
+  const s = startSec.toFixed(3);
+  return `if(lt(t\\,${s}+0.2)\\,(t-${s})/0.2\\,1)`;
+}
+
+// Shared box/shadow option suffix, appended to every drawtext instance
+// (base and highlight layers alike in karaoke mode) when enabled.
+function boxShadowOptions({ box, boxColor, boxAlpha, boxBorderW, shadow, shadowColor, shadowX, shadowY }) {
+  let opts = "";
+  if (box) opts += `:box=1:boxcolor=${boxColor}@${boxAlpha}:boxborderw=${boxBorderW}`;
+  if (shadow) opts += `:shadowx=${shadowX}:shadowy=${shadowY}:shadowcolor=${shadowColor}`;
+  return opts;
+}
+
+// One drawtext filter per cue (two per word in karaoke mode — see below),
+// gated by enable='between(t,start,end)' so it only draws while the
+// playhead is inside that window — outside it, drawtext no-ops and passes
+// the frame through unchanged. This is the standard, well-documented ffmpeg
+// pattern for burning in timed text without a subtitle-rendering library
+// (libass), and everything here — including the new fontsize/alpha
+// per-frame expressions — is a build-time filter OPTION, not a runtime
+// command sent via sendcmd — no dependency on which AVOptions happen to be
+// flagged runtime-settable (the exact landmine that made captions silently
+// never render at all: an earlier sendcmd-based version sent `textfile` as
+// a bare runtime command, which drawtext's AVOption table doesn't mark as
+// such, so ffmpeg silently rejected every one of those commands). Costs one
+// filter node per cue (two in karaoke mode) instead of two total — slower
+// to build/run for a very long story, but nothing here depends on subtle
+// runtime-command semantics, which is worth the tradeoff after that class
+// of bug.
+function buildDrawtextFilterChain({
+  w, h, bgW, bgH, fontFile, fontSize, textColor, strokeColor, strokeWidth, positionY,
+  highlightColor, box, boxColor, boxAlpha, boxBorderW,
+  shadow, shadowColor, shadowX, shadowY, entrance,
+  grouping, cues,
+}) {
+  fontFile = fontFile || "DejaVuSans.ttf";
   const needsScale = !(bgW && bgH && bgW === w && bgH === h);
   const stages = [];
   if (needsScale) stages.push(`scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`);
-  for (const cue of cues) {
-    // Commas inside the enable='between(t,a,b)' expression must be escaped
-    // as \, — the outer filtergraph parser splits on bare commas to
-    // separate chained filters, and would otherwise cut this option off
-    // partway through the between() call.
-    const between = `between(t\\,${cue.start.toFixed(3)}\\,${cue.end.toFixed(3)})`;
-    stages.push(
-      `drawtext=fontfile=fonts/DejaVuSans.ttf:textfile=${cue.file}:fontsize=${fontSize}` +
-      `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}` +
-      `:x=(w-text_w)/2:y=h*${positionY}-text_h/2:enable='${between}'`
-    );
+  const boxShadow = boxShadowOptions({ box, boxColor, boxAlpha, boxBorderW, shadow, shadowColor, shadowX, shadowY });
+
+  if (grouping === "karaoke") {
+    for (const cue of cues) {
+      // Commas inside between()/if()/min() expressions must be escaped as
+      // \, — the outer filtergraph parser splits on bare commas to
+      // separate chained filters, and would otherwise cut an option off
+      // partway through.
+      const groupBetween = `between(t\\,${cue.groupStart.toFixed(3)}\\,${cue.groupEnd.toFixed(3)})`;
+      const wordBetween = `between(t\\,${cue.wordStart.toFixed(3)}\\,${cue.wordEnd.toFixed(3)})`;
+      const x = `(w/2)+${cue.xOffset.toFixed(1)}-text_w/2`;
+      const y = `h*${positionY}-text_h/2`;
+      const fontSizeExpr = entranceFontSizeExpr(entrance, cue.groupStart, fontSize);
+      const alphaExpr = entranceAlphaExpr(entrance, cue.groupStart);
+      // Base layer: visible for the whole group's on-screen window, in the
+      // regular text color.
+      stages.push(
+        `drawtext=fontfile=fonts/${fontFile}:textfile=${cue.file}:fontsize='${fontSizeExpr}':alpha='${alphaExpr}'` +
+        `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}${boxShadow}` +
+        `:x=${x}:y=${y}:enable='${groupBetween}'`
+      );
+      // Highlight layer: identical position, drawn on top only during this
+      // word's own speaking window — visually "swaps" the color instead of
+      // needing an unverified fontcolor_expr mechanism.
+      stages.push(
+        `drawtext=fontfile=fonts/${fontFile}:textfile=${cue.file}:fontsize=${fontSize}` +
+        `:fontcolor=${highlightColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}${boxShadow}` +
+        `:x=${x}:y=${y}:enable='${wordBetween}'`
+      );
+    }
+  } else {
+    for (const cue of cues) {
+      const between = `between(t\\,${cue.start.toFixed(3)}\\,${cue.end.toFixed(3)})`;
+      const fontSizeExpr = entranceFontSizeExpr(entrance, cue.start, fontSize);
+      const alphaExpr = entranceAlphaExpr(entrance, cue.start);
+      stages.push(
+        `drawtext=fontfile=fonts/${fontFile}:textfile=${cue.file}:fontsize='${fontSizeExpr}':alpha='${alphaExpr}'` +
+        `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}${boxShadow}` +
+        `:x=(w-text_w)/2:y=h*${positionY}-text_h/2:enable='${between}'`
+      );
+    }
   }
   // A filtergraph output pad needs at least one filter feeding it — fall
   // back to a no-op passthrough on the rare video with no renderable cues
@@ -140,7 +240,7 @@ function buildTitleCardOverlay({ videoFilterComplex, videoOutLabel, w, h, titleC
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    safeColor, buildCaptionCues, buildDrawtextFilterChain,
+    safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
     buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
   };
 }

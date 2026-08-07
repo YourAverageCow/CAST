@@ -22,13 +22,13 @@
 const RENDER_STALL_TIMEOUT_MS = 45000;
 
 class PoolWorker {
-  constructor(base, fontBuf, forceST) {
+  constructor(base, fonts, forceST) {
     this.base = base;
     this.forceST = forceST;
     this.busy = false;
     this.usingMT = false;
     this._worker = null;
-    this._fontBuf = fontBuf;
+    this._fonts = fonts; // [{file, buf}, ...] — every vendored caption font
     this._readyPromise = null;
     this._pending = null; // {resolve, reject, onProgress, stallTimer}
     this._spawn();
@@ -46,13 +46,13 @@ class PoolWorker {
       this._readyResolve = resolve;
       this._readyReject = reject;
     });
-    // Each worker needs its own copy of the font ArrayBuffer — transferring
-    // detaches it from the sender, so the same buffer can't be handed to
-    // more than one worker.
-    const fontCopy = this._fontBuf.slice(0);
+    // Each worker needs its own copy of every font's ArrayBuffer —
+    // transferring detaches it from the sender, so the same buffer can't be
+    // handed to more than one worker.
+    const fontsCopy = this._fonts.map(f => ({ file: f.file, buf: f.buf.slice(0) }));
     this._worker.postMessage(
-      { type: "ready", base: this.base, font: fontCopy, forceST: this.forceST },
-      [fontCopy]
+      { type: "ready", base: this.base, fonts: fontsCopy, forceST: this.forceST },
+      fontsCopy.map(f => f.buf)
     );
     return this._readyPromise;
   }
@@ -152,10 +152,10 @@ class PoolWorker {
 }
 
 class FFmpegWorkerPool {
-  constructor(size, base, fontBuf) {
+  constructor(size, base, fonts) {
     this.size = Math.max(1, size);
     this.base = base;
-    this.fontBuf = fontBuf;
+    this.fonts = fonts; // [{file, buf}, ...]
     // Only the single-thread core avoids the pthread-oversubscription risk
     // of running several multi-threaded cores at once — see file comment.
     this.forceST = this.size > 1;
@@ -164,7 +164,7 @@ class FFmpegWorkerPool {
   }
 
   _slot(i) {
-    if (!this._slots[i]) this._slots[i] = new PoolWorker(this.base, this.fontBuf, this.forceST);
+    if (!this._slots[i]) this._slots[i] = new PoolWorker(this.base, this.fonts, this.forceST);
     return this._slots[i];
   }
 

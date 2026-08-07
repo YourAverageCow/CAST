@@ -39,7 +39,7 @@ const PORT = parseInt(process.env.SLOPDADDY_PORT, 10) || 8123;
 // status/timing — off by default so normal runs stay quiet.
 const DEBUG = !!process.env.SLOPDADDY_DEBUG;
 const ROOT = path.join(__dirname, "web");
-const FONT_PATH = path.join(ROOT, "vendor", "fonts", "DejaVuSans.ttf");
+const FONTS_DIR = path.join(ROOT, "vendor", "fonts");
 
 // ---------- Background/music asset cache ----------
 // A bulk batch frequently reuses the exact same background video (or music
@@ -78,9 +78,10 @@ function writeAssetFile(dir, filename, bytes, hash, cached) {
 }
 
 const {
-  safeColor, buildCaptionCues, buildDrawtextFilterChain,
+  safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
   buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
 } = require(path.join(ROOT, "lib", "ffmpeg-filters.js"));
+const { CAPTION_FONTS } = require(path.join(ROOT, "lib", "caption-presets.js"));
 
 // ---------- ffmpeg availability ----------
 // Not just "does `ffmpeg` exist" — captions are burned in via the drawtext
@@ -242,19 +243,46 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
   if (hasMusic) writeAssetFile(dir, "music.mp3", music, meta.musicHash, meta.musicCached);
   if (hasTitleCard) fs.writeFileSync(path.join(dir, "titlecard.png"), titleCardImage);
 
+  // Copies every vendored font (not just the selected one) — cheap (a few
+  // small local files) and means this render dir never needs to know which
+  // one drawtext will actually reference, same as before this was
+  // selectable at all.
   fs.mkdirSync(path.join(dir, "fonts"));
-  fs.copyFileSync(FONT_PATH, path.join(dir, "fonts", "DejaVuSans.ttf"));
+  for (const f of CAPTION_FONTS) {
+    fs.copyFileSync(path.join(FONTS_DIR, f.file), path.join(dir, "fonts", f.file));
+  }
 
   const style = meta.style || {};
-  const cues = buildCaptionCues(meta.subs || []);
+  // fontId -> real filename is already resolved client-side (app.js, the
+  // one place both the native and WASM render calls originate from) so
+  // both backends receive an already-usable fontFile — this file only
+  // needs CAPTION_FONTS to know which files to copy into the render dir,
+  // not to do the id->file lookup itself.
+  const fontFile = /^[A-Za-z0-9_.-]+\.ttf$/.test(style.fontFile || "") ? style.fontFile : "DejaVuSans.ttf";
+  const grouping = style.captionGrouping || "phrase";
+  const cues = grouping === "karaoke"
+    ? buildKaraokeCues(meta.karaokeGroups || [], !!style.uppercase)
+    : buildCaptionCues(meta.subs || [], !!style.uppercase);
   for (const cue of cues) fs.writeFileSync(path.join(dir, cue.file), cue.text);
   let { filterComplex: videoFC, outLabel: videoOutLabel } = buildDrawtextFilterChain({
     w: meta.w, h: meta.h, bgW: meta.bgW, bgH: meta.bgH,
+    fontFile,
     fontSize: parseInt(style.fontSize) || 68,
     textColor: safeColor(style.textColor, "white"),
     strokeColor: safeColor(style.strokeColor, "black"),
     strokeWidth: parseInt(style.strokeWidth) || 3,
     positionY: parseFloat(style.positionY) || 0.55,
+    highlightColor: safeColor(style.highlightColor, "yellow"),
+    box: !!style.box,
+    boxColor: safeColor(style.boxColor, "black"),
+    boxAlpha: typeof style.boxAlpha === "number" ? style.boxAlpha : 0.5,
+    boxBorderW: parseInt(style.boxBorderW) || 16,
+    shadow: !!style.shadow,
+    shadowColor: safeColor(style.shadowColor, "black"),
+    shadowX: parseInt(style.shadowX) || 2,
+    shadowY: parseInt(style.shadowY) || 2,
+    entrance: ["none", "fade", "pop"].includes(style.entrance) ? style.entrance : "none",
+    grouping,
     cues,
   });
 

@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  safeColor, buildCaptionCues, buildDrawtextFilterChain,
+  safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
   buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
 } = require("./ffmpeg-filters.js");
 
@@ -134,11 +134,92 @@ test("buildDrawtextFilterChain applies style consistently across every cue", () 
   // across the whole string instead.
   const count = (re) => (filterComplex.match(re) || []).length;
   assert.equal(count(/drawtext=/g), 3);
-  assert.equal(count(/fontsize=90/g), 3);
+  // fontsize/alpha are always quoted now (not just when entrance animation
+  // is active) — they're per-frame expressions that happen to be constant
+  // when entrance is "none"/unset, not a different code path.
+  assert.equal(count(/fontsize='90'/g), 3);
   assert.equal(count(/fontcolor=yellow/g), 3);
   assert.equal(count(/bordercolor=red/g), 3);
   assert.equal(count(/borderw=5/g), 3);
   assert.equal(count(/y=h\*0\.7-text_h\/2/g), 3);
+});
+
+test("buildCaptionCues: uppercase transforms text but not the file name", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hello there" }], true);
+  assert.equal(cues[0].text, "HELLO THERE");
+  assert.equal(cues[0].file, "cap00000.txt");
+});
+
+test("buildDrawtextFilterChain: box adds box/boxcolor/boxborderw once per cue", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({
+    w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues,
+    box: true, boxColor: "#000000", boxAlpha: 0.5, boxBorderW: 16,
+  });
+  assert.match(filterComplex, /box=1:boxcolor=#000000@0\.5:boxborderw=16/);
+});
+
+test("buildDrawtextFilterChain: no box option emitted when box is falsy", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({ w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues });
+  assert.doesNotMatch(filterComplex, /box=/);
+});
+
+test("buildDrawtextFilterChain: shadow adds shadowx/shadowy/shadowcolor", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({
+    w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues,
+    shadow: true, shadowColor: "#000000", shadowX: 3, shadowY: 4,
+  });
+  assert.match(filterComplex, /shadowx=3:shadowy=4:shadowcolor=#000000/);
+});
+
+test("buildDrawtextFilterChain: pop entrance produces a fontsize expression referencing t", () => {
+  const cues = buildCaptionCues([{ start: 1.2, end: 2, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({ w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues, entrance: "pop" });
+  assert.match(filterComplex, /fontsize='if\(lt\(t\\,1\.200\+0\.15\)/);
+});
+
+test("buildDrawtextFilterChain: fade entrance produces an alpha expression referencing t", () => {
+  const cues = buildCaptionCues([{ start: 1.2, end: 2, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({ w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues, entrance: "fade" });
+  assert.match(filterComplex, /alpha='if\(lt\(t\\,1\.200\+0\.2\)/);
+});
+
+test("buildDrawtextFilterChain: none entrance keeps fontsize/alpha constant", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({ w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues, entrance: "none" });
+  assert.match(filterComplex, /fontsize='68':alpha='1':/);
+});
+
+test("buildKaraokeCues: emits one cue per word with group + word windows and xOffset", () => {
+  const groups = [{ start: 0, end: 1, words: [
+    { text: "a", start: 0, end: 0.4, xOffset: -10 },
+    { text: "b", start: 0.4, end: 1, xOffset: 10 },
+  ] }];
+  const cues = buildKaraokeCues(groups, false);
+  assert.equal(cues.length, 2);
+  assert.deepEqual(cues[0], { file: "kar00000.txt", text: "a", groupStart: 0, groupEnd: 1, wordStart: 0, wordEnd: 0.4, xOffset: -10 });
+  assert.equal(cues[1].xOffset, 10);
+});
+
+test("buildDrawtextFilterChain: karaoke grouping emits two drawtext layers per word", () => {
+  const groups = [{ start: 0, end: 1, words: [
+    { text: "a", start: 0, end: 0.4, xOffset: -10 },
+    { text: "b", start: 0.4, end: 1, xOffset: 10 },
+  ] }];
+  const cues = buildKaraokeCues(groups, false);
+  const { filterComplex } = buildDrawtextFilterChain({
+    w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues,
+    grouping: "karaoke", highlightColor: "cyan",
+  });
+  const count = (re) => (filterComplex.match(re) || []).length;
+  assert.equal(count(/drawtext=/g), 4); // 2 words x 2 layers
+  assert.equal(count(/fontcolor=cyan/g), 2); // one highlight layer per word
+  // Base layer spans the whole group; highlight layer spans just that word.
+  assert.match(filterComplex, /between\(t\\,0\.000\\,1\.000\)/); // base layer (both words share group window)
+  assert.match(filterComplex, /between\(t\\,0\.000\\,0\.400\)/); // word "a"'s own window
+  assert.match(filterComplex, /between\(t\\,0\.400\\,1\.000\)/); // word "b"'s own window
 });
 
 test("buildAudioFilterChain maps narration directly (via anull) with no music and no delay", () => {

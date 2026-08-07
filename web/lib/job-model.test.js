@@ -3,9 +3,13 @@ const assert = require("node:assert/strict");
 const { createJob, resolveJobSettings, makeJobId } = require("./job-model.js");
 
 const GLOBAL_SETTINGS = {
-  voice: "en_US-ryan-medium", resW: 1080, resH: 1920, fps: 30, font: "Arial",
+  voice: "en_US-ryan-medium", resW: 1080, resH: 1920, fps: 30, font: "dejavu",
   fontSize: 68, positionY: 0.55, textColor: "white", strokeColor: "black",
-  strokeWidth: 3, captionPreset: "capcut", ttsEngine: "piper",
+  strokeWidth: 3, captionPreset: "word", captionUppercase: false, highlightColor: "yellow",
+  captionBox: false, boxColor: "black", boxAlpha: 0.5, boxBorderW: 16,
+  captionShadow: false, shadowColor: "black", shadowX: 2, shadowY: 2,
+  captionEntrance: "none",
+  ttsEngine: "piper",
 };
 
 test("makeJobId returns unique, non-empty ids", () => {
@@ -45,11 +49,11 @@ test("resolveJobSettings falls back to global defaults when job fields are unset
 });
 
 test("resolveJobSettings prefers a job's own override over the global default", () => {
-  const job = createJob({ voice: "en_GB-alan-medium", fontSize: 90, captionPreset: "classic" });
+  const job = createJob({ voice: "en_GB-alan-medium", fontSize: 90, captionPreset: "karaoke" });
   const resolved = resolveJobSettings(job, GLOBAL_SETTINGS);
   assert.equal(resolved.voice, "en_GB-alan-medium");
   assert.equal(resolved.fontSize, 90);
-  assert.equal(resolved.captionPreset, "classic");
+  assert.equal(resolved.captionPreset, "karaoke");
   assert.equal(resolved.resW, 1080); // still falls back for untouched fields
 });
 

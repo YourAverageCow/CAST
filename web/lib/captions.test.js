@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   computeWordTimings, alignWordsFromCharacters, alignWordsBySequence, snapPausesToWords,
-  countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText,
+  countFirstParagraphWords, groupWords, buildSubsFromWords, buildKaraokeGroups, buildWordCues, sanitizeText,
 } = require("./captions.js");
 
 test("computeWordTimings distributes duration proportionally to word length", () => {
@@ -215,6 +215,66 @@ test("buildSubsFromWords handles an odd trailing word with no pair", () => {
   const subs = buildSubsFromWords(words);
   assert.equal(subs.length, 1);
   assert.equal(subs[0].text, "solo");
+});
+
+test("groupWords: respects maxWords beyond 2", () => {
+  const words = [
+    { text: "a", start: 0, end: 0.1 },
+    { text: "b", start: 0.1, end: 0.2 },
+    { text: "c", start: 0.2, end: 0.3 },
+    { text: "d", start: 0.3, end: 0.4 },
+  ];
+  const groups = groupWords(words, { maxWords: 3, maxChars: 100, maxGapSec: 1 });
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].length, 3);
+  assert.equal(groups[1].length, 1);
+});
+
+test("groupWords: stops a group at maxChars even under maxWords", () => {
+  const words = [
+    { text: "extraordinary", start: 0, end: 1 },
+    { text: "word", start: 1, end: 1.5 },
+    { text: "hi", start: 1.5, end: 1.6 },
+  ];
+  const groups = groupWords(words, { maxWords: 3, maxChars: 14, maxGapSec: 1 });
+  // "extraordinary" alone is already 13 chars; adding " word" (18 total) exceeds 14.
+  assert.equal(groups[0].length, 1);
+  assert.equal(groups[0][0].text, "extraordinary");
+});
+
+test("groupWords: default params reproduce buildSubsFromWords exactly", () => {
+  const words = [
+    { text: "hi", start: 0, end: 0.1 },
+    { text: "there", start: 0.15, end: 0.4 },
+    { text: "friend", start: 0.5, end: 0.8 },
+  ];
+  const viaGroupWords = groupWords(words).map(g => ({
+    start: g[0].start, end: g[g.length - 1].end, text: g.map(w => w.text).join(" "),
+  }));
+  assert.deepEqual(viaGroupWords, buildSubsFromWords(words));
+});
+
+test("buildKaraokeGroups: groups up to 3 words, keeps per-word timings intact", () => {
+  const words = [
+    { text: "this", start: 0, end: 0.2 },
+    { text: "is", start: 0.2, end: 0.35 },
+    { text: "great", start: 0.35, end: 0.7 },
+  ];
+  const groups = buildKaraokeGroups(words);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].words.length, 3);
+  assert.equal(groups[0].start, 0);
+  assert.equal(groups[0].end, 0.7);
+  assert.deepEqual(groups[0].words[1], { text: "is", start: 0.2, end: 0.35 });
+});
+
+test("buildKaraokeGroups: splits on a large gap even under maxWords/maxChars", () => {
+  const words = [
+    { text: "hi", start: 0, end: 0.1 },
+    { text: "there", start: 2, end: 2.3 }, // gap 1.9s
+  ];
+  const groups = buildKaraokeGroups(words);
+  assert.equal(groups.length, 2);
 });
 
 test("sanitizeText strips control characters", () => {
