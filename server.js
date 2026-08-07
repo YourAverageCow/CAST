@@ -114,6 +114,23 @@ function checkWhisper(cb) {
   });
 }
 
+// ---------- PocketTTS availability ----------
+// Kyutai's Pocket TTS (https://github.com/kyutai-labs/pocket-tts) — a small
+// (100M param) CPU-only TTS model, no browser build, so it's a native
+// backend like whisper rather than an in-browser engine like Piper/Kokoro.
+// Shelled out via `uvx pocket-tts` (not a bare `pocket-tts` binary) since
+// that's the package's own documented zero-install invocation via uv —
+// confirmed live: `uvx pocket-tts --help` downloads/caches the package on
+// first run (a few seconds) and is near-instant on every run after.
+let pocketTtsAvailable = null; // null = not checked yet, else boolean
+function checkPocketTts(cb) {
+  if (pocketTtsAvailable !== null) { cb(pocketTtsAvailable); return; }
+  execFile("uvx", ["pocket-tts", "--help"], (err, stdout) => {
+    pocketTtsAvailable = !err && /generate/.test(stdout || "");
+    cb(pocketTtsAvailable);
+  });
+}
+
 // ---------- concurrency limiter ----------
 // Mirrors FFmpegWorkerPool's job (web/worker-pool.js) for native processes —
 // batch "Generate All" can fire off several renders (and now transcriptions)
@@ -161,6 +178,7 @@ function makeSlotLimiter(max) {
 const CPU_COUNT = os.cpus().length;
 const renderLimiter = makeSlotLimiter(CPU_COUNT);
 const transcribeLimiter = makeSlotLimiter(CPU_COUNT);
+const pocketTtsLimiter = makeSlotLimiter(CPU_COUNT);
 function clampConcurrency(n) {
   n = parseInt(n, 10);
   if (!Number.isFinite(n)) return null;
@@ -433,6 +451,49 @@ function runNativeTranscribe(transcribeId, audio, model, respond) {
   });
 }
 
+// Only these 6 (the base language names, not the dated/"24l" preview
+// variants also listed in `--help`) are surfaced as voice choices — each
+// maps to exactly one Kyutai-curated built-in voice when `--voice` (a path
+// to a custom cloning-reference audio file) is omitted: english->alba,
+// french->estelle, german->juergen, italian->giovanni, portuguese->rafael,
+// spanish->lola (confirmed live via `uvx pocket-tts generate --help`).
+const POCKET_TTS_LANGUAGES = ["english", "french", "german", "italian", "portuguese", "spanish"];
+
+function runNativePocketTts(text, language, respond) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-pockettts-"));
+  const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
+  const outPath = path.join(dir, "out.wav");
+  const args = ["pocket-tts", "generate", "--text", text, "--output-path", outPath, "--quiet"];
+  if (POCKET_TTS_LANGUAGES.includes(language)) args.push("--language", language);
+  if (DEBUG) console.log("[pocket-tts]", args.join(" "));
+  const proc = spawn("uvx", args);
+  let stderrTail = "";
+  proc.stderr.on("data", (chunk) => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+  });
+  proc.on("error", (err) => {
+    cleanup();
+    respond(500, { error: "Couldn't run pocket-tts (via uvx): " + err.message });
+  });
+  proc.on("close", (code) => {
+    if (code !== 0) {
+      cleanup();
+      respond(500, { error: `pocket-tts exited with code ${code}\n${stderrTail.slice(-1000)}` });
+      return;
+    }
+    let data;
+    try {
+      data = fs.readFileSync(outPath);
+    } catch (e) {
+      cleanup();
+      respond(500, { error: "pocket-tts finished but output was missing: " + e.message });
+      return;
+    }
+    cleanup();
+    respond(200, data, "audio/wav");
+  });
+}
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -485,15 +546,20 @@ const server = http.createServer((req, res) => {
         const ffmpegAvailable = !ferr2 && /drawtext/.test(fstdout2 || "");
         execFile("whisper", ["--help"], (werr, wstdout) => {
           const whisperAvailable = !werr && /word_timestamps/.test(wstdout || "");
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            ffmpegAvailable, ffmpegVersion,
-            whisperAvailable,
-            cpuCount: CPU_COUNT, cpuModel: (os.cpus()[0] || {}).model || "unknown",
-            platform: os.platform(), arch: os.arch(), nodeVersion: process.version,
-            renderActive: renderLimiter.getActive(), renderMax: renderLimiter.getMax(),
-            transcribeActive: transcribeLimiter.getActive(), transcribeMax: transcribeLimiter.getMax(),
-          }));
+          execFile("uvx", ["pocket-tts", "--help"], (perr, pstdout) => {
+            const pocketTtsAvail = !perr && /generate/.test(pstdout || "");
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              ffmpegAvailable, ffmpegVersion,
+              whisperAvailable,
+              pocketTtsAvailable: pocketTtsAvail,
+              cpuCount: CPU_COUNT, cpuModel: (os.cpus()[0] || {}).model || "unknown",
+              platform: os.platform(), arch: os.arch(), nodeVersion: process.version,
+              renderActive: renderLimiter.getActive(), renderMax: renderLimiter.getMax(),
+              transcribeActive: transcribeLimiter.getActive(), transcribeMax: transcribeLimiter.getMax(),
+              pocketTtsActive: pocketTtsLimiter.getActive(), pocketTtsMax: pocketTtsLimiter.getMax(),
+            }));
+          });
         });
       });
     });
@@ -669,6 +735,58 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify(data));
         };
         runNativeTranscribe(id, audio, model, respond);
+      });
+    });
+    return;
+  }
+
+  // ---- Native PocketTTS backend (Kyutai, CPU-only, no browser build) ----
+  if (urlNoQuery === "/pockettts-capability" && req.method === "GET") {
+    checkPocketTts((available) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ available }));
+    });
+    return;
+  }
+  if (urlNoQuery === "/pockettts" && req.method === "POST") {
+    checkPocketTts((available) => {
+      if (!available) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "pocket-tts isn't available — install uv (https://docs.astral.sh/uv/) so `uvx pocket-tts` works, then restart the server." }));
+        return;
+      }
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", async () => {
+        // Plain small JSON body (unlike /render's binary frame) — the only
+        // payload is a string of narration text plus a language id, nothing
+        // binary to upload.
+        let body;
+        try {
+          body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Malformed JSON body: " + e.message }));
+          return;
+        }
+        const text = typeof body.text === "string" ? body.text.trim() : "";
+        if (!text) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing text" }));
+          return;
+        }
+        await pocketTtsLimiter.acquire();
+        const respond = (status, data, contentType) => {
+          pocketTtsLimiter.release();
+          if (contentType) {
+            res.writeHead(status, { "Content-Type": contentType, "Content-Length": data.length });
+            res.end(data);
+          } else {
+            res.writeHead(status, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        };
+        runNativePocketTts(text, body.voice, respond);
       });
     });
     return;

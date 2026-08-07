@@ -233,6 +233,38 @@ async function main() {
     } else if (transcribeCap) {
       skip("POST /transcribe", "native whisper backend unavailable on this machine");
     }
+
+    let pocketTtsCap = null;
+    try {
+      const resp = await fetch(`${BASE}/pockettts-capability`);
+      pocketTtsCap = await resp.json();
+      if (typeof pocketTtsCap.available === "boolean") {
+        ok("GET /pockettts-capability", `available=${pocketTtsCap.available}`);
+      } else {
+        fail("GET /pockettts-capability", "unexpected response shape: " + JSON.stringify(pocketTtsCap));
+      }
+    } catch (e) {
+      fail("GET /pockettts-capability", e.message);
+    }
+
+    if (pocketTtsCap && pocketTtsCap.available) {
+      try {
+        const resp = await fetch(`${BASE}/pockettts`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: "This is a smoke test.", voice: "english" }),
+        });
+        if (!resp.ok) {
+          fail("POST /pockettts", `HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+        } else {
+          const buf = Buffer.from(await resp.arrayBuffer());
+          ok("POST /pockettts", `${buf.length} bytes`);
+        }
+      } catch (e) {
+        fail("POST /pockettts", e.message);
+      }
+    } else if (pocketTtsCap) {
+      skip("POST /pockettts", "pocket-tts (uvx) unavailable on this machine");
+    }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

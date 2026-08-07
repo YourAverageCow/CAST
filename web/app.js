@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 85;
+const VERSION = 86;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -496,9 +496,16 @@ function resetSettingsToDefaults() {
 
 // ---------- Init ----------
 function buildEngineSelect() {
-  const opts = Object.values(TTS_ENGINES).map(e =>
-    `<option value="${e.id}">${escapeHtml(e.label)}</option>`
-  ).join("");
+  const opts = Object.values(TTS_ENGINES).map(e => {
+    // pocketTts is the one engine with a real "not installed" failure mode
+    // most users will hit by default (a native `uvx pocket-tts` process,
+    // unlike Piper/Kokoro's bundled/CDN-fetched browser models or the cloud
+    // engines' API-key gating) — grey it out with a clear reason instead of
+    // letting it be picked and only failing on generate.
+    const unavailable = e.id === "pocketTts" && !nativePocketTtsAvailable;
+    const label = unavailable ? `${e.label} — not installed` : e.label;
+    return `<option value="${e.id}"${unavailable ? " disabled" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
   $("#ttsEngine").innerHTML = opts;
   $("#ttsEngineQuick").innerHTML = '<option value="">Use settings engine</option>' + opts;
 }
@@ -620,10 +627,28 @@ async function probeNativeWhisperBackend() {
   }
 }
 
+// Same probe pattern again, for server.js's /pockettts (shells out to
+// `uvx pocket-tts` — a small CPU-only TTS model with no browser build).
+// Also always false on the deployed GitHub Pages build (no server).
+let nativePocketTtsAvailable = false;
+async function probeNativePocketTtsBackend() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    const resp = await fetch("/pockettts-capability", { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return !!data.available;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  [nativeRenderAvailable, nativeWhisperAvailable] = await Promise.all([
-    probeNativeRenderBackend(), probeNativeWhisperBackend(),
+  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable] = await Promise.all([
+    probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(),
   ]);
   buildEngineSelect();
   buildProviderSelect();
@@ -1902,6 +1927,9 @@ async function onEngineChangeUI() {
     openaiTts: "Cloud API — costs money per character generated.",
     elevenlabs: "Cloud API — free tier (~10k characters/month, requires attribution, no commercial use) then paid.",
     browserSpeech: "Uses your OS's built-in voices. Needs a one-time \"share tab audio\" permission prompt to record narration — less reliable in Firefox than Chrome, and quality varies a lot by OS.",
+    pocketTts: nativePocketTtsAvailable
+      ? "Runs locally via a small CPU-only Python process. Free, no API key. \"Voice\" is really language — each picks Kyutai's built-in voice for that language."
+      : "Not available — needs uv installed (https://docs.astral.sh/uv/) so `uvx pocket-tts` works, then restart the server.",
   };
   $("#engineNote").textContent = notes[engineId] || "";
   await populateVoices(engineId);
@@ -2613,11 +2641,13 @@ async function refreshSystemDiagnostics() {
     grid.innerHTML = [
       ["ffmpeg", data.ffmpegAvailable ? (data.ffmpegVersion || "available") : "not found"],
       ["whisper", data.whisperAvailable ? "available" : "not found"],
+      ["pocket-tts", data.pocketTtsAvailable ? "available" : "not found"],
       ["CPU", `${data.cpuCount} cores`],
       ["Platform", `${data.platform}/${data.arch}`],
       ["Node", data.nodeVersion],
       ["Render slots", `${data.renderActive} / ${data.renderMax} busy`],
       ["Transcribe slots", `${data.transcribeActive} / ${data.transcribeMax} busy`],
+      ["PocketTTS slots", `${data.pocketTtsActive} / ${data.pocketTtsMax} busy`],
     ].map(([label, value]) => `
       <div class="batch-stat-tile">
         <div class="stat-label">${escapeHtml(label)}</div>

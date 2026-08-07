@@ -340,12 +340,65 @@ const BrowserSpeechEngine = {
   },
 };
 
+// ---------- PocketTTS (new, native backend — Kyutai, CPU-only, no browser build) ----------
+// A small (100M param) model with no client-side/WASM/ONNX build, unlike
+// Piper/Kokoro — server.js shells out to it via `uvx pocket-tts` the same
+// way it already does for whisper (checkPocketTts/runNativePocketTts,
+// mirroring checkWhisper/runNativeTranscribe). "Voice" here is really
+// language selection: `pocket-tts generate --language <id>` (with `--voice`
+// omitted) auto-picks one Kyutai-curated built-in voice per language —
+// confirmed live via `uvx pocket-tts generate --help`, which documents the
+// exact mapping quoted in each label below. There's no way to pick a named
+// voice independent of language without pointing `--voice` at a custom
+// cloning-reference audio file, which is out of scope here (same fixed-
+// voice-roster UX as every other engine, not a cloning UI).
+const POCKET_TTS_VOICES = [
+  { id: "english", label: "Alba (English)" },
+  { id: "french", label: "Estelle (French)" },
+  { id: "german", label: "Juergen (German)" },
+  { id: "italian", label: "Giovanni (Italian)" },
+  { id: "portuguese", label: "Rafael (Portuguese)" },
+  { id: "spanish", label: "Lola (Spanish)" },
+];
+const PocketTtsEngine = {
+  id: "pocketTts",
+  label: "PocketTTS (local, free, CPU)",
+  isFree: true,
+  needsApiKey: false,
+  requiresOncePerSessionPermission: false,
+  listVoices() { return POCKET_TTS_VOICES; },
+  defaultVoice() { return POCKET_TTS_VOICES[0].id; },
+  async generate(text, voice) {
+    const resp = await fetch("/pockettts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice }),
+    });
+    if (!resp.ok) {
+      let msg = `PocketTTS error: ${resp.status}`;
+      try { const errJson = await resp.json(); if (errJson.error) msg = errJson.error; } catch (e) { /* non-JSON error body */ }
+      throw new Error(msg);
+    }
+    const audioBlob = await resp.blob();
+    // Deliberately NOT parseWavDurationSec here (unlike Kokoro, which
+    // prefers it) — confirmed live that pocket-tts writes a placeholder
+    // RIFF/data chunk size (a fixed ~2,000,000,000-byte sentinel, never
+    // patched to the real size after writing) rather than the true byte
+    // count, which would silently poison every downstream caption timing
+    // with a wildly wrong duration. The DOM-based probe reads the audio
+    // itself instead of trusting that header field, so it's unaffected.
+    const durationSec = await probeAudioDuration(audioBlob);
+    return { audioBlob, durationSec };
+  },
+};
+
 const TTS_ENGINES = {
   piper: PiperEngine,
   kokoro: KokoroEngine,
   openaiTts: OpenAIEngine,
   elevenlabs: ElevenLabsEngine,
   browserSpeech: BrowserSpeechEngine,
+  pocketTts: PocketTtsEngine,
 };
 const DEFAULT_TTS_ENGINE = "piper";
 
