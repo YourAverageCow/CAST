@@ -347,6 +347,35 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .stat-tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin: 10px 0; }
 .stat-tile-grid .batch-stat-tile { padding: 8px 10px; }
 
+/* Color swatch trigger + shared picker popup */
+.color-swatch-btn { display: flex; align-items: center; gap: 8px; padding: 5px 8px; width: 100%; }
+.color-swatch { width: 20px; height: 20px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); flex: none; background-image: linear-gradient(45deg, #666 25%, transparent 25%), linear-gradient(-45deg, #666 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #666 75%), linear-gradient(-45deg, transparent 75%, #666 75%); background-size: 8px 8px; background-position: 0 0, 0 4px, 4px -4px, -4px 0px; }
+.color-swatch-label { font-size: 0.78rem; color: var(--text); text-transform: uppercase; }
+.color-picker-popup { display: none; position: fixed; z-index: 130; width: 280px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
+.color-picker-popup.show { display: block; }
+.cp-sv { position: relative; width: 100%; height: 130px; border-radius: 8px; overflow: hidden; cursor: crosshair; touch-action: none; }
+.cp-sv-white, .cp-sv-black { position: absolute; inset: 0; }
+.cp-sv-white { background: linear-gradient(to right, #fff, rgba(255,255,255,0)); }
+.cp-sv-black { background: linear-gradient(to top, #000, rgba(0,0,0,0)); }
+.cp-sv-thumb { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4); pointer-events: none; }
+.cp-slider-row { position: relative; margin-top: 10px; border-radius: 6px; overflow: hidden; }
+.cp-checker { background-image: linear-gradient(45deg, #666 25%, transparent 25%), linear-gradient(-45deg, #666 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #666 75%), linear-gradient(-45deg, transparent 75%, #666 75%); background-size: 8px 8px; background-position: 0 0, 0 4px, 4px -4px, -4px 0px; }
+.cp-hue-slider, .cp-alpha-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 14px; margin: 0; padding: 0; border: none; border-radius: 6px; background: linear-gradient(to right, red, yellow, lime, cyan, blue, magenta, red); display: block; }
+.cp-alpha-slider { background: linear-gradient(to right, transparent, #fff); position: relative; z-index: 1; }
+.cp-hue-slider::-webkit-slider-thumb, .cp-alpha-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid #222; box-shadow: 0 1px 3px rgba(0,0,0,0.5); cursor: pointer; }
+.cp-hue-slider::-moz-range-thumb, .cp-alpha-slider::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid #222; box-shadow: 0 1px 3px rgba(0,0,0,0.5); cursor: pointer; }
+.cp-fields-row { display: flex; gap: 6px; margin-top: 12px; }
+.cp-field { flex: 1; min-width: 0; }
+.cp-field-hex { flex: 1.6; }
+.cp-field label { font-size: 0.65rem; margin: 0 0 2px; }
+.cp-field input { padding: 6px 5px; font-size: 0.75rem; text-align: center; }
+.cp-field-hex input { text-align: left; text-transform: uppercase; }
+.cp-presets { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; margin-top: 12px; }
+.cp-preset-swatch { width: 100%; aspect-ratio: 1; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); cursor: pointer; padding: 0; }
+.cp-preset-swatch:hover { transform: scale(1.1); }
+.cp-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.cp-actions button { width: auto; padding: 7px 14px; }
+
 /* Player panel (right side) */
 #playerOverlay { display: none; position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 500; box-shadow: -8px 0 30px rgba(0,0,0,0.5); }
 #playerOverlay.show { display: block; }
@@ -470,11 +499,40 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <option value="classic">Classic (grouped phrases)</option>
           </select>
           <div class="caption-grid" style="margin-top:8px;">
-            <div><label>Font</label><input type="text" id="font" value="Arial"></div>
+            <div>
+              <label>Font</label>
+              <select id="font">
+                <option value="Arial" selected>Arial</option>
+                <option value="Helvetica">Helvetica</option>
+                <option value="Georgia">Georgia</option>
+                <option value="Times New Roman">Times New Roman</option>
+                <option value="Verdana">Verdana</option>
+                <option value="Tahoma">Tahoma</option>
+                <option value="Trebuchet MS">Trebuchet MS</option>
+                <option value="Courier New">Courier New</option>
+                <option value="Impact">Impact</option>
+                <option value="Comic Sans MS">Comic Sans MS</option>
+                <option value="DejaVu Sans">DejaVu Sans</option>
+              </select>
+            </div>
             <div><label>Font Size</label><input type="number" id="fontSize" value="68" min="24" max="120"></div>
             <div><label>Position Y</label><input type="number" id="positionY" value="0.55" min="0.05" max="0.95" step="0.01"></div>
-            <div><label>Text Color</label><input type="text" id="textColor" value="white"></div>
-            <div><label>Stroke Color</label><input type="text" id="strokeColor" value="black"></div>
+            <div>
+              <label>Text Color</label>
+              <button type="button" class="color-swatch-btn" id="textColorBtn" onclick="openColorPicker('textColor', this)">
+                <span class="color-swatch" id="textColorSwatch"></span>
+                <span class="color-swatch-label" id="textColorLabel"></span>
+              </button>
+              <input type="hidden" id="textColor" value="white">
+            </div>
+            <div>
+              <label>Stroke Color</label>
+              <button type="button" class="color-swatch-btn" id="strokeColorBtn" onclick="openColorPicker('strokeColor', this)">
+                <span class="color-swatch" id="strokeColorSwatch"></span>
+                <span class="color-swatch-label" id="strokeColorLabel"></span>
+              </button>
+              <input type="hidden" id="strokeColor" value="black">
+            </div>
             <div><label>Stroke Width</label><input type="number" id="strokeWidth" value="3" min="0" max="10"></div>
           </div>
         </div>
@@ -577,6 +635,33 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       </div>
 
     </div>
+  </div>
+</div>
+
+<!-- Color picker popup (shared by any color-swatch-btn) -->
+<div id="colorPickerPopup" class="color-picker-popup">
+  <div class="cp-sv" id="cpSvArea">
+    <div class="cp-sv-white"></div>
+    <div class="cp-sv-black"></div>
+    <div class="cp-sv-thumb" id="cpSvThumb"></div>
+  </div>
+  <div class="cp-slider-row">
+    <input type="range" id="cpHueSlider" class="cp-hue-slider" min="0" max="359" step="1" value="0">
+  </div>
+  <div class="cp-slider-row cp-checker">
+    <input type="range" id="cpAlphaSlider" class="cp-alpha-slider" min="0" max="100" step="1" value="100">
+  </div>
+  <div class="cp-fields-row">
+    <div class="cp-field cp-field-hex"><label>HEX</label><input type="text" id="cpHex"></div>
+    <div class="cp-field"><label>R</label><input type="number" id="cpR" min="0" max="255"></div>
+    <div class="cp-field"><label>G</label><input type="number" id="cpG" min="0" max="255"></div>
+    <div class="cp-field"><label>B</label><input type="number" id="cpB" min="0" max="255"></div>
+    <div class="cp-field"><label>A</label><input type="number" id="cpA" min="0" max="100"></div>
+  </div>
+  <div class="cp-presets" id="cpPresets"></div>
+  <div class="cp-actions">
+    <button type="button" onclick="cancelColorPicker()">Cancel</button>
+    <button type="button" class="primary" onclick="applyColorPicker()">Apply</button>
   </div>
 </div>
 
@@ -821,6 +906,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <script src="lib/job-model.js"></script>
 <script src="lib/media-library-model.js"></script>
 <script src="lib/bulk-assignment.js"></script>
+<script src="lib/color.js"></script>
 <script src="lib/ffmpeg-filters.js"></script>
 <script src="lib/tts-engines.js"></script>
 <script src="lib/story-providers.js"></script>

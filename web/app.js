@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 82;
+const VERSION = 83;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -75,6 +75,203 @@ function applyResolutionPreset(w, h) {
   resH.dispatchEvent(new Event("input", { bubbles: true }));
 }
 const CRF_BY_QUALITY = { small: 28, balanced: 23, high: 18 };
+
+// ---------- Color picker (Settings -> Video & Captions: Text/Stroke Color) ----------
+// The hidden #textColor/#strokeColor inputs remain the single source of
+// truth (SETTINGS_FIELDS/saveSettings/loadSettings/getGlobalSettings all
+// keep reading/writing them exactly as before) — this popup is just a
+// richer way to set their value than typing a CSS color string by hand.
+// web/lib/color.js does the actual hsv/rgb/hex math; resolving an arbitrary
+// CSS color name (e.g. the "white"/"black" defaults) to RGB needs a canvas,
+// which is why that one step lives here instead of in the pure module.
+const CP_PRESETS = ["#ffffff", "#000000", "#ffeb3b", "#ff3b30", "#34c759", "#00e5ff", "#ff9500", "#ff2d95"];
+let colorPickerState = null; // { targetId, h, s, v, a, originalValue }
+
+function resolveCssColorToRgba(cssColor) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 1;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#000000";
+  ctx.fillStyle = cssColor;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+  return { r, g, b, a: a / 255 };
+}
+
+function syncColorSwatchDisplay(id) {
+  const value = $("#" + id).value || "#ffffff";
+  const { r, g, b, a } = resolveCssColorToRgba(value);
+  const hex = rgbToHex(r, g, b, a);
+  const swatch = $("#" + id + "Swatch");
+  const label = $("#" + id + "Label");
+  // .color-swatch's CSS checker background-image shows through whenever the
+  // color itself is translucent — layering a plain inline background-color
+  // on top (rather than replacing background-image) is the simplest way to
+  // get that "translucent over checker" look without fighting the CSS rule.
+  if (swatch) swatch.style.backgroundColor = `rgba(${r},${g},${b},${a})`;
+  if (label) label.textContent = hex.toUpperCase();
+}
+
+function openColorPicker(targetId, anchorEl) {
+  const input = $("#" + targetId);
+  const { r, g, b, a } = resolveCssColorToRgba(input.value || "#ffffff");
+  const hsv = rgbToHsv(r, g, b);
+  colorPickerState = { targetId, h: hsv.h, s: hsv.s, v: hsv.v, a, originalValue: input.value };
+
+  const popup = $("#colorPickerPopup");
+  if (!$("#cpPresets").childElementCount) {
+    $("#cpPresets").innerHTML = CP_PRESETS.map(hex =>
+      `<button type="button" class="cp-preset-swatch" style="background:${hex}" data-hex="${hex}" onclick="pickColorPreset('${hex}')"></button>`
+    ).join("");
+  }
+
+  popup.classList.add("show");
+  const rect = anchorEl.getBoundingClientRect();
+  const popupRect = { w: 280 + 28, h: 420 }; // approx incl. padding, before layout
+  let left = rect.left;
+  let top = rect.bottom + 8;
+  if (left + popupRect.w > window.innerWidth) left = Math.max(8, window.innerWidth - popupRect.w);
+  if (top + popupRect.h > window.innerHeight) top = Math.max(8, rect.top - popupRect.h - 8);
+  popup.style.left = left + "px";
+  popup.style.top = top + "px";
+
+  renderColorPicker();
+  document.addEventListener("pointerdown", onColorPickerOutsideClick, true);
+}
+
+function closeColorPickerPopup() {
+  $("#colorPickerPopup").classList.remove("show");
+  document.removeEventListener("pointerdown", onColorPickerOutsideClick, true);
+  colorPickerState = null;
+}
+
+function onColorPickerOutsideClick(e) {
+  const popup = $("#colorPickerPopup");
+  if (!colorPickerState) return;
+  const btn = $("#" + colorPickerState.targetId + "Btn");
+  if (popup.contains(e.target) || (btn && btn.contains(e.target))) return;
+  applyColorPicker();
+}
+
+function renderColorPicker() {
+  if (!colorPickerState) return;
+  const { h, s, v, a } = colorPickerState;
+  const rgb = hsvToRgb(h, s, v);
+  const hex = rgbToHex(rgb.r, rgb.g, rgb.b, a);
+
+  const svArea = $("#cpSvArea");
+  svArea.style.backgroundColor = `hsl(${h}, 100%, 50%)`;
+  const svRect = { w: svArea.clientWidth || 212, h: svArea.clientHeight || 130 };
+  $("#cpSvThumb").style.left = (s * svRect.w) + "px";
+  $("#cpSvThumb").style.top = ((1 - v) * svRect.h) + "px";
+
+  $("#cpHueSlider").value = String(Math.round(h));
+  $("#cpAlphaSlider").value = String(Math.round(a * 100));
+  $("#cpAlphaSlider").style.background = `linear-gradient(to right, rgba(${rgb.r},${rgb.g},${rgb.b},0), rgb(${rgb.r},${rgb.g},${rgb.b}))`;
+
+  $("#cpHex").value = hex.toUpperCase();
+  $("#cpR").value = rgb.r;
+  $("#cpG").value = rgb.g;
+  $("#cpB").value = rgb.b;
+  $("#cpA").value = Math.round(a * 100);
+}
+
+// Live-commits the in-progress color to the actual hidden input (so the
+// caption preview and everything downstream updates immediately, matching
+// how every other style control in this panel already behaves) — Cancel is
+// what makes this reversible, not withholding the write until Apply.
+function commitColorPickerState() {
+  if (!colorPickerState) return;
+  const { h, s, v, a, targetId } = colorPickerState;
+  const rgb = hsvToRgb(h, s, v);
+  const hex = rgbToHex(rgb.r, rgb.g, rgb.b, a);
+  const input = $("#" + targetId);
+  input.value = hex;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  syncColorSwatchDisplay(targetId);
+}
+
+function cpSetFromPointer(e) {
+  const svArea = $("#cpSvArea");
+  const rect = svArea.getBoundingClientRect();
+  const x = clamp(e.clientX - rect.left, 0, rect.width);
+  const y = clamp(e.clientY - rect.top, 0, rect.height);
+  colorPickerState.s = rect.width ? x / rect.width : 0;
+  colorPickerState.v = rect.height ? 1 - y / rect.height : 0;
+  renderColorPicker();
+  commitColorPickerState();
+}
+
+function initColorPickerEvents() {
+  const svArea = $("#cpSvArea");
+  svArea.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    svArea.setPointerCapture(e.pointerId);
+    cpSetFromPointer(e);
+  });
+  svArea.addEventListener("pointermove", (e) => {
+    if (e.buttons !== 1) return;
+    cpSetFromPointer(e);
+  });
+
+  $("#cpHueSlider").addEventListener("input", () => {
+    if (!colorPickerState) return;
+    colorPickerState.h = parseInt($("#cpHueSlider").value, 10) || 0;
+    renderColorPicker();
+    commitColorPickerState();
+  });
+  $("#cpAlphaSlider").addEventListener("input", () => {
+    if (!colorPickerState) return;
+    colorPickerState.a = (parseInt($("#cpAlphaSlider").value, 10) || 0) / 100;
+    renderColorPicker();
+    commitColorPickerState();
+  });
+
+  $("#cpHex").addEventListener("change", () => {
+    if (!colorPickerState) return;
+    const rgba = hexToRgba($("#cpHex").value);
+    if (!rgba) { renderColorPicker(); return; } // invalid — snap back to last-known-good
+    const hsv = rgbToHsv(rgba.r, rgba.g, rgba.b);
+    Object.assign(colorPickerState, { h: hsv.h, s: hsv.s, v: hsv.v, a: rgba.a });
+    renderColorPicker();
+    commitColorPickerState();
+  });
+  for (const id of ["cpR", "cpG", "cpB", "cpA"]) {
+    $("#" + id).addEventListener("change", () => {
+      if (!colorPickerState) return;
+      const r = clamp(parseInt($("#cpR").value, 10) || 0, 0, 255);
+      const g = clamp(parseInt($("#cpG").value, 10) || 0, 0, 255);
+      const b = clamp(parseInt($("#cpB").value, 10) || 0, 0, 255);
+      const a = clamp((parseInt($("#cpA").value, 10) || 0) / 100, 0, 1);
+      const hsv = rgbToHsv(r, g, b);
+      Object.assign(colorPickerState, { h: hsv.h, s: hsv.s, v: hsv.v, a });
+      renderColorPicker();
+      commitColorPickerState();
+    });
+  }
+}
+
+function pickColorPreset(hex) {
+  if (!colorPickerState) return;
+  const rgba = hexToRgba(hex);
+  const hsv = rgbToHsv(rgba.r, rgba.g, rgba.b);
+  Object.assign(colorPickerState, { h: hsv.h, s: hsv.s, v: hsv.v, a: 1 });
+  renderColorPicker();
+  commitColorPickerState();
+}
+
+function applyColorPicker() {
+  closeColorPickerPopup();
+}
+function cancelColorPicker() {
+  if (!colorPickerState) return;
+  const { targetId, originalValue } = colorPickerState;
+  const input = $("#" + targetId);
+  input.value = originalValue;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  syncColorSwatchDisplay(targetId);
+  closeColorPickerPopup();
+}
 
 // index.html's own inline <script> (in <head>) already applied the saved
 // theme before first paint to avoid a flash — this re-applies it from the
@@ -221,6 +418,8 @@ async function applyLoadedSettings() {
   onEngineChangeUI();
   initPerformanceUI(savedData);
   applyTheme($("#theme").value || "dark");
+  syncColorSwatchDisplay("textColor");
+  syncColorSwatchDisplay("strokeColor");
   return savedData;
 }
 
@@ -425,6 +624,7 @@ async function init() {
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
   initCaptionDrag();
+  initColorPickerEvents();
   initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
   initSidebarToggle();
   // The sidebar (and with it the preview box) can be resized by dragging its
