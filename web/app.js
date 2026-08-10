@@ -3296,18 +3296,24 @@ function confirmMediaLibraryPicker() {
 
 function renderMediaLibraryList() {
   const list = $("#mediaLibraryList");
-  const items = mediaLibraryPickKind
-    ? mediaLibraryCache[mediaLibraryPickKind]
-    : [...mediaLibraryCache.video, ...mediaLibraryCache.audio];
 
   if (mediaLibraryPickerActive) {
+    const items = mediaLibraryPickKind
+      ? mediaLibraryCache[mediaLibraryPickKind]
+      : [...mediaLibraryCache.video, ...mediaLibraryCache.audio];
     renderMediaLibraryPickerGrid(list, items);
     return;
   }
 
+  if (!mediaLibraryPickKind) {
+    renderMediaLibraryManageGrid(list, mediaLibraryCache.video, mediaLibraryCache.audio);
+    return;
+  }
+
+  const items = mediaLibraryCache[mediaLibraryPickKind];
   list.className = "media-library-list";
   if (!items.length) {
-    list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">${mediaLibraryPickKind ? "No " + mediaLibraryPickKind + " files saved yet." : "No files saved yet."} Drag files above to add them.</p>`;
+    list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">No ${mediaLibraryPickKind} files saved yet. Drag files above to add them.</p>`;
     return;
   }
   list.innerHTML = items.map(item => {
@@ -3324,26 +3330,7 @@ function renderMediaLibraryList() {
     </div>
   `;
   }).join("");
-  // Same lazy, session-cached thumbnail generation the numbered picker grid
-  // uses (generateVideoThumbnail) — only for video items, only once per item.
-  for (const item of items) {
-    if (item.kind !== "video" || mediaLibraryThumbCache.has(item.id)) continue;
-    getMediaLibraryFile(item.id)
-      .then(file => file && generateVideoThumbnail(file))
-      .then(dataUrl => {
-        if (!dataUrl) return;
-        mediaLibraryThumbCache.set(item.id, dataUrl);
-        const row = list.querySelector(`.media-library-item[data-id="${item.id}"]`);
-        const icon = row && row.querySelector(".media-library-item-kind");
-        if (icon) {
-          const img = document.createElement("img");
-          img.className = "media-library-item-thumb";
-          img.src = dataUrl;
-          icon.replaceWith(img);
-        }
-      })
-      .catch(() => {});
-  }
+  hydrateMediaLibraryThumbnails(list, items, ".media-library-item", ".media-library-item-kind", "media-library-item-thumb");
   for (const row of list.querySelectorAll(".media-library-item")) {
     const id = row.dataset.id;
     if (mediaLibraryPickCallback) {
@@ -3363,6 +3350,47 @@ function renderMediaLibraryList() {
   }
 }
 
+// Shared tile inner-markup (thumb-or-icon + name) for every grid tile —
+// picker mode's numbered badge and manage mode's delete button are each
+// passed in as extraSlotHtml rather than merged here, since selection vs.
+// delete wiring legitimately differs per caller.
+function mediaLibraryTileMarkup(item, extraSlotHtml, selected) {
+  const thumb = mediaLibraryThumbCache.get(item.id);
+  const preview = thumb
+    ? `<img class="media-library-tile-thumb" src="${thumb}">`
+    : `<span class="media-library-tile-icon">${item.kind === "audio" ? "🎵" : "🎬"}</span>`;
+  return `
+    <div class="media-library-tile${selected ? " selected" : ""}" data-id="${item.id}">
+      ${preview}
+      <span class="media-library-tile-name">${escapeHtml(item.name)}</span>
+      ${extraSlotHtml || ""}
+    </div>`;
+}
+// Lazy, session-cached thumbnail generation (generateVideoThumbnail) shared
+// by every media-library render mode — only for video items, only once per
+// item per session. tileSelector/iconSelector parameterize row vs. tile
+// markup (`.media-library-item`/`-kind` vs. `.media-library-tile`/`-icon`).
+function hydrateMediaLibraryThumbnails(container, items, tileSelector, iconSelector, thumbClass) {
+  for (const item of items) {
+    if (item.kind !== "video" || mediaLibraryThumbCache.has(item.id)) continue;
+    getMediaLibraryFile(item.id)
+      .then(file => file && generateVideoThumbnail(file))
+      .then(dataUrl => {
+        if (!dataUrl) return;
+        mediaLibraryThumbCache.set(item.id, dataUrl);
+        const tile = container.querySelector(`${tileSelector}[data-id="${item.id}"]`);
+        const icon = tile && tile.querySelector(iconSelector);
+        if (icon) {
+          const img = document.createElement("img");
+          img.className = thumbClass;
+          img.src = dataUrl;
+          icon.replaceWith(img);
+        }
+      })
+      .catch(() => {});
+  }
+}
+
 // Numbered multi-select grid — click a tile to select it (badge shows its
 // position, 1-based, in click order); click again to deselect (the rest
 // renumber down automatically on re-render, since the badge is just the
@@ -3378,43 +3406,44 @@ function renderMediaLibraryPickerGrid(list, items) {
     const pos = mediaLibraryPickerSelection.indexOf(item.id);
     const selected = pos !== -1;
     const badge = selected ? `<span class="media-library-tile-badge">${pos + 1}</span>` : "";
-    const thumb = mediaLibraryThumbCache.get(item.id);
-    const preview = thumb
-      ? `<img class="media-library-tile-thumb" src="${thumb}">`
-      : `<span class="media-library-tile-icon">${item.kind === "audio" ? "🎵" : "🎬"}</span>`;
-    return `
-      <div class="media-library-tile${selected ? " selected" : ""}" data-id="${item.id}">
-        ${preview}
-        <span class="media-library-tile-name">${escapeHtml(item.name)}</span>
-        ${badge}
-      </div>`;
+    return mediaLibraryTileMarkup(item, badge, selected);
   }).join("");
 
   for (const tile of list.querySelectorAll(".media-library-tile")) {
     const id = tile.dataset.id;
     tile.addEventListener("click", () => toggleMediaLibraryPick(id));
   }
-  // Thumbnails generate lazily (only for video, only once per item per
-  // session) rather than blocking the grid on every item up front.
-  for (const item of items) {
-    if (item.kind !== "video" || mediaLibraryThumbCache.has(item.id)) continue;
-    getMediaLibraryFile(item.id)
-      .then(file => file && generateVideoThumbnail(file))
-      .then(dataUrl => {
-        if (!dataUrl) return;
-        mediaLibraryThumbCache.set(item.id, dataUrl);
-        const tile = list.querySelector(`.media-library-tile[data-id="${item.id}"]`);
-        const icon = tile && tile.querySelector(".media-library-tile-icon");
-        if (icon) {
-          const img = document.createElement("img");
-          img.className = "media-library-tile-thumb";
-          img.src = dataUrl;
-          icon.replaceWith(img);
-        }
-      })
-      .catch(() => {});
-  }
+  hydrateMediaLibraryThumbnails(list, items, ".media-library-tile", ".media-library-tile-icon", "media-library-tile-thumb");
   updateMediaLibraryPickerFooter();
+}
+
+// Manage mode: two stacked, thumbnailed grids (Videos, then Music) instead
+// of one flat kind-agnostic list — mediaLibraryCache already separates by
+// kind, this just gives the UI the same split. Clicking a tile does
+// nothing (manage mode has no pick callback); only the delete button acts.
+function renderMediaLibraryManageGrid(list, video, audio) {
+  list.className = "media-library-list-manage";
+  const section = (label, items) => {
+    const body = items.length
+      ? `<div class="media-library-grid">${items.map(item => {
+          const del = `<button class="media-library-tile-delete" title="Delete">&times;</button>`;
+          return mediaLibraryTileMarkup(item, del, false);
+        }).join("")}</div>`
+      : `<p style="font-size:0.8rem;color:var(--muted);">No ${label.toLowerCase()} yet.</p>`;
+    return `<div class="media-library-section"><h3 class="media-library-section-heading">${label}</h3>${body}</div>`;
+  };
+  list.innerHTML = section("Videos", video) + section("Music", audio);
+
+  for (const tile of list.querySelectorAll(".media-library-tile")) {
+    const id = tile.dataset.id;
+    tile.querySelector(".media-library-tile-delete").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await deleteMediaLibraryItem(id);
+      renderMediaLibraryList();
+      showToast("Removed from library.");
+    });
+  }
+  hydrateMediaLibraryThumbnails(list, video, ".media-library-tile", ".media-library-tile-icon", "media-library-tile-thumb");
 }
 
 function toggleMediaLibraryPick(id) {
@@ -3456,9 +3485,17 @@ function generateVideoThumbnail(file) {
     });
     video.addEventListener("seeked", () => {
       try {
+        // 9:16 to match this app's short-form output — cover-fit (scale to
+        // fill, crop overflow) rather than a plain stretch into the target
+        // box, so a source video's real aspect ratio isn't distorted.
         const canvas = document.createElement("canvas");
-        canvas.width = 160; canvas.height = 90;
-        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.width = 180; canvas.height = 320;
+        const ctx = canvas.getContext("2d");
+        const vw = video.videoWidth || canvas.width;
+        const vh = video.videoHeight || canvas.height;
+        const scale = Math.max(canvas.width / vw, canvas.height / vh);
+        const dw = vw * scale, dh = vh * scale;
+        ctx.drawImage(video, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
         resolve(canvas.toDataURL("image/jpeg", 0.7));
       } catch (e) {
         resolve(null);
@@ -4006,21 +4043,27 @@ async function generateIdeaAndStoryForJob(job, cardEl) {
 // a random one from the library, or the manually-chosen ones from the
 // numbered picker (web/lib/bulk-assignment.js).
 //
-// Not a separate step before rendering: this opens the same full-page
-// progress panel renderAllBatch() uses immediately (showing story-generation
-// progress), then automatically continues straight into rendering once every
-// story is ready — no intermediate "done, now what?" screen or extra click.
+// Not a separate step before rendering, and not two global phases either:
+// each job runs its own full pipeline (assign media -> generate story ->
+// runJob's TTS+render) independently via one Promise.all, so a fast story
+// doesn't sit idle waiting on every other job's story to finish before it
+// can start rendering — the batch used to await ALL stories before ANY job
+// could enter the render phase, which meant one slow LLM response held up
+// every already-ready job in the batch. Story generation and rendering each
+// still get their own natural concurrency control (queueTTS's one-at-a-time
+// lock, renderLimiter's slot cap) inside runJob(), same as the "Generate
+// All"/renderAllBatch() path already relies on — this just removes the
+// artificial barrier between the two steps.
 //
 // Concurrent, not sequential: every job already has its own independent card
-// in the progress grid, so N stories streaming in at once updates N separate
-// cards rather than one shared indicator — nothing about the UI depends on
-// completion order anymore (unlike when this was sequential-only, before the
-// per-job progress grid existed). The one real tradeoff: this fires up to
-// MAX_BULK_GENERATE * 2 concurrent requests (ideas + story per job) at the
-// user's own configured provider — a free-tier/low-rate-limit key could get
-// throttled where sequential wouldn't. Worth it for the speedup; if rate
-// limiting turns out to be a common complaint, cap concurrency instead of
-// reverting to fully sequential.
+// in the progress grid, so N stories streaming in (and N renders starting
+// as each finishes) updates N separate cards rather than one shared
+// indicator — nothing about the UI depends on completion order. The one
+// real tradeoff: this fires up to MAX_BULK_GENERATE * 2 concurrent requests
+// (ideas + story per job) at the user's own configured provider — a
+// free-tier/low-rate-limit key could get throttled where sequential
+// wouldn't. Worth it for the speedup; if rate limiting turns out to be a
+// common complaint, cap concurrency instead of reverting to fully sequential.
 async function bulkGenerateBatch() {
   const count = parseInt($("#bulkGenerateCount").value) || 1;
   const videoMode = $("#bulkVideoMode").value;
@@ -4080,31 +4123,61 @@ async function bulkGenerateBatch() {
   }
 
   openBatchProgressPanel(jobs.map(j => j.job));
-  $("#batchProgressTitle").textContent = `Generating ${count} stor${count === 1 ? "y" : "ies"}...`;
 
   const grid = $("#batchProgressGrid");
+  const resultsGrid = $("#resultsGrid");
   for (const { job } of jobs) {
+    job.status = "story";
     job.progressLabel = "Generating story...";
     renderResultCard(job, grid);
   }
 
+  // Set up the render backend once, up front, rather than only after every
+  // story finishes — jobs can now start rendering as soon as their own
+  // story is ready, which may be well before the batch's slowest story.
+  const parallelism = parseInt($("#batchParallelism").value) || 1;
+  const globalSettings = getGlobalSettings();
   try {
-    await Promise.all(jobs.map(async ({ job, cardEl }, i) => {
+    await ensureRenderBackend(parallelism);
+    await applyRenderConcurrency(parallelism);
+  } catch (e) {
+    console.error(e);
+    alert("Couldn't start the render backend: " + (e && e.message ? e.message : String(e)));
+    btn.disabled = false;
+    return;
+  }
+
+  // Per-job try/catch (not one Promise.all-wide try/catch) so one job's
+  // failure — a rate limit, a bad response — doesn't abort every other
+  // job's already-in-flight generation/render.
+  await Promise.all(jobs.map(async ({ job, cardEl }, i) => {
+    try {
       await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
       await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
       await generateIdeaAndStoryForJob(job, cardEl);
       job.progressLabel = "Story ready";
       renderResultCard(job, grid);
-    }));
-  } catch (e) {
-    console.error(e);
-    alert("Bulk generation failed: " + (e && e.message ? e.message : String(e)));
-    btn.disabled = false;
-    return;
-  }
+      job.status = "queued";
+      renderResultCard(job, grid);
+      await runJob(job, globalSettings, (j) => {
+        renderResultCard(j, resultsGrid);
+        renderResultCard(j, grid);
+        updateBatchProgressStats();
+      });
+    } catch (e) {
+      console.error(e);
+      job.status = "error";
+      job.error = (e && e.message) || String(e);
+      job.progressLabel = "Failed";
+      renderResultCard(job, grid);
+    }
+  }));
+
+  const failedCount = jobs.filter(({ job }) => job.status === "error").length;
+  showToast(failedCount ? `Batch done — ${failedCount} of ${jobs.length} failed.` : "Batch complete!");
+  updateBatchProgressStats();
 
   btn.disabled = false;
-  await renderAllBatch();
 }
 
 // ---------- Full-page batch progress panel ----------
@@ -4200,7 +4273,11 @@ function updateBatchProgressStats() {
 
   $("#batchProgressOverallFill").style.width = overallPct + "%";
   $("#batchProgressOverallLabel").textContent = `${overallPct}% overall — ${doneCount} of ${totalJobs} videos finished`;
-  $("#batchProgressTitle").textContent = doneCount >= totalJobs ? "Batch complete" : `Rendering ${totalJobs} video${totalJobs === 1 ? "" : "s"}...`;
+  // "Processing", not "Rendering" — bulkGenerateBatch()'s jobs pipeline
+  // independently now, so at any moment some may still be generating their
+  // story while others are already rendering; there's no single global
+  // phase to name.
+  $("#batchProgressTitle").textContent = doneCount >= totalJobs ? "Batch complete" : `Processing ${totalJobs} video${totalJobs === 1 ? "" : "s"}...`;
   if (doneCount >= totalJobs) {
     clearInterval(batchProgressState.tickHandle);
     $("#batchProgressCloseBtn").textContent = "Close";

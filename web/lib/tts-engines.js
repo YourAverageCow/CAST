@@ -112,6 +112,30 @@ const KOKORO_VOICES = [
   { id: "bm_daniel", label: "Daniel (UK male)" },
   { id: "bm_george", label: "George (UK male)" },
 ];
+// Encodes mono 32-bit-float PCM samples as a WAV buffer — same byte layout
+// Kokoro's own (unexported) RawAudio.toWav() produces (RIFF/WAVE, fmt chunk
+// audioFormat=3 IEEE-float, 1 channel, 32 bits/sample). Needed because
+// stitching multiple chunks' raw Float32Array audio together (see
+// KokoroEngine.generate below) means there's no single RawAudio instance
+// left to call the library's own toWav() on.
+function encodeMonoFloat32Wav(samples, sampleRate) {
+  const bytesPerSample = 4;
+  const buffer = new ArrayBuffer(44 + bytesPerSample * samples.length);
+  const view = new DataView(buffer);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF"); view.setUint32(4, 36 + bytesPerSample * samples.length, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); view.setUint32(16, 16, true);
+  view.setUint16(20, 3, true); // IEEE float
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, bytesPerSample * sampleRate, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 32, true);
+  writeStr(36, "data"); view.setUint32(40, bytesPerSample * samples.length, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += bytesPerSample) view.setFloat32(offset, samples[i], true);
+  return buffer;
+}
 const KokoroEngine = {
   id: "kokoro",
   label: "Kokoro (local, free, higher quality)",
@@ -122,8 +146,24 @@ const KokoroEngine = {
   defaultVoice() { return KOKORO_VOICES[0].id; },
   async generate(text, voice, config) {
     const tts = await ensureKokoro();
-    const audio = await tts.generate(text, { voice, speed: (config && config.speed) || 1 });
-    const wavBuffer = audio.toWav();
+    const speed = (config && config.speed) || 1;
+    // Kokoro's model has a hard ~510-token input limit per single generate()
+    // call — text beyond that is silently truncated (no error), which cut
+    // every long story's narration off at the same fixed ~20-30s regardless
+    // of its real length. tts.stream() with a sentence-boundary split
+    // keeps each chunk safely under that limit and yields one RawAudio per
+    // chunk instead of one call over the whole text.
+    const sampleChunks = [];
+    let sampleRate = 24000;
+    for await (const { audio } of tts.stream(text, { voice, speed, split_pattern: /(?<=[.!?])\s+/ })) {
+      sampleChunks.push(audio.audio);
+      sampleRate = audio.sampling_rate;
+    }
+    const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0);
+    const merged = new Float32Array(totalLen);
+    let offset = 0;
+    for (const chunk of sampleChunks) { merged.set(chunk, offset); offset += chunk.length; }
+    const wavBuffer = encodeMonoFloat32Wav(merged, sampleRate);
     const audioBlob = new Blob([wavBuffer], { type: "audio/wav" });
     // Parse the WAV header directly (same parseWavDurationSec the ffmpeg
     // worker later uses on these exact bytes for the render's own duration

@@ -257,13 +257,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 /* Numbered multi-select picker grid (openMediaLibraryPicker) — replaces the
    plain list above when picking video/music for a bulk-generate batch. */
 .media-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }
-.media-library-tile { position: relative; cursor: pointer; border: 2px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); aspect-ratio: 16/9; display: flex; align-items: center; justify-content: center; }
+.media-library-tile { position: relative; cursor: pointer; border: 2px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); aspect-ratio: 9/16; display: flex; align-items: center; justify-content: center; }
 .media-library-tile:hover { border-color: var(--hover-border); }
 .media-library-tile.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(88,166,255,0.35); }
 .media-library-tile-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
 .media-library-tile-icon { font-size: 1.8rem; }
 .media-library-tile-name { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.65); color: #fff; font-size: 0.65rem; padding: 3px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .media-library-tile-badge { position: absolute; top: 5px; right: 5px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 0.75rem; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0,0,0,0.5); }
+.media-library-list-manage { display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
+.media-library-section-heading { margin: 0 0 8px; font-size: 0.85rem; color: var(--text); font-weight: 600; }
+.media-library-tile-delete { position: absolute; top: 5px; right: 5px; background: rgba(0,0,0,0.55); border: 1px solid var(--border); color: #fff; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; padding: 0; font-size: 0.8rem; line-height: 1; }
+.media-library-tile-delete:hover { color: var(--danger); border-color: var(--danger); }
 #mediaLibraryPickerFooter { display: flex; gap: 8px; margin-top: 4px; }
 #mediaLibraryPickerFooter button { flex: 1; }
 
