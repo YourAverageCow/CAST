@@ -251,7 +251,11 @@ function groupWords(words, opts) {
     let j = i + 1;
     while (g.length < maxWords && j < words.length) {
       const candidate = combinedText + " " + words[j].text;
-      if (candidate.length > maxChars) break;
+      // Code-point count, not .length's UTF-16 code-unit count — a word
+      // containing an emoji or other surrogate-pair character would
+      // otherwise count as 2+ chars per character, triggering an early
+      // line break well before the caption visually looks full.
+      if ([...candidate].length > maxChars) break;
       if ((words[j].start - words[j - 1].end) >= maxGapSec) break;
       g.push(words[j]);
       combinedText = candidate;

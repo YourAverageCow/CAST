@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { CAPTION_FONTS, getCaptionFont, CAPTION_PRESETS, DEFAULT_CAPTION_STYLE, getCaptionPreset } = require("./caption-presets.js");
+const { CAPTION_FONTS, getCaptionFont, CAPTION_PRESETS, DEFAULT_CAPTION_STYLE, getCaptionPreset, resolveCaptionGrouping } = require("./caption-presets.js");
 
 test("CAPTION_FONTS: every entry has a real file/id/label/cssFamily", () => {
   for (const f of CAPTION_FONTS) {
@@ -33,4 +33,14 @@ test("DEFAULT_CAPTION_STYLE is the classic preset", () => {
 test("getCaptionPreset: resolves a known id, falls back to default for unknown", () => {
   assert.equal(getCaptionPreset("hormozi").id, "hormozi");
   assert.equal(getCaptionPreset("nonexistent").id, "classic");
+});
+
+test("resolveCaptionGrouping: maps known values and defaults unrecognized/garbage input to \"word\"", () => {
+  assert.equal(resolveCaptionGrouping("phrase"), "phrase");
+  assert.equal(resolveCaptionGrouping("classic"), "phrase"); // pre-migration alias
+  assert.equal(resolveCaptionGrouping("karaoke"), "karaoke");
+  assert.equal(resolveCaptionGrouping("word"), "word");
+  assert.equal(resolveCaptionGrouping("phrasee"), "word"); // typo/garbage
+  assert.equal(resolveCaptionGrouping(undefined), "word");
+  assert.equal(resolveCaptionGrouping(""), "word");
 });

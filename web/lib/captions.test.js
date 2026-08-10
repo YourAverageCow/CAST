@@ -242,6 +242,19 @@ test("groupWords: stops a group at maxChars even under maxWords", () => {
   assert.equal(groups[0][0].text, "extraordinary");
 });
 
+test("groupWords: counts an emoji as one character, not two UTF-16 code units", () => {
+  const words = [
+    { text: "fire", start: 0, end: 0.3 },
+    { text: "🔥", start: 0.3, end: 0.5 }, // U+1F525 FIRE, a surrogate pair
+  ];
+  // "fire 🔥" is 6 visual characters, well under maxChars — a
+  // .length-based (UTF-16 code unit) count would see 7 and wrongly split
+  // this into two groups.
+  const groups = groupWords(words, { maxWords: 2, maxChars: 14, maxGapSec: 1 });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].length, 2);
+});
+
 test("groupWords: default params reproduce buildSubsFromWords exactly", () => {
   const words = [
     { text: "hi", start: 0, end: 0.1 },

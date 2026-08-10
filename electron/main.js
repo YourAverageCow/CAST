@@ -81,8 +81,23 @@ ipcMain.handle("choose-output-folder", async (event) => {
 
 ipcMain.handle("save-video-file", async (_event, bytes, folder, filename) => {
   try {
-    const filePath = path.join(folder, filename);
-    fs.writeFileSync(filePath, Buffer.from(bytes));
+    // filename ultimately traces back to renderer-derived text (job/story
+    // title, etc.) — path.basename() strips any directory components
+    // (including "../" traversal) so this can only ever write inside the
+    // user-chosen folder, never outside it via a crafted filename.
+    const safeName = path.basename(String(filename || ""));
+    if (!safeName || safeName === "." || safeName === "..") {
+      return { ok: false, error: "Invalid filename" };
+    }
+    const filePath = path.join(folder, safeName);
+    // Belt-and-suspenders: confirm the resolved path is still actually
+    // inside `folder` even after basename-only stripped a traversal
+    // attempt, in case of platform-specific path quirks.
+    const resolvedFolder = path.resolve(folder) + path.sep;
+    if (!path.resolve(filePath).startsWith(resolvedFolder)) {
+      return { ok: false, error: "Resolved path escapes the chosen folder" };
+    }
+    await fs.promises.writeFile(filePath, Buffer.from(bytes));
     return { ok: true, path: filePath };
   } catch (e) {
     return { ok: false, error: (e && e.message) || String(e) };
@@ -140,6 +155,22 @@ async function createWindow() {
 
   wireUpdater(win);
 
+  // Restrict navigation/new-window creation to this app's own local backend
+  // — nothing in this app currently opens external links from rendered
+  // content, but pinning this explicitly means that stays true even if a
+  // future feature (e.g. a clickable link in generated story text) were
+  // added, rather than relying on Electron's own defaults.
+  const isOwnOrigin = (url) => {
+    try { return new URL(url).origin === `http://localhost:${PORT}`; } catch (e) { return false; }
+  };
+  win.webContents.on("will-navigate", (event, url) => {
+    if (!isOwnOrigin(url)) event.preventDefault();
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (!isOwnOrigin(url)) shell.openExternal(url).catch(() => {});
+    return { action: "deny" };
+  });
+
   try {
     await waitForServer(`http://localhost:${PORT}/`);
   } catch (e) {
@@ -154,7 +185,7 @@ async function createWindow() {
   if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // macOS's dock reads BrowserWindow's `icon` option inconsistently for
   // unpackaged (`npm start`) runs — packaged builds don't need this, since
   // electron-builder embeds build/icon.icns into the app bundle itself.
@@ -164,8 +195,19 @@ app.whenReady().then(() => {
   try {
     if (ICON_PATH && process.platform === "darwin" && app.dock) app.dock.setIcon(ICON_PATH);
   } catch (e) { /* cosmetic only */ }
-  startBackend();
-  createWindow();
+  // startBackend()/createWindow() previously had no error handling here —
+  // a synchronous throw from requiring server.js (a startup fs error, etc.)
+  // would propagate out of this .then() uncaught, leaving a packaged
+  // (non-terminal) user with no window, no dialog, and no visible
+  // explanation. Show a real dialog and quit cleanly instead.
+  try {
+    startBackend();
+    await createWindow();
+  } catch (e) {
+    dialog.showErrorBox("Slopdaddy failed to start", (e && e.stack) || String(e));
+    app.quit();
+    return;
+  }
 
   app.on("activate", () => {
     // macOS convention: clicking the dock icon with no windows open should

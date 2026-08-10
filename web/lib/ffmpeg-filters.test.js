@@ -275,3 +275,15 @@ test("parseWavDurationSec returns null for non-WAV or truncated input", () => {
   assert.equal(parseWavDurationSec(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])), null);
   assert.equal(parseWavDurationSec(null), null);
 });
+
+test("parseWavDurationSec returns null (not a wildly wrong duration) when the data chunk's size field is an implausible placeholder", () => {
+  // Real-world repro: some WAV writers (confirmed: PocketTTS) never patch
+  // the data chunk's declared size after writing, leaving a fixed sentinel
+  // (here modeled as ~2GB) far larger than the file actually is — trusting
+  // it blindly used to compute a nonsense multi-hour duration for a
+  // sub-second clip instead of falling back to a real probe.
+  const bytes = makeWav(1.0);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  dv.setUint32(40, 2_000_000_000, true); // overwrite the "data" chunk size field
+  assert.equal(parseWavDurationSec(bytes), null);
+});

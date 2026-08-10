@@ -47,6 +47,15 @@ test("hexToRgba: parses 3/6/8-digit hex with or without #", () => {
   assert.ok(Math.abs(withAlpha.a - 199 / 255) < 0.01);
 });
 
+test("hexToRgba: parses 4-digit #RGBA shorthand", () => {
+  // #f08a -> #ff0088aa
+  const c = hexToRgba("#f08a");
+  assert.equal(c.r, 255);
+  assert.equal(c.g, 0);
+  assert.equal(c.b, 136);
+  assert.ok(Math.abs(c.a - 170 / 255) < 0.01);
+});
+
 test("hexToRgba: returns null for invalid input", () => {
   assert.equal(hexToRgba("not-a-color"), null);
   assert.equal(hexToRgba(""), null);

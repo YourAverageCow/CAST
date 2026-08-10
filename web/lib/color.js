@@ -59,12 +59,12 @@ function rgbToHex(r, g, b, a) {
   return base + toHex2(clamp(a, 0, 1) * 255);
 }
 
-// Accepts #RGB, #RRGGBB, #RRGGBBAA (with or without leading #). Returns
-// {r,g,b,a} (a: 0-1) or null if the string isn't a valid hex color.
+// Accepts #RGB, #RGBA, #RRGGBB, #RRGGBBAA (with or without leading #).
+// Returns {r,g,b,a} (a: 0-1) or null if the string isn't a valid hex color.
 function hexToRgba(hex) {
   if (typeof hex !== "string") return null;
   let s = hex.trim().replace(/^#/, "");
-  if (/^[0-9a-fA-F]{3}$/.test(s)) {
+  if (/^[0-9a-fA-F]{3}$/.test(s) || /^[0-9a-fA-F]{4}$/.test(s)) {
     s = s.split("").map((c) => c + c).join("");
   }
   if (/^[0-9a-fA-F]{6}$/.test(s)) {

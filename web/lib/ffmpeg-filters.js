@@ -186,7 +186,16 @@ function parseWavDurationSec(bytes) {
   while (offset + 8 <= bytes.length) {
     const id = fourcc(offset);
     const size = dv.getUint32(offset + 4, true);
-    if (id === "data") return size / byteRate;
+    if (id === "data") {
+      // Some WAV writers emit a placeholder/sentinel data-chunk size instead
+      // of the true byte count (confirmed live: PocketTTS's output does
+      // this, off by orders of magnitude) — trusting it unconditionally
+      // produces a wildly wrong duration rather than failing loudly. If the
+      // claimed size exceeds what's actually left in the buffer, it can't
+      // be real; fall through to the caller's DOM-probe fallback instead.
+      if (size > bytes.length - offset - 8) return null;
+      return size / byteRate;
+    }
     offset += 8 + size + (size % 2); // chunks are word-aligned
   }
   return null;

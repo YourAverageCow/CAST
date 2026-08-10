@@ -57,13 +57,26 @@ const BG_CACHE_DIR = path.join(os.tmpdir(), "slopdaddy-bg-cache");
 fs.rmSync(BG_CACHE_DIR, { recursive: true, force: true });
 fs.mkdirSync(BG_CACHE_DIR, { recursive: true });
 
+// A real SHA-256 hex digest is always exactly 64 hex chars — the 16..128
+// range just gives a little slack. Shared between /cache-asset (which
+// already validated this) and writeAssetFile below, which previously
+// trusted meta.bgHash/meta.musicHash straight from the client's /render
+// request body with no validation at all — an attacker-controlled hash
+// there could read arbitrary files back into a render (cached:true, hash
+// pointing outside BG_CACHE_DIR via "..") or write the uploaded bytes to an
+// arbitrary path (cached:false). Both are only reachable by something that
+// can already reach this localhost-bound server, but validating a value
+// this cheap to check is worth it regardless.
+const ASSET_HASH_RE = /^[0-9a-f]{16,128}$/;
+
 // Writes `filename` into the job's temp `dir`, either by copying a
 // previously-cached asset (when `cached` is true — the client is telling us
 // it already uploaded these exact bytes for an earlier job in this batch)
 // or by writing the freshly-uploaded `bytes` and best-effort persisting a
 // copy into the cache keyed by `hash` for any later job that references it.
 function writeAssetFile(dir, filename, bytes, hash, cached) {
-  const cachePath = hash ? path.join(BG_CACHE_DIR, hash) : null;
+  const validHash = typeof hash === "string" && ASSET_HASH_RE.test(hash) ? hash : null;
+  const cachePath = validHash ? path.join(BG_CACHE_DIR, validHash) : null;
   if (cached) {
     if (!cachePath || !fs.existsSync(cachePath)) {
       throw new Error(`Missing cached asset for hash ${hash} — retry this job to re-upload it.`);
@@ -95,7 +108,11 @@ const { CAPTION_FONTS } = require(path.join(ROOT, "lib", "caption-presets.js"));
 let ffmpegAvailable = null; // null = not checked yet, else boolean
 function checkFfmpeg(cb) {
   if (ffmpegAvailable !== null) { cb(ffmpegAvailable); return; }
-  execFile("ffmpeg", ["-filters"], (err, stdout) => {
+  // A timeout, not just error handling — execFile's callback never fires at
+  // all if the child process hangs (e.g. a broken install stuck prompting
+  // for input), which would otherwise leave every route gated behind this
+  // check hanging indefinitely for that request.
+  execFile("ffmpeg", ["-filters"], { timeout: 5000 }, (err, stdout) => {
     ffmpegAvailable = !err && /drawtext/.test(stdout || "");
     cb(ffmpegAvailable);
   });
@@ -109,7 +126,7 @@ function checkFfmpeg(cb) {
 let whisperAvailable = null; // null = not checked yet, else boolean
 function checkWhisper(cb) {
   if (whisperAvailable !== null) { cb(whisperAvailable); return; }
-  execFile("whisper", ["--help"], (err, stdout) => {
+  execFile("whisper", ["--help"], { timeout: 5000 }, (err, stdout) => {
     whisperAvailable = !err && /word_timestamps/.test(stdout || "");
     cb(whisperAvailable);
   });
@@ -126,7 +143,9 @@ function checkWhisper(cb) {
 let pocketTtsAvailable = null; // null = not checked yet, else boolean
 function checkPocketTts(cb) {
   if (pocketTtsAvailable !== null) { cb(pocketTtsAvailable); return; }
-  execFile("uvx", ["pocket-tts", "--help"], (err, stdout) => {
+  // Longer timeout than checkFfmpeg/checkWhisper — uvx downloads/caches the
+  // package on first run, which genuinely takes a few real seconds.
+  execFile("uvx", ["pocket-tts", "--help"], { timeout: 20000 }, (err, stdout) => {
     pocketTtsAvailable = !err && /generate/.test(stdout || "");
     cb(pocketTtsAvailable);
   });
@@ -208,6 +227,31 @@ function closeProgressChannel(id) {
   if (res) { res.end(); progressChannels.delete(id); }
 }
 
+// Caps how much of a request body this server will buffer into memory
+// before giving up — this app legitimately deals in large video files, so
+// the limits are generous, not restrictive for real use; they exist so a
+// misbehaving/unbounded client stream can't grow the process's memory
+// without limit. Destroys the connection and responds 413 once exceeded,
+// rather than continuing to buffer.
+function readBodyWithLimit(req, res, maxBytes, cb) {
+  const chunks = [];
+  let total = 0;
+  let rejected = false;
+  req.on("data", (c) => {
+    if (rejected) return;
+    total += c.length;
+    if (total > maxBytes) {
+      rejected = true;
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Request body exceeds the ${maxBytes}-byte limit for this route` }));
+      req.destroy();
+      return;
+    }
+    chunks.push(c);
+  });
+  req.on("end", () => { if (!rejected) cb(Buffer.concat(chunks)); });
+}
+
 // ---------- binary request framing ----------
 // No multipart parser (zero dependencies) — a simple length-prefixed frame
 // instead: [4 bytes LE uint32: JSON metadata length][JSON metadata][bg
@@ -217,15 +261,37 @@ function closeProgressChannel(id) {
 // w/h/fps, bgW/bgH, musicVolume, titleCard timing). Mirrors web/app.js's
 // renderVideoNatively(), which builds this exact frame client-side.
 function parseRenderBody(body) {
+  if (body.length < 4) throw new Error("Body too short to contain a metadata length header");
   const metaLen = body.readUInt32LE(0);
+  if (4 + metaLen > body.length) throw new Error("Metadata length exceeds body size");
   const meta = JSON.parse(body.subarray(4, 4 + metaLen).toString("utf8"));
   let offset = 4 + metaLen;
+  // Buffer.subarray clamps out-of-range indices instead of throwing, so a
+  // mismatched *Len field would otherwise silently hand buildRenderArgs a
+  // truncated/empty segment instead of a clear error here — check the
+  // expected total length up front instead.
+  const expectedLen = offset + (meta.bgLen || 0) + (meta.audioLen || 0)
+    + (meta.hasMusic ? (meta.musicLen || 0) : 0)
+    + (meta.hasTitleCard ? (meta.titleCardImageLen || 0) : 0);
+  if (!Number.isFinite(expectedLen) || expectedLen > body.length) {
+    throw new Error("Segment lengths in metadata don't match the request body size");
+  }
   const bg = body.subarray(offset, offset + meta.bgLen); offset += meta.bgLen;
   const audio = body.subarray(offset, offset + meta.audioLen); offset += meta.audioLen;
   let music = null, titleCardImage = null;
   if (meta.hasMusic) { music = body.subarray(offset, offset + meta.musicLen); offset += meta.musicLen; }
   if (meta.hasTitleCard) { titleCardImage = body.subarray(offset, offset + meta.titleCardImageLen); offset += meta.titleCardImageLen; }
   return { meta, bg, audio, music, titleCardImage };
+}
+
+// `parseInt(x) || default` silently replaces a legitimate 0 (no stroke, no
+// shadow offset) with the fallback, since 0 is falsy — mirrors web/app.js's
+// numOr(), which the client already uses when building this same `style`
+// object, so a 0 the client correctly preserved doesn't get clobbered again
+// once it reaches this second, independent parse on the server side.
+function numOr(raw, parseFn, fallback) {
+  const n = parseFn(raw);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 // Builds the exact same filter-graph/args ffmpeg-worker.js constructs for
@@ -263,20 +329,20 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
   let { filterComplex: videoFC, outLabel: videoOutLabel } = buildDrawtextFilterChain({
     w: meta.w, h: meta.h, bgW: meta.bgW, bgH: meta.bgH,
     fontFile,
-    fontSize: parseInt(style.fontSize) || 68,
+    fontSize: numOr(style.fontSize, parseInt, 68),
     textColor: safeColor(style.textColor, "white"),
     strokeColor: safeColor(style.strokeColor, "black"),
-    strokeWidth: parseInt(style.strokeWidth) || 3,
-    positionY: parseFloat(style.positionY) || 0.55,
+    strokeWidth: numOr(style.strokeWidth, parseInt, 3),
+    positionY: numOr(style.positionY, parseFloat, 0.55),
     highlightColor: safeColor(style.highlightColor, "yellow"),
     box: !!style.box,
     boxColor: safeColor(style.boxColor, "black"),
-    boxAlpha: typeof style.boxAlpha === "number" ? style.boxAlpha : 0.5,
-    boxBorderW: parseInt(style.boxBorderW) || 16,
+    boxAlpha: numOr(style.boxAlpha, parseFloat, 0.5),
+    boxBorderW: numOr(style.boxBorderW, parseInt, 16),
     shadow: !!style.shadow,
     shadowColor: safeColor(style.shadowColor, "black"),
-    shadowX: parseInt(style.shadowX) || 2,
-    shadowY: parseInt(style.shadowY) || 2,
+    shadowX: numOr(style.shadowX, parseInt, 2),
+    shadowY: numOr(style.shadowY, parseInt, 2),
     entrance: ["none", "fade", "pop"].includes(style.entrance) ? style.entrance : "none",
     grouping,
     cues,
@@ -349,7 +415,7 @@ function parseProgressBlock(line, tick) {
   return { ...tick };
 }
 
-function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respond) {
+function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respond, respondFile) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-render-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   let args, expectedDurationSec, threads;
@@ -401,16 +467,15 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
       return;
     }
     sendProgress(renderId, { phase: "done", pct: 100 });
-    let data;
-    try {
-      data = fs.readFileSync(path.join(dir, "out.mp4"));
-    } catch (e) {
-      cleanup();
-      respond(500, { error: "Render finished but output was missing: " + e.message });
-      return;
-    }
-    cleanup();
-    respond(200, data, "video/mp4");
+    const outPath = path.join(dir, "out.mp4");
+    fs.stat(outPath, (statErr, stat) => {
+      if (statErr) {
+        cleanup();
+        respond(500, { error: "Render finished but output was missing: " + statErr.message });
+        return;
+      }
+      respondFile(200, outPath, stat.size, "video/mp4", cleanup);
+    });
   });
 }
 
@@ -546,6 +611,26 @@ function log(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  // A synchronous throw anywhere in this handler (e.g. decodeURIComponent()
+  // below on a malformed "%" sequence) would otherwise propagate out of
+  // http.createServer's callback uncaught and crash the entire process —
+  // confirmed live: `curl http://localhost:PORT/%` did exactly that before
+  // this wrap existed. Catches synchronous errors only; the async route
+  // handlers below (checkFfmpeg callbacks, req.on("end") handlers, etc.)
+  // already have their own error handling.
+  try {
+    handleRequest(req, res);
+  } catch (e) {
+    console.error("Unhandled request error:", e);
+    if (!res.headersSent) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Bad request" }));
+    } else {
+      res.end();
+    }
+  }
+});
+function handleRequest(req, res) {
   log(req, res);
 
   const urlNoQuery = req.url.split("?")[0];
@@ -564,13 +649,13 @@ const server = http.createServer((req, res) => {
   // installing ffmpeg-full without restarting the server) instead of
   // reporting a server-startup-time snapshot forever.
   if (urlNoQuery === "/system-info" && req.method === "GET") {
-    execFile("ffmpeg", ["-version"], (ferr, fstdout) => {
+    execFile("ffmpeg", ["-version"], { timeout: 5000 }, (ferr, fstdout) => {
       const ffmpegVersion = !ferr && fstdout ? fstdout.split("\n")[0].trim() : null;
-      execFile("ffmpeg", ["-filters"], (ferr2, fstdout2) => {
+      execFile("ffmpeg", ["-filters"], { timeout: 5000 }, (ferr2, fstdout2) => {
         const ffmpegAvailable = !ferr2 && /drawtext/.test(fstdout2 || "");
-        execFile("whisper", ["--help"], (werr, wstdout) => {
+        execFile("whisper", ["--help"], { timeout: 5000 }, (werr, wstdout) => {
           const whisperAvailable = !werr && /word_timestamps/.test(wstdout || "");
-          execFile("uvx", ["pocket-tts", "--help"], (perr, pstdout) => {
+          execFile("uvx", ["pocket-tts", "--help"], { timeout: 20000 }, (perr, pstdout) => {
             const pocketTtsAvail = !perr && /generate/.test(pstdout || "");
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
@@ -609,12 +694,10 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (urlNoQuery === "/performance-settings" && req.method === "POST") {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
+    readBodyWithLimit(req, res, 64 * 1024, (buf) => {
       let body;
       try {
-        body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        body = JSON.parse(buf.toString("utf8") || "{}");
       } catch (e) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Malformed JSON body" }));
@@ -633,7 +716,12 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (urlNoQuery.startsWith("/render-progress/") && req.method === "GET") {
-    const id = urlNoQuery.slice("/render-progress/".length);
+    // "render:" prefix keeps this channel map's keyspace separate from
+    // /transcribe-progress's — both ids are client-generated, so without a
+    // namespace a render id and a transcribe id colliding (unlikely, but
+    // possible depending on how the client generates them) would cross-wire
+    // one job's progress events into the other's SSE stream.
+    const id = "render:" + urlNoQuery.slice("/render-progress/".length);
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -651,18 +739,16 @@ const server = http.createServer((req, res) => {
   // and discarded without rewriting the file.
   if (urlNoQuery === "/cache-asset" && req.method === "POST") {
     const hash = new URL(req.url, "http://localhost").searchParams.get("hash") || "";
-    if (!/^[0-9a-f]{16,128}$/.test(hash)) {
+    if (!ASSET_HASH_RE.test(hash)) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Missing or malformed hash query param" }));
       return;
     }
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
+    readBodyWithLimit(req, res, 4 * 1024 * 1024 * 1024, (buf) => {
       const cachePath = path.join(BG_CACHE_DIR, hash);
       if (!fs.existsSync(cachePath)) {
         try {
-          fs.writeFileSync(cachePath, Buffer.concat(chunks));
+          fs.writeFileSync(cachePath, buf);
         } catch (e) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Failed to cache asset: " + e.message }));
@@ -675,17 +761,14 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (urlNoQuery === "/render" && req.method === "POST") {
-    const id = new URL(req.url, "http://localhost").searchParams.get("id") || crypto.randomUUID();
+    const id = "render:" + (new URL(req.url, "http://localhost").searchParams.get("id") || crypto.randomUUID());
     checkFfmpeg((available) => {
       if (!available) {
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "ffmpeg isn't installed (or not on PATH) — install it and restart the server." }));
         return;
       }
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", async () => {
-        const body = Buffer.concat(chunks);
+      readBodyWithLimit(req, res, 4 * 1024 * 1024 * 1024, async (body) => {
         let parsed;
         try {
           parsed = parseRenderBody(body);
@@ -696,9 +779,9 @@ const server = http.createServer((req, res) => {
         }
         sendProgress(id, { phase: "queued", activeRenders: renderLimiter.getActive(), renderSlots: renderLimiter.getMax() });
         await renderLimiter.acquire();
+        const finish = () => { renderLimiter.release(); closeProgressChannel(id); };
         const respond = (status, data, contentType) => {
-          renderLimiter.release();
-          closeProgressChannel(id);
+          finish();
           if (contentType) {
             res.writeHead(status, { "Content-Type": contentType, "Content-Length": data.length });
             res.end(data);
@@ -707,7 +790,25 @@ const server = http.createServer((req, res) => {
             res.end(JSON.stringify(data));
           }
         };
-        runNativeRender(id, parsed.meta, parsed.bg, parsed.audio, parsed.music, parsed.titleCardImage, respond);
+        // Streams the finished render straight off disk instead of
+        // fs.readFileSync-ing the whole (potentially several-hundred-MB)
+        // file into memory first — avoids doubling peak memory (one copy on
+        // disk, one in a Buffer) and blocking the event loop synchronously
+        // for the read.
+        const respondFile = (status, filePath, size, contentType, onDone) => {
+          // "error" and "close" can both fire for the same stream (close
+          // follows error once the fd is released) — guard so finish()
+          // (which releases the render slot) and onDone() (temp-dir
+          // cleanup) each run exactly once, not twice.
+          let settled = false;
+          const settle = () => { if (settled) return; settled = true; finish(); onDone(); };
+          res.writeHead(status, { "Content-Type": contentType, "Content-Length": size });
+          const stream = fs.createReadStream(filePath);
+          stream.on("error", () => { settle(); if (!res.writableEnded) res.end(); });
+          stream.on("close", settle);
+          stream.pipe(res);
+        };
+        runNativeRender(id, parsed.meta, parsed.bg, parsed.audio, parsed.music, parsed.titleCardImage, respond, respondFile);
       });
     });
     return;
@@ -722,7 +823,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (urlNoQuery.startsWith("/transcribe-progress/") && req.method === "GET") {
-    const id = urlNoQuery.slice("/transcribe-progress/".length);
+    const id = "transcribe:" + urlNoQuery.slice("/transcribe-progress/".length);
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -734,7 +835,7 @@ const server = http.createServer((req, res) => {
   }
   if (urlNoQuery === "/transcribe" && req.method === "POST") {
     const reqUrl = new URL(req.url, "http://localhost");
-    const id = reqUrl.searchParams.get("id") || crypto.randomUUID();
+    const id = "transcribe:" + (reqUrl.searchParams.get("id") || crypto.randomUUID());
     const requestedModel = reqUrl.searchParams.get("model");
     const model = WHISPER_MODELS.includes(requestedModel) ? requestedModel : "tiny.en";
     checkWhisper((available) => {
@@ -743,14 +844,11 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ error: "whisper isn't installed (or not on PATH)." }));
         return;
       }
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", async () => {
-        // No framing needed — the POST body is just the raw narration audio
-        // bytes. Unlike /render, whisper doesn't need the known script text
-        // (it transcribes freely); alignment against the known text happens
-        // client-side via alignWordsBySequence once this responds.
-        const audio = Buffer.concat(chunks);
+      // No framing needed — the POST body is just the raw narration audio
+      // bytes. Unlike /render, whisper doesn't need the known script text
+      // (it transcribes freely); alignment against the known text happens
+      // client-side via alignWordsBySequence once this responds.
+      readBodyWithLimit(req, res, 512 * 1024 * 1024, async (audio) => {
         await transcribeLimiter.acquire();
         const respond = (status, data) => {
           transcribeLimiter.release();
@@ -779,15 +877,13 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ error: "pocket-tts isn't available — install uv (https://docs.astral.sh/uv/) so `uvx pocket-tts` works, then restart the server." }));
         return;
       }
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", async () => {
-        // Plain small JSON body (unlike /render's binary frame) — the only
-        // payload is a string of narration text plus a language id, nothing
-        // binary to upload.
+      // Plain small JSON body (unlike /render's binary frame) — the only
+      // payload is a string of narration text plus a language id, nothing
+      // binary to upload.
+      readBodyWithLimit(req, res, 2 * 1024 * 1024, async (buf) => {
         let body;
         try {
-          body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+          body = JSON.parse(buf.toString("utf8") || "{}");
         } catch (e) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Malformed JSON body: " + e.message }));
@@ -818,9 +914,12 @@ const server = http.createServer((req, res) => {
 
   let urlPath = decodeURIComponent(urlNoQuery);
   if (urlPath === "/") urlPath = "/index.html";
-  // Prevent escaping ROOT via "..".
+  // Prevent escaping ROOT via "..". A bare startsWith(ROOT) has no separator
+  // boundary — a sibling directory sharing ROOT's name as a prefix (e.g. a
+  // hypothetical "web-something" next to "web") would incorrectly pass, so
+  // compare against ROOT with a trailing separator instead.
   const filePath = path.normalize(path.join(ROOT, urlPath));
-  if (!filePath.startsWith(ROOT)) {
+  if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -842,7 +941,7 @@ const server = http.createServer((req, res) => {
     });
     fs.createReadStream(filePath).pipe(res);
   });
-});
+}
 
 // Required (not just run as a CLI script) by electron/main.js to start the
 // same backend in-process for the standalone app — handle "something's

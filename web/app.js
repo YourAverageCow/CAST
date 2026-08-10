@@ -20,6 +20,10 @@ let previewActive = false;
 let previewRAF = null;
 let ttsAudio = null;
 let sidebarMusicFile = null; // background music for the sidebar's single-export flow
+// Tracked separately from job.resultUrl (which the result-card's Download/
+// Copy Link buttons keep needing after preview) — the debug tool's own
+// preview blob has no other owner, so each run revokes the previous one.
+let lastDebugPreviewUrl = null;
 
 // ---------- TTS & video engine state ----------
 // Piper/Kokoro voice lists and the TTS_ENGINES registry live in
@@ -389,7 +393,7 @@ function getModel() {
 function getApiKey() {
   const provider = getStoryProvider();
   const k = $("#apiKey").value.trim();
-  if (!k && provider.needsApiKey) { alert("Enter your API key in Settings first."); return null; }
+  if (!k && provider.needsApiKey) return null;
   return k;
 }
 
@@ -481,13 +485,19 @@ async function applyLoadedSettings() {
   if (!$("#storySystemPromptOverride").value.trim()) {
     $("#storySystemPromptOverride").value = DEFAULT_STORY_SYSTEM_PROMPT;
   }
-  populateModels();
-  await populateVoices(getEngine());
+  // loadSettings() above already ran populateModels() and restored `model`
+  // once its options existed — do NOT call populateModels()/populateVoices()
+  // again after this point without re-applying the saved value afterward;
+  // both rebuild their <select>'s options from scratch (innerHTML), which
+  // resets .value to the first option and silently wipes out a just-
+  // restored one. onEngineChangeUI() below already populates voices for the
+  // (already-restored) engine as a side effect, so that runs first and the
+  // voice restore happens after it, not before.
+  await onEngineChangeUI();
   if (savedData && savedData.voice) {
     const hasOption = [...$("#voice").options].some(o => o.value === savedData.voice);
     if (hasOption) { $("#voice").value = savedData.voice; $("#voiceQuick").value = savedData.voice; }
   }
-  onEngineChangeUI();
   initPerformanceUI(savedData);
   applyTheme($("#theme").value || "dark");
   syncColorSwatchDisplay("textColor");
@@ -727,11 +737,14 @@ async function init() {
   buildCaptionPresetButtons();
   const savedData = await applyLoadedSettings();
   buildPresetSelects();
-  // Save on any settings change
+  // Save on any settings change. A <select> reliably fires "change" (and,
+  // in every browser this app targets, "input" too) — registering both
+  // meant every dropdown change ran the full saveSettings() (stringify +
+  // localStorage.setItem) twice back-to-back for no benefit.
   for (const id of SETTINGS_FIELDS) {
     const el = document.getElementById(id);
-    if (el) el.addEventListener("input", saveSettings);
-    if (el && el.tagName === "SELECT") el.addEventListener("change", saveSettings);
+    if (!el) continue;
+    el.addEventListener(el.tagName === "SELECT" ? "change" : "input", saveSettings);
   }
   $("#renderConcurrency").addEventListener("input", () => {
     $("#renderConcurrencyValue").textContent = $("#renderConcurrency").value;
@@ -973,7 +986,11 @@ function getVoice() {
 async function streamChat(messages, onChunk) {
   const provider = getStoryProvider();
   const key = getApiKey();
-  if (key === null) return;
+  // Throw, don't silently return — every caller treats a resolved
+  // streamChat() as success (shows a "Story generated!"/etc. toast) even
+  // though onChunk was never called and the textarea it was writing into is
+  // still empty. Callers already wrap this in try/catch and alert(e.message).
+  if (key === null) throw new Error("Enter your API key in Settings first.");
   const { url, headers, body } = buildChatRequest(provider, {
     model: getModel(), messages, temperature: 0.9, apiKey: key, baseUrl: apiBase(),
   });
@@ -1399,7 +1416,12 @@ function updateCaptionPreviewBackground() {
 function stopPreview() {
   previewActive = false;
   if (previewRAF) { cancelAnimationFrame(previewRAF); previewRAF = null; }
-  if (ttsAudio) { ttsAudio.pause(); ttsAudio.currentTime = 0; ttsAudio = null; }
+  if (ttsAudio) {
+    ttsAudio.pause();
+    ttsAudio.currentTime = 0;
+    if (ttsAudio.src) URL.revokeObjectURL(ttsAudio.src);
+    ttsAudio = null;
+  }
   const vid = $("#videoPreview");
   vid.pause(); vid.currentTime = 0;
   $("#previewBtn").textContent = "Preview";
@@ -1815,7 +1837,10 @@ async function previewVoice(engineId, voice, btn) {
   if (!voice) { showToast("No voice selected."); return; }
   const config = getEngineConfig(engineId);
   if (engine.needsApiKey && !config) return; // getEngineConfig() already alerted
-  if (previewAudio) { previewAudio.pause(); previewAudio = null; }
+  // Revoking only ever happened on the "ended" event — interrupting a still-
+  // playing preview (clicking Preview again before it finished) dropped the
+  // reference without ever revoking that blob URL.
+  if (previewAudio) { previewAudio.pause(); if (previewAudio.src) URL.revokeObjectURL(previewAudio.src); previewAudio = null; }
   const originalLabel = btn ? btn.innerHTML : null;
   if (btn) { btn.disabled = true; btn.textContent = "..."; }
   try {
@@ -1871,7 +1896,7 @@ async function startPreview() {
     updateCaptionStyle();
     const vid = $("#videoPreview");
     vid.currentTime = 0; vid.muted = true; vid.loop = true;
-    if (ttsAudio) { ttsAudio.pause(); ttsAudio.remove(); }
+    if (ttsAudio) { ttsAudio.pause(); if (ttsAudio.src) URL.revokeObjectURL(ttsAudio.src); ttsAudio.remove(); }
     ttsAudio = new Audio(audioUrl);
     ttsAudio.addEventListener("ended", () => stopPreview());
     ttsAudio.addEventListener("pause", () => { vid.pause(); $("#captionOverlay").classList.remove("show"); });
@@ -1898,6 +1923,20 @@ let ffmpegPool = null;
 let ffmpegPoolReady = null;
 let ffmpegPoolSize = 0;
 
+// Fetched once for the whole session, not once per ensureFFmpeg() call —
+// each PoolWorker.ensureReady() already slices its own transferable copy
+// out of these buffers (see worker-pool.js), so the originals here are
+// never detached and stay safe to reuse across multiple pool (re)creations.
+let captionFontsPromise = null;
+function fetchCaptionFonts() {
+  if (!captionFontsPromise) {
+    captionFontsPromise = Promise.all(CAPTION_FONTS.map(async (f) => ({
+      file: f.file, buf: await (await fetch(BASE + "vendor/fonts/" + f.file)).arrayBuffer(),
+    }))).catch((e) => { captionFontsPromise = null; throw e; }); // allow a retry on transient failure
+  }
+  return captionFontsPromise;
+}
+
 function ensureFFmpeg(poolSize) {
   poolSize = poolSize || 1;
   if (ffmpegPool && ffmpegPoolSize >= poolSize) return ffmpegPoolReady;
@@ -1916,9 +1955,11 @@ function ensureFFmpeg(poolSize) {
     // (there's no OS font store inside the WASM sandbox) — ship every
     // vendored caption font once here so each worker has all of them in its
     // virtual FS and can render whichever one a job actually selects.
-    const fonts = await Promise.all(CAPTION_FONTS.map(async (f) => ({
-      file: f.file, buf: await (await fetch(BASE + "vendor/fonts/" + f.file)).arrayBuffer(),
-    })));
+    // Cached at module scope (see fetchCaptionFonts) since ensureFFmpeg()
+    // can run more than once per session — raising batch parallelism mid-
+    // session grows the pool, which used to re-fetch every font file from
+    // scratch each time instead of reusing the first fetch's bytes.
+    const fonts = await fetchCaptionFonts();
     ffmpegPool = new FFmpegWorkerPool(poolSize, base, fonts);
     try {
       let readyCount = 0;
@@ -2051,6 +2092,45 @@ async function transcribeNatively(audioBlob) {
   }
 }
 
+// `parseInt(x) || default` / `parseFloat(x) || default` silently replace a
+// legitimate 0 (no stroke, no shadow offset, top-of-frame positionY) with
+// the fallback, since 0 is falsy — Number.isFinite() correctly distinguishes
+// "parsed to a real 0" from "didn't parse" (NaN). Used for every numeric
+// caption-style field below and in runJob()/runDebugTestRender()'s style
+// blocks, which have the same pattern.
+function numOr(raw, parseFn, fallback) {
+  const n = parseFn(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Builds the caption `style` payload sent to the render backend (native or
+// WASM) — shared by runJob() and runDebugTestRender(), which previously
+// each hand-rolled an identical ~15-line copy of this object (one reading
+// from a resolved per-job `settings`, the other from the raw
+// `globalSettings` snapshot — same field names either way).
+function buildCaptionStyle(settings, captionFont, grouping) {
+  return {
+    fontFile: captionFont.file,
+    fontSize: numOr(settings.fontSize, parseInt, 68),
+    textColor: settings.textColor,
+    strokeColor: settings.strokeColor,
+    strokeWidth: numOr(settings.strokeWidth, parseInt, 3),
+    positionY: numOr(settings.positionY, parseFloat, 0.55),
+    captionGrouping: grouping,
+    uppercase: !!settings.captionUppercase,
+    highlightColor: settings.highlightColor || "yellow",
+    box: !!settings.captionBox,
+    boxColor: settings.boxColor || "black",
+    boxAlpha: numOr(settings.boxAlpha, parseFloat, 0.5),
+    boxBorderW: numOr(settings.boxBorderW, parseInt, 16),
+    shadow: !!settings.captionShadow,
+    shadowColor: settings.shadowColor || "black",
+    shadowX: numOr(settings.shadowX, parseInt, 2),
+    shadowY: numOr(settings.shadowY, parseInt, 2),
+    entrance: settings.captionEntrance || "none",
+  };
+}
+
 // Snapshot of the global settings panel, in the same shape resolveJobSettings
 // (lib/job-model.js) expects — the fallback values a job's own overrides
 // are merged on top of.
@@ -2061,22 +2141,22 @@ function getGlobalSettings() {
     resH: parseInt($("#resH").value) || 1920,
     fps: parseInt($("#fps").value) || 30,
     font: $("#font").value,
-    fontSize: parseInt($("#fontSize").value) || 68,
-    positionY: parseFloat($("#positionY").value) || 0.55,
+    fontSize: numOr($("#fontSize").value, parseInt, 68),
+    positionY: numOr($("#positionY").value, parseFloat, 0.55),
     textColor: $("#textColor").value,
     strokeColor: $("#strokeColor").value,
-    strokeWidth: parseInt($("#strokeWidth").value) || 3,
+    strokeWidth: numOr($("#strokeWidth").value, parseInt, 3),
     captionPreset: $("#captionPreset").value || "word",
     captionUppercase: $("#captionUppercase").checked,
     highlightColor: $("#highlightColor").value || "yellow",
     captionBox: $("#captionBox").checked,
     boxColor: $("#boxColor").value || "black",
-    boxAlpha: parseFloat($("#boxAlpha").value) || 0.5,
-    boxBorderW: parseInt($("#boxBorderW").value) || 16,
+    boxAlpha: numOr($("#boxAlpha").value, parseFloat, 0.5),
+    boxBorderW: numOr($("#boxBorderW").value, parseInt, 16),
     captionShadow: $("#captionShadow").checked,
     shadowColor: $("#shadowColor").value || "black",
-    shadowX: parseInt($("#shadowX").value) || 2,
-    shadowY: parseInt($("#shadowY").value) || 2,
+    shadowX: numOr($("#shadowX").value, parseInt, 2),
+    shadowY: numOr($("#shadowY").value, parseInt, 2),
     captionEntrance: $("#captionEntrance").value || "none",
     channelName: $("#channelName").value.trim() || "Anonymous",
     ttsEngine: getEngine(),
@@ -2098,7 +2178,11 @@ function getEngineConfig(engineId) {
     if (!key) { alert("Enter an ElevenLabs API key in Settings → Narration Voice first."); return null; }
     return {
       apiKey: key, modelId: $("#elevenlabsModel").value || "eleven_multilingual_v2",
-      stability: parseFloat($("#elevenlabsStability").value), similarityBoost: parseFloat($("#elevenlabsSimilarity").value),
+      // Every sibling numeric field in this function falls back on a parse
+      // failure — these two didn't, so a cleared/empty slider input sent a
+      // literal NaN straight into the ElevenLabs request body.
+      stability: numOr($("#elevenlabsStability").value, parseFloat, 0.5),
+      similarityBoost: numOr($("#elevenlabsSimilarity").value, parseFloat, 0.75),
     };
   }
   // Piper's speed is read directly from #piperSpeed by ensurePiper()'s
@@ -2153,6 +2237,18 @@ async function onEngineChangeUI() {
 // story count), every job holds the exact same File reference, so this
 // avoids re-reading/re-decoding identical bytes once per job.
 const bgBufferCache = new WeakMap(); // File -> Promise<Uint8Array>
+// Same memoization for music — a "same music for all" bulk batch shares one
+// File the same way background videos do, but this had no equivalent cache
+// before, so every job re-decoded the identical music bytes from scratch.
+const musicBufferCache = new WeakMap(); // File -> Promise<Uint8Array>
+function readMusicFileBytes(file) {
+  let p = musicBufferCache.get(file);
+  if (!p) {
+    p = file.arrayBuffer().then(b => new Uint8Array(b));
+    musicBufferCache.set(file, p);
+  }
+  return p;
+}
 function readBgFileBytes(file) {
   let p = bgBufferCache.get(file);
   if (!p) {
@@ -2170,6 +2266,22 @@ function readBgFileBytes(file) {
 async function hashAssetBytes(bytes) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// File -> Promise<string> (SHA-256 hex). readBgFileBytes above already
+// memoizes the *decode* of a shared File across a batch — this does the
+// same for the hash computed from those bytes, since hashAssetBytes() takes
+// raw bytes (not a File) and has no memoization of its own. Without this, a
+// 100MB background shared across a 20-job batch re-hashed the full buffer
+// once per job instead of once total.
+const assetHashCache = new WeakMap();
+function hashFileBytesCached(file, bytes) {
+  let p = assetHashCache.get(file);
+  if (!p) {
+    p = hashAssetBytes(bytes);
+    assetHashCache.set(file, p);
+  }
+  return p;
 }
 
 // One upload attempt per hash, ever, for the life of the page session —
@@ -2332,7 +2444,7 @@ async function runJob(job, globalSettings, onUpdate) {
 
     let musicPayload = null;
     if (job.musicFile) {
-      musicPayload = new Uint8Array(await job.musicFile.arrayBuffer());
+      musicPayload = await readMusicFileBytes(job.musicFile);
     }
 
     update({ status: "render", progressPct: 30, progressLabel: "Rendering..." });
@@ -2340,6 +2452,10 @@ async function runJob(job, globalSettings, onUpdate) {
       readBgFileBytes(bgFile),
       fetch(audioUrl).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
     ]);
+    // Bytes are now in audioData — the blob URL served its purpose and
+    // would otherwise sit pinned in memory for the rest of the page's
+    // session (every job in a batch leaked one of these).
+    URL.revokeObjectURL(audioUrl);
 
     // Content-hash dedup (native only — see hashAssetBytes/ensureAssetCached
     // above): when a batch shares a background/music file across jobs, only
@@ -2351,36 +2467,28 @@ async function runJob(job, globalSettings, onUpdate) {
     // omits the raw bytes — no "am I the first uploader" branching needed.
     let bgHash = null, bgCached = false, musicHash = null, musicCached = false;
     if (nativeRenderAvailable) {
-      bgHash = await hashAssetBytes(bg);
-      await ensureAssetCached(bgHash, bg);
-      bgCached = true;
-      if (musicPayload) {
-        musicHash = await hashAssetBytes(musicPayload);
-        await ensureAssetCached(musicHash, musicPayload);
-        musicCached = true;
-      }
+      // Independent assets (different hashes, different upload requests) —
+      // run their hash+cache round trips concurrently instead of the
+      // background finishing entirely before the music one even starts.
+      const [bgResult, musicResult] = await Promise.all([
+        (async () => {
+          const hash = await hashFileBytesCached(bgFile, bg);
+          await ensureAssetCached(hash, bg);
+          return hash;
+        })(),
+        musicPayload
+          ? (async () => {
+              const hash = await hashFileBytesCached(job.musicFile, musicPayload);
+              await ensureAssetCached(hash, musicPayload);
+              return hash;
+            })()
+          : Promise.resolve(null),
+      ]);
+      bgHash = bgResult; bgCached = true;
+      if (musicResult) { musicHash = musicResult; musicCached = true; }
     }
 
-    const style = {
-      fontFile: captionFont.file,
-      fontSize: parseInt(settings.fontSize) || 68,
-      textColor: settings.textColor,
-      strokeColor: settings.strokeColor,
-      strokeWidth: parseInt(settings.strokeWidth) || 3,
-      positionY: parseFloat(settings.positionY) || 0.55,
-      captionGrouping: grouping,
-      uppercase: !!settings.captionUppercase,
-      highlightColor: settings.highlightColor || "yellow",
-      box: !!settings.captionBox,
-      boxColor: settings.boxColor || "black",
-      boxAlpha: typeof settings.boxAlpha === "number" ? settings.boxAlpha : 0.5,
-      boxBorderW: parseInt(settings.boxBorderW) || 16,
-      shadow: !!settings.captionShadow,
-      shadowColor: settings.shadowColor || "black",
-      shadowX: parseInt(settings.shadowX) || 2,
-      shadowY: parseInt(settings.shadowY) || 2,
-      entrance: settings.captionEntrance || "none",
-    };
+    const style = buildCaptionStyle(settings, captionFont, grouping);
     // Lets the worker skip the scale/crop filter entirely when the
     // background is already at the export resolution.
     const { w: bgW, h: bgH } = await probeVideoDimensions(bgFile);
@@ -2392,10 +2500,13 @@ async function runJob(job, globalSettings, onUpdate) {
       music: musicPayload, musicVolume: job.musicVolume,
       titleCard: titleCardPayload,
       bgHash, bgCached, musicHash, musicCached,
-      crf: CRF_BY_QUALITY[globalSettings.encodingQuality] || undefined,
+      // CRF 0 (lossless) is a legitimate value in principle — `|| undefined`
+      // would silently drop it if a future quality preset ever used it, the
+      // same falsy-zero trap as the caption-style fields above.
+      crf: CRF_BY_QUALITY[globalSettings.encodingQuality],
     }, (data) => update(describeRenderProgress(data)));
 
-    const blob = new Blob([outBytes.buffer], { type: "video/mp4" });
+    const blob = new Blob([outBytes], { type: "video/mp4" });
     if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
     job.resultBlob = blob;
     update({ status: "done", progressPct: 100, progressLabel: "Done", resultUrl: URL.createObjectURL(blob) });
@@ -3112,26 +3223,8 @@ async function runDebugTestRender() {
     const audio = audioUrl
       ? new Uint8Array(await (await fetch(audioUrl)).arrayBuffer())
       : makeSilentWavBytes(narrationSec);
-    const style = {
-      fontFile: captionFont.file,
-      fontSize: parseInt(globalSettings.fontSize) || 68,
-      textColor: globalSettings.textColor,
-      strokeColor: globalSettings.strokeColor,
-      strokeWidth: parseInt(globalSettings.strokeWidth) || 3,
-      positionY: parseFloat(globalSettings.positionY) || 0.55,
-      captionGrouping: grouping,
-      uppercase: !!globalSettings.captionUppercase,
-      highlightColor: globalSettings.highlightColor || "yellow",
-      box: !!globalSettings.captionBox,
-      boxColor: globalSettings.boxColor || "black",
-      boxAlpha: typeof globalSettings.boxAlpha === "number" ? globalSettings.boxAlpha : 0.5,
-      boxBorderW: parseInt(globalSettings.boxBorderW) || 16,
-      shadow: !!globalSettings.captionShadow,
-      shadowColor: globalSettings.shadowColor || "black",
-      shadowX: parseInt(globalSettings.shadowX) || 2,
-      shadowY: parseInt(globalSettings.shadowY) || 2,
-      entrance: globalSettings.captionEntrance || "none",
-    };
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    const style = buildCaptionStyle(globalSettings, captionFont, grouping);
 
     const outBytes = await renderVideoInWorker({
       type: "render",
@@ -3141,7 +3234,9 @@ async function runDebugTestRender() {
       titleCard: titleCardPayload,
     }, (data) => { statusEl.textContent = `Rendering test clip... ${(data && data.pct != null) ? data.pct : data}%`; });
 
-    const url = URL.createObjectURL(new Blob([outBytes.buffer], { type: "video/mp4" }));
+    if (lastDebugPreviewUrl) URL.revokeObjectURL(lastDebugPreviewUrl);
+    const url = URL.createObjectURL(new Blob([outBytes], { type: "video/mp4" }));
+    lastDebugPreviewUrl = url;
     previewExported(url);
     statusEl.textContent = "Done — captions" + (titleCardPayload ? " + title card" : "") + " above.";
   } catch (e) {
@@ -3162,17 +3257,25 @@ async function runDebugTestRender() {
 const MEDIA_LIBRARY_DB_NAME = "slopdaddy-media-library";
 const MEDIA_LIBRARY_STORE = "items";
 let mediaLibraryDB = null;
+// Caches the in-flight open promise itself, not just the resolved db —
+// without this, every caller that lands before the first open() finishes
+// (e.g. a bulk batch's N concurrent jobs, each calling getMediaLibraryFile)
+// fired its own fresh indexedDB.open(), leaving several redundant
+// connections open simultaneously instead of sharing the one in progress.
+let mediaLibraryDBPromise = null;
 function openMediaLibraryDB() {
   if (mediaLibraryDB) return Promise.resolve(mediaLibraryDB);
-  return new Promise((resolve, reject) => {
+  if (mediaLibraryDBPromise) return mediaLibraryDBPromise;
+  mediaLibraryDBPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(MEDIA_LIBRARY_DB_NAME, 1);
     req.onupgradeneeded = () => {
       const store = req.result.createObjectStore(MEDIA_LIBRARY_STORE, { keyPath: "id" });
       store.createIndex("kind", "kind", { unique: false });
     };
     req.onsuccess = () => { mediaLibraryDB = req.result; resolve(mediaLibraryDB); };
-    req.onerror = () => reject(req.error);
+    req.onerror = () => { mediaLibraryDBPromise = null; reject(req.error); };
   });
+  return mediaLibraryDBPromise;
 }
 
 // Cache of metadata (no blobs, to keep this light) so bulk-generate's random
@@ -3233,6 +3336,7 @@ async function deleteMediaLibraryItem(id) {
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
   });
+  mediaLibraryThumbCache.delete(id);
   await refreshMediaLibraryCache();
 }
 
@@ -3258,6 +3362,11 @@ let mediaLibraryPickerMax = 0;
 let mediaLibraryPickerOnConfirm = null;
 let mediaLibraryPickerSelection = [];
 const mediaLibraryThumbCache = new Map(); // itemId -> data URL, session-lived
+// Ids currently mid-hydration — without this, re-rendering the list (every
+// click in the numbered picker calls renderMediaLibraryList()) before an
+// earlier IndexedDB-read + video-decode round trip resolves kicked off a
+// brand-new, fully redundant one for the same still-uncached item.
+const mediaLibraryThumbPending = new Set();
 
 function openMediaLibrary(onPick, kind) {
   mediaLibraryPickCallback = onPick || null;
@@ -3372,7 +3481,8 @@ function mediaLibraryTileMarkup(item, extraSlotHtml, selected) {
 // markup (`.media-library-item`/`-kind` vs. `.media-library-tile`/`-icon`).
 function hydrateMediaLibraryThumbnails(container, items, tileSelector, iconSelector, thumbClass) {
   for (const item of items) {
-    if (item.kind !== "video" || mediaLibraryThumbCache.has(item.id)) continue;
+    if (item.kind !== "video" || mediaLibraryThumbCache.has(item.id) || mediaLibraryThumbPending.has(item.id)) continue;
+    mediaLibraryThumbPending.add(item.id);
     getMediaLibraryFile(item.id)
       .then(file => file && generateVideoThumbnail(file))
       .then(dataUrl => {
@@ -3387,7 +3497,8 @@ function hydrateMediaLibraryThumbnails(container, items, tileSelector, iconSelec
           icon.replaceWith(img);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => mediaLibraryThumbPending.delete(item.id));
   }
 }
 
@@ -3479,7 +3590,13 @@ function generateVideoThumbnail(file) {
     video.muted = true;
     video.playsInline = true;
     const url = URL.createObjectURL(file);
+    let settled = false;
     const cleanup = () => URL.revokeObjectURL(url);
+    const settle = (value) => { if (settled) return; settled = true; clearTimeout(timer); cleanup(); resolve(value); };
+    // A corrupt file or an unfired loadedmetadata (browser codec quirk)
+    // never reaches "seeked" or "error" — without a timeout this hangs
+    // forever, permanently holding the object URL open.
+    const timer = setTimeout(() => settle(null), 8000);
     video.addEventListener("loadedmetadata", () => {
       video.currentTime = Math.min(0.3, (video.duration || 1) / 2);
     });
@@ -3496,14 +3613,12 @@ function generateVideoThumbnail(file) {
         const scale = Math.max(canvas.width / vw, canvas.height / vh);
         const dw = vw * scale, dh = vh * scale;
         ctx.drawImage(video, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
-        resolve(canvas.toDataURL("image/jpeg", 0.7));
+        settle(canvas.toDataURL("image/jpeg", 0.7));
       } catch (e) {
-        resolve(null);
-      } finally {
-        cleanup();
+        settle(null);
       }
     });
-    video.addEventListener("error", () => { cleanup(); resolve(null); });
+    video.addEventListener("error", () => settle(null));
     video.src = url;
   });
 }
@@ -4143,6 +4258,17 @@ async function bulkGenerateBatch() {
   } catch (e) {
     console.error(e);
     alert("Couldn't start the render backend: " + (e && e.message ? e.message : String(e)));
+    // openBatchProgressPanel() above already started its 500ms stats
+    // interval and every job is still sitting at status "story" — without
+    // marking them as failed here, doneCount never reaches totalJobs, so
+    // updateBatchProgressStats() never clears that interval and it ticks
+    // forever showing a bogus "Estimating..." ETA for a batch that never
+    // actually started.
+    for (const { job } of jobs) {
+      job.status = "error"; job.error = "Render backend failed to start.";
+      renderResultCard(job, grid);
+    }
+    updateBatchProgressStats();
     btn.disabled = false;
     return;
   }
@@ -4333,6 +4459,17 @@ async function renderAllBatch() {
   } catch (e) {
     console.error(e);
     alert("Batch failed to start: " + (e && e.message ? e.message : String(e)));
+    // Same interval-leak risk as bulkGenerateBatch's equivalent catch: any
+    // job still sitting at "draft" here never reaches "done"/"error" on its
+    // own, so openBatchProgressPanel's 500ms stats interval (started above)
+    // would otherwise never see doneCount reach totalJobs and tick forever.
+    for (const j of jobsToRun) {
+      if (j.status !== "done" && j.status !== "error") {
+        j.status = "error"; j.error = "Render backend failed to start.";
+        renderResultCard(j, grid);
+        renderResultCard(j, progressGrid);
+      }
+    }
   }
   updateBatchProgressStats();
 

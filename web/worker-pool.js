@@ -20,6 +20,11 @@
 // worker is forced onto the single-thread core instead (`forceST`).
 
 const RENDER_STALL_TIMEOUT_MS = 45000;
+// Guards ensureReady()'s handshake specifically — without this, a hung
+// worker load (e.g. a stalled fetch of the ffmpeg-core wasm/js over a flaky
+// connection) leaves every submit()/warmUp() call awaiting readiness
+// blocked forever with no user-visible error at all.
+const WORKER_READY_TIMEOUT_MS = 60000;
 
 class PoolWorker {
   constructor(base, fonts, forceST) {
@@ -54,6 +59,16 @@ class PoolWorker {
       { type: "ready", base: this.base, fonts: fontsCopy, forceST: this.forceST },
       fontsCopy.map(f => f.buf)
     );
+    clearTimeout(this._readyTimer);
+    this._readyTimer = setTimeout(() => {
+      if (!this._readyReject) return;
+      const reject = this._readyReject;
+      this._readyResolve = null; this._readyReject = null;
+      this._readyPromise = null;
+      reject(new Error(
+        "Video worker took too long to load — try again, or check your connection if this is the first render this session."
+      ));
+    }, WORKER_READY_TIMEOUT_MS);
     return this._readyPromise;
   }
 
@@ -114,6 +129,7 @@ class PoolWorker {
     const msg = e.data;
     if (msg.type === "ready") {
       this.usingMT = !!msg.mt;
+      clearTimeout(this._readyTimer);
       if (this._readyResolve) { this._readyResolve(); this._readyResolve = null; this._readyReject = null; }
     } else if (msg.type === "progress") {
       if (this._pending) {
@@ -127,7 +143,11 @@ class PoolWorker {
       this._settle(null, new Blob([msg.data], { type: "video/mp4" }));
     } else if (msg.type === "error") {
       clearTimeout(this._stallTimer);
-      if (this._readyReject) { this._readyReject(new Error(msg.message)); this._readyResolve = null; this._readyReject = null; return; }
+      if (this._readyReject) {
+        clearTimeout(this._readyTimer);
+        this._readyReject(new Error(msg.message)); this._readyResolve = null; this._readyReject = null;
+        return;
+      }
       this._settle(new Error(msg.message), null);
     }
   }
@@ -140,6 +160,12 @@ class PoolWorker {
   }
 
   _handleFatalError(e) {
+    // Without clearing these, a still-armed timer from the job that just
+    // failed fires later against whatever new job this pool slot picks up
+    // next — silently terminating/replacing a worker that's mid-render for
+    // a completely different job.
+    clearTimeout(this._stallTimer);
+    clearTimeout(this._readyTimer);
     const pending = this._pending;
     this._pending = null;
     const readyReject = this._readyReject;
@@ -206,7 +232,7 @@ class FFmpegWorkerPool {
         return Promise.resolve(worker);
       }
     }
-    return new Promise((resolve) => this._waiters.push(resolve));
+    return new Promise((resolve, reject) => this._waiters.push({ resolve, reject }));
   }
 
   _release(worker) {
@@ -214,7 +240,7 @@ class FFmpegWorkerPool {
     const next = this._waiters.shift();
     if (next) {
       worker.busy = true;
-      next(worker);
+      next.resolve(worker);
     }
   }
 
@@ -225,9 +251,21 @@ class FFmpegWorkerPool {
   // in the background.
   destroy() {
     for (const worker of this._slots) {
-      if (worker && worker._worker) worker._worker.terminate();
+      if (!worker) continue;
+      // Each worker's stall/ready timers would otherwise still be armed —
+      // firing later against a Worker that's already been terminated (or,
+      // worse, spawning a brand-new orphaned Worker that nothing ever
+      // references again).
+      clearTimeout(worker._stallTimer);
+      clearTimeout(worker._readyTimer);
+      if (worker._worker) worker._worker.terminate();
     }
     this._slots = [];
+    // Any submit() call currently queued waiting for a free slot would
+    // otherwise hang forever with no rejection — its await never settles.
+    for (const waiter of this._waiters) {
+      waiter.reject(new Error("Worker pool was destroyed while a render was still queued."));
+    }
     this._waiters = [];
   }
 }

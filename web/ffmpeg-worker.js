@@ -88,12 +88,22 @@ function safeUnlink(name) {
 // building live in lib/ffmpeg-filters.js (pure, no ffmpeg.FS dependency,
 // unit-tested in web/lib/*.test.js) — this is just the thin FS-writing
 // wrapper around it.
+// `parseInt(x) || default` silently replaces a legitimate 0 (no stroke, no
+// shadow offset) with the fallback, since 0 is falsy — mirrors web/app.js's
+// numOr()/server.js's numOr(), the equivalent fix for the same style object
+// on the other two backends (native render, and where the client itself
+// first builds this object).
+function numOr(raw, parseFn, fallback) {
+  const n = parseFn(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function buildCaptionFilter(subs, karaokeGroups, style, w, h, bgW, bgH) {
-  const fontSize = parseInt(style.fontSize) || 68;
+  const fontSize = numOr(style.fontSize, parseInt, 68);
   const textColor = safeColor(style.textColor, "white");
   const strokeColor = safeColor(style.strokeColor, "black");
-  const strokeWidth = Math.max(0, Math.min(10, parseInt(style.strokeWidth) || 3));
-  const positionY = Math.max(0.05, Math.min(0.95, parseFloat(style.positionY) || 0.55));
+  const strokeWidth = Math.max(0, Math.min(10, numOr(style.strokeWidth, parseInt, 3)));
+  const positionY = Math.max(0.05, Math.min(0.95, numOr(style.positionY, parseFloat, 0.55)));
   const grouping = style.captionGrouping || "phrase";
 
   const cues = grouping === "karaoke"
@@ -110,10 +120,10 @@ function buildCaptionFilter(subs, karaokeGroups, style, w, h, bgW, bgH) {
     fontSize, textColor, strokeColor, strokeWidth, positionY,
     highlightColor: safeColor(style.highlightColor, "yellow"),
     box: !!style.box, boxColor: safeColor(style.boxColor, "black"),
-    boxAlpha: typeof style.boxAlpha === "number" ? style.boxAlpha : 0.5,
-    boxBorderW: parseInt(style.boxBorderW) || 16,
+    boxAlpha: numOr(style.boxAlpha, parseFloat, 0.5),
+    boxBorderW: numOr(style.boxBorderW, parseInt, 16),
     shadow: !!style.shadow, shadowColor: safeColor(style.shadowColor, "black"),
-    shadowX: parseInt(style.shadowX) || 2, shadowY: parseInt(style.shadowY) || 2,
+    shadowX: numOr(style.shadowX, parseInt, 2), shadowY: numOr(style.shadowY, parseInt, 2),
     entrance: ["none", "fade", "pop"].includes(style.entrance) ? style.entrance : "none",
     grouping, cues,
   });
