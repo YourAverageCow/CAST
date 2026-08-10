@@ -433,7 +433,7 @@ const SETTINGS_FIELDS = [
   "elevenlabsModel", "elevenlabsStability", "elevenlabsSimilarity",
   "browserSpeechRate", "browserSpeechPitch",
   "enableBrowserAsr", "whisperModel",
-  "renderConcurrency", "transcribeConcurrency",
+  "renderConcurrency", "transcribeConcurrency", "renderBackendPref",
   "theme", "outputFolder",
 ];
 function saveSettings() {
@@ -498,7 +498,7 @@ async function applyLoadedSettings() {
     const hasOption = [...$("#voice").options].some(o => o.value === savedData.voice);
     if (hasOption) { $("#voice").value = savedData.voice; $("#voiceQuick").value = savedData.voice; }
   }
-  initPerformanceUI(savedData);
+  initPerformanceUI();
   applyTheme($("#theme").value || "dark");
   syncColorSwatchDisplay("textColor");
   syncColorSwatchDisplay("strokeColor");
@@ -596,6 +596,17 @@ function buildFontSelect() {
 // the deployed GitHub Pages build (no server there to answer), which is
 // exactly what makes the WASM fallback below automatic with no extra logic.
 let nativeRenderAvailable = false;
+// Whether native rendering actually gets USED, as opposed to whether it's
+// merely available — Settings -> Performance's "Render backend" control
+// lets the user force the browser (WASM) engine even when native ffmpeg is
+// available (e.g. to compare output, or work around a native-specific
+// issue), overriding the otherwise-automatic native-when-available choice.
+// Every render-path decision point should call this, not read
+// nativeRenderAvailable directly.
+function useNativeRender() {
+  const el = document.getElementById("renderBackendPref");
+  return nativeRenderAvailable && (!el || el.value !== "wasm");
+}
 // Populated alongside nativeRenderAvailable by probeNativeRenderBackend()'s
 // /render-capability response — used to size the Performance setting's range
 // (Settings -> Performance) without duplicating os.cpus().length client-side.
@@ -603,7 +614,12 @@ let nativeCpuCount = 1;
 async function probeNativeRenderBackend() {
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 1500);
+    // Must outlast server.js's own checkFfmpeg timeout (5s) — a shorter
+    // client-side abort here raced against a slow cold-start `ffmpeg
+    // -filters` exec and could report native rendering unavailable (hiding
+    // the whole Settings -> Performance section) even though the server
+    // would have answered a couple seconds later.
+    const t = setTimeout(() => ctrl.abort(), 6000);
     const resp = await fetch("/render-capability", { signal: ctrl.signal });
     clearTimeout(t);
     if (!resp.ok) return false;
@@ -619,20 +635,19 @@ async function probeNativeRenderBackend() {
 // render backend is available — the WASM fallback's concurrency is governed
 // separately by #batchParallelism (see initBatchUI). Called once from init()
 // after the native probe resolves, and again on the slider's own input.
-function initPerformanceUI(savedData) {
+function initPerformanceUI() {
   const section = $("#performanceSection");
   if (!nativeRenderAvailable) { section.style.display = "none"; return; }
   section.style.display = "";
   const slider = $("#renderConcurrency");
   slider.max = String(nativeCpuCount);
   $("#renderConcurrencyMax").textContent = String(nativeCpuCount);
-  // Default to every core unless the user has explicitly saved a value
-  // before (loadSettings already restored slider.value from localStorage in
-  // that case) — clamp either way in case a saved value exceeds this
-  // machine's core count (e.g. settings synced from another machine).
-  const hasSaved = savedData && savedData.renderConcurrency !== undefined;
-  const current = hasSaved ? parseInt(slider.value, 10) : nativeCpuCount;
-  slider.value = String(Math.max(1, Math.min(nativeCpuCount, current || nativeCpuCount)));
+  // Always defaults to every core on load — a previously-saved lower value
+  // used to "stick" forever once set (including from a stray test/debug
+  // session), which is the opposite of the intended default; "dial back"
+  // is meant to be a deliberate in-session choice, not a silently
+  // remembered one.
+  slider.value = String(nativeCpuCount);
   $("#renderConcurrencyValue").textContent = slider.value;
   postPerformanceSettings();
 
@@ -643,9 +658,7 @@ function initPerformanceUI(savedData) {
     const tSlider = $("#transcribeConcurrency");
     tSlider.max = String(nativeCpuCount);
     $("#transcribeConcurrencyMax").textContent = String(nativeCpuCount);
-    const tHasSaved = savedData && savedData.transcribeConcurrency !== undefined;
-    const tCurrent = tHasSaved ? parseInt(tSlider.value, 10) : nativeCpuCount;
-    tSlider.value = String(Math.max(1, Math.min(nativeCpuCount, tCurrent || nativeCpuCount)));
+    tSlider.value = String(nativeCpuCount);
     $("#transcribeConcurrencyValue").textContent = tSlider.value;
     postTranscribeConcurrencySettings();
   }
@@ -697,7 +710,7 @@ let nativeWhisperAvailable = false;
 async function probeNativeWhisperBackend() {
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 1500);
+    const t = setTimeout(() => ctrl.abort(), 6000); // outlasts checkWhisper's 5s server-side timeout
     const resp = await fetch("/transcribe-capability", { signal: ctrl.signal });
     clearTimeout(t);
     if (!resp.ok) return false;
@@ -715,7 +728,11 @@ let nativePocketTtsAvailable = false;
 async function probeNativePocketTtsBackend() {
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 1500);
+    // Must outlast checkPocketTts's 20s server-side timeout — its first-ever
+    // check can genuinely take that long (uvx downloads the package on
+    // first run) — a shorter client abort here would misreport it as
+    // unavailable on exactly the case that most needs the extra time.
+    const t = setTimeout(() => ctrl.abort(), 21000);
     const resp = await fetch("/pockettts-capability", { signal: ctrl.signal });
     clearTimeout(t);
     if (!resp.ok) return false;
@@ -1993,7 +2010,7 @@ function ensureFFmpeg(poolSize) {
 // Pages, or ffmpeg missing from PATH — server.js's own /render-capability
 // probe already accounts for that).
 function ensureRenderBackend(poolSize) {
-  if (nativeRenderAvailable) return Promise.resolve();
+  if (useNativeRender()) return Promise.resolve();
   return ensureFFmpeg(poolSize);
 }
 
@@ -2066,7 +2083,7 @@ async function renderVideoNatively(payload, onProgress) {
 // falling back to the ffmpeg.wasm worker pool otherwise. Resolves to a
 // Uint8Array of the MP4 either way, so callers don't need to know which path ran.
 function renderVideoInWorker(payload, onProgress) {
-  if (nativeRenderAvailable) return renderVideoNatively(payload, onProgress);
+  if (useNativeRender()) return renderVideoNatively(payload, onProgress);
   return ffmpegPool.submit((worker) => worker.render(payload, onProgress));
 }
 
@@ -2466,7 +2483,7 @@ async function runJob(job, globalSettings, onUpdate) {
     // every job's own /render payload always references it by hash and
     // omits the raw bytes — no "am I the first uploader" branching needed.
     let bgHash = null, bgCached = false, musicHash = null, musicCached = false;
-    if (nativeRenderAvailable) {
+    if (useNativeRender()) {
       // Independent assets (different hashes, different upload requests) —
       // run their hash+cache round trips concurrently instead of the
       // background finishing entirely before the music one even starts.
@@ -3814,7 +3831,7 @@ function initBatchUI() {
 
 function updateParallelismHint() {
   const n = parseInt($("#batchParallelism").value) || 1;
-  if (nativeRenderAvailable) {
+  if (useNativeRender()) {
     $("#batchParallelismHint").textContent = `Renders up to ${n} at once via your native ffmpeg backend, each getting a share of your CPU cores. Higher than your machine can handle may slow individual renders down — start lower and raise it if it's stable.`;
     return;
   }
@@ -4386,7 +4403,7 @@ function updateBatchProgressStats() {
   }
 
   const concurrency = parseInt($("#batchParallelism").value) || 1;
-  const backendLabel = nativeRenderAvailable ? "Native (ffmpeg)" : "Browser (WASM)";
+  const backendLabel = useNativeRender() ? "Native (ffmpeg)" : "Browser (WASM)";
   const cores = navigator.hardwareConcurrency || nativeCpuCount || 1;
   const memInfo = (performance.memory)
     ? `${Math.round(performance.memory.usedJSHeapSize / 1048576)} MB`
@@ -4402,7 +4419,7 @@ function updateBatchProgressStats() {
   // client-side "active" count into "really encoding right now" vs "waiting
   // its turn for a slot" instead of one opaque number, since a job can sit
   // in job.status === "render" for a while just waiting on renderLimiter.
-  if (nativeRenderAvailable) {
+  if (useNativeRender()) {
     const encoding = jobs.filter(j => j.renderPhase === "encoding");
     const waiting = jobs.filter(j => j.renderPhase === "queued" || j.renderPhase === "starting").length;
     tiles.push(["Encoding now", `${encoding.length} / ${concurrency}`]);

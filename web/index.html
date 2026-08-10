@@ -690,7 +690,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         <div class="settings-section" id="performanceSection" style="display:none;">
           <h3>Performance</h3>
           <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Controls the native render/transcribe backend (only shown when it's available). Higher values use more CPU cores at once — dial back if a batch render makes your machine unresponsive.</p>
-          <label>Render concurrency (<span id="renderConcurrencyValue">—</span> of <span id="renderConcurrencyMax">—</span> cores)</label>
+          <label>Render backend</label>
+          <select id="renderBackendPref" onchange="updateParallelismHint()">
+            <option value="auto">Automatic (native, faster)</option>
+            <option value="wasm">Force browser (WASM), even though native is available</option>
+          </select>
+          <label style="margin-top:10px;">Render concurrency (<span id="renderConcurrencyValue">—</span> of <span id="renderConcurrencyMax">—</span> cores)</label>
           <input type="range" id="renderConcurrency" min="1" max="1" step="1" value="1">
           <div id="transcribeConcurrencySection" style="display:none;margin-top:12px;">
             <label>Transcribe concurrency (<span id="transcribeConcurrencyValue">—</span> of <span id="transcribeConcurrencyMax">—</span> cores)</label>
