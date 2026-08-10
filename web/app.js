@@ -2902,8 +2902,27 @@ async function renderTitleCardImage({ title, channelName, w, h }) {
     return cardH <= maxCardH;
   });
   ctx.font = `bold ${titleFontSize}px sans-serif`;
-  const titleLines = wrapCanvasText(ctx, title || "Untitled", cardW - pad * 2);
+  let titleLines = wrapCanvasText(ctx, title || "Untitled", cardW - pad * 2);
   const titleLineHeight = titleFontSize * 1.28;
+
+  // Genuine last resort: even at the font floor, a pathologically long
+  // title (e.g. a story pasted with no line breaks, so the "first line"
+  // extractTitleFromStory grabs is the entire story) can still overflow.
+  // Drop trailing words until it fits rather than letting the card overflow
+  // the frame — mirrors truncateToFit's same "shrink first, truncate only
+  // if shrinking alone can't fit" pattern used for the channel name below.
+  if (pad * 2.4 + headerH + titleLines.length * titleLineHeight + footerH > maxCardH) {
+    let words = (title || "Untitled").split(/\s+/);
+    while (words.length > 1) {
+      words = words.slice(0, -1);
+      const candidateLines = wrapCanvasText(ctx, words.join(" ") + "…", cardW - pad * 2);
+      if (pad * 2.4 + headerH + candidateLines.length * titleLineHeight + footerH <= maxCardH) {
+        titleLines = candidateLines;
+        break;
+      }
+      titleLines = candidateLines; // keep shrinking even if not there yet
+    }
+  }
 
   const titleH = titleLines.length * titleLineHeight;
   const cardH = pad * 2.4 + headerH + titleH + footerH;
@@ -3017,9 +3036,18 @@ async function renderTitleCardImage({ title, channelName, w, h }) {
 
 // Extracts the story's title line for the auto-title-card case — mirrors
 // the "AITAH for X" first-line convention the story prompts already enforce.
+// 350 chars is generous — real single-sentence AITAH titles top out well
+// under that (verified live up to ~300 chars renders fine) — but it's a
+// real cap, not just cosmetic: if the model ever skips the blank line after
+// the title (it doesn't always follow formatting instructions), this
+// "first line" becomes the entire story with no cap at all, and rendering
+// a many-hundred-word title card measurably blocks the main thread
+// (confirmed live: ~1.1-1.3s of synchronous canvas work per job) — enough
+// for several batch jobs hitting this back to back to look like the whole
+// batch has hung.
 function extractTitleFromStory(story) {
   const firstLine = (story || "").split("\n").find(l => l.trim());
-  return (firstLine || "").trim().slice(0, 140);
+  return (firstLine || "").trim().slice(0, 350);
 }
 
 // ---------- System diagnostics + cache management (Debug tab) ----------
