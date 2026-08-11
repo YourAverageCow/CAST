@@ -1592,6 +1592,26 @@ async function ensurePiper() {
   try {
     const mod = await import(PIPER_JS);
     const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime } = mod;
+    // Every other network fetch in the caption-sync/TTS pipeline (native
+    // transcribe, cloud TTS engines) already bounds itself with an
+    // AbortController timeout — these two HuggingFace fetches (for any
+    // non-vendored Piper voice) were the one place still using bare fetch(),
+    // so a stalled connection here hung indefinitely with no error until
+    // queueTTS's blunt 3-minute overall timeout finally caught it.
+    async function fetchVoiceFile(url, timeoutMs = 30000) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`Voice file fetch failed: ${url} (${res.status})`);
+        return res;
+      } catch (e) {
+        if (e.name === "AbortError") throw new Error(`Voice file fetch timed out after ${timeoutMs / 1000}s: ${url}`);
+        throw e;
+      } finally {
+        clearTimeout(t);
+      }
+    }
     const voiceProvider = {
       async fetch(voice) {
         // The default voice is vendored locally (web/vendor/piper-voices/)
@@ -1599,10 +1619,8 @@ async function ensurePiper() {
         // download — every other voice still fetches from HuggingFace on
         // first use, same as before.
         if (voice === "en_US-ryan-medium") {
-          const jsonRes = await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx.json");
-          if (!jsonRes.ok) throw new Error(`Vendored voice file missing: ${jsonRes.url} (${jsonRes.status})`);
-          const onnxRes = await fetch(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx");
-          if (!onnxRes.ok) throw new Error(`Vendored voice file missing: ${onnxRes.url} (${onnxRes.status})`);
+          const jsonRes = await fetchVoiceFile(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx.json");
+          const onnxRes = await fetchVoiceFile(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx");
           const json = await jsonRes.json();
           const onnx = URL.createObjectURL(await onnxRes.blob());
           return [applyPiperSpeed(json), onnx];
@@ -1615,8 +1633,8 @@ async function ensurePiper() {
         const stem = parts.join("-");
         const jsonUrl = `${base}${sub}/${stem}.onnx.json`;
         const onnxUrl = `${base}${sub}/${stem}.onnx`;
-        const json = await (await fetch(jsonUrl)).json();
-        const onnx = URL.createObjectURL(await (await fetch(onnxUrl)).blob());
+        const json = await (await fetchVoiceFile(jsonUrl)).json();
+        const onnx = URL.createObjectURL(await (await fetchVoiceFile(onnxUrl)).blob());
         return [applyPiperSpeed(json), onnx];
       },
     };

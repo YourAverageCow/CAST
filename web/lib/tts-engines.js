@@ -153,11 +153,36 @@ const KokoroEngine = {
     // of its real length. tts.stream() with a sentence-boundary split
     // keeps each chunk safely under that limit and yields one RawAudio per
     // chunk instead of one call over the whole text.
+    //
+    // kokoro-js's exported `env` only re-exposes `wasmPaths` (confirmed by
+    // inspecting the bundled source — see ensureKokoro() in app.js), so
+    // there's no config knob here to cap onnxruntime-web's thread pool the
+    // way Piper's OnnxWebRuntime explicitly does (numThreads: 1). Observed
+    // live: on a high core-count machine, the threaded WASM runtime can get
+    // stuck spinning up its pthread pool and never yield a single chunk —
+    // queueTTS's blunt 3-minute overall timeout eventually catches this, but
+    // gives no indication *what* stalled. Racing each individual chunk
+    // against a much shorter timeout catches a stuck iterator immediately
+    // and reports it clearly, instead of a long silent wait that ends in a
+    // generic "the TTS engine may have gotten stuck" message.
+    const CHUNK_TIMEOUT_MS = 45 * 1000;
     const sampleChunks = [];
     let sampleRate = 24000;
-    for await (const { audio } of tts.stream(text, { voice, speed, split_pattern: /(?<=[.!?])\s+/ })) {
-      sampleChunks.push(audio.audio);
-      sampleRate = audio.sampling_rate;
+    const iterator = tts.stream(text, { voice, speed, split_pattern: /(?<=[.!?])\s+/ })[Symbol.asyncIterator]();
+    for (;;) {
+      const result = await Promise.race([
+        iterator.next(),
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error(
+            `Kokoro voice generation stalled — no audio produced within ${CHUNK_TIMEOUT_MS / 1000}s. ` +
+            `This usually means the browser's threaded WASM runtime got stuck; try again, or switch to Piper in Settings → Voice.`
+          )),
+          CHUNK_TIMEOUT_MS
+        )),
+      ]);
+      if (result.done) break;
+      sampleChunks.push(result.value.audio.audio);
+      sampleRate = result.value.audio.sampling_rate;
     }
     const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0);
     const merged = new Float32Array(totalLen);
