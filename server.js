@@ -429,13 +429,28 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
   if (DEBUG) console.log("[ffmpeg]", args.join(" "));
   sendProgress(renderId, { phase: "starting", threads, cores: CPU_COUNT });
   const proc = spawn("ffmpeg", args, { cwd: dir });
+  // Native ffmpeg normally emits a -progress line at least once a second —
+  // unlike the WASM path (which has its own client-side stall watchdog,
+  // RENDER_STALL_TIMEOUT_MS in worker-pool.js), a genuinely wedged native
+  // ffmpeg process had nothing here to catch it: no output at all means no
+  // error, no timeout, just a render that never finishes and permanently
+  // holds a renderLimiter slot. 3 minutes of complete silence on both
+  // stdout and stderr is generous relative to that ~1/sec cadence.
+  let stallTimer;
+  const resetStallTimer = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => proc.kill("SIGKILL"), 3 * 60 * 1000);
+  };
+  resetStallTimer();
   let stderrTail = "";
   proc.stderr.on("data", (chunk) => {
+    resetStallTimer();
     stderrTail = (stderrTail + chunk.toString()).slice(-4000);
   });
   let stdoutBuf = "";
   let tick = {};
   proc.stdout.on("data", (chunk) => {
+    resetStallTimer();
     stdoutBuf += chunk.toString();
     const lines = stdoutBuf.split("\n");
     stdoutBuf = lines.pop();
@@ -457,10 +472,12 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
     }
   });
   proc.on("error", (err) => {
+    clearTimeout(stallTimer);
     cleanup();
     respond(500, { error: "Couldn't run ffmpeg: " + err.message });
   });
   proc.on("close", (code) => {
+    clearTimeout(stallTimer);
     if (code !== 0) {
       cleanup();
       respond(500, { error: `ffmpeg exited with code ${code}\n${stderrTail.slice(-1000)}` });
@@ -504,15 +521,28 @@ function runNativeTranscribe(transcribeId, audio, model, respond) {
   ];
   if (DEBUG) console.log("[whisper]", whisperArgs.join(" "));
   const proc = spawn("whisper", whisperArgs, { cwd: dir });
+  // No progress channel exists for whisper the way ffmpeg's -progress pipe
+  // gives renders one — a genuinely hung/stuck transcription (a known real
+  // failure mode for this kind of CPU-bound Python subprocess) would
+  // otherwise hold this transcribeLimiter slot, and the client's fetch,
+  // open forever with no way to recover short of restarting the server.
+  // 10 minutes is generous relative to real transcription times (even
+  // small.en on CPU comfortably finishes a multi-minute narration well
+  // under that) while still bounding the worst case.
+  const killTimer = setTimeout(() => {
+    proc.kill("SIGKILL");
+  }, 10 * 60 * 1000);
   let stderrTail = "";
   proc.stderr.on("data", (chunk) => {
     stderrTail = (stderrTail + chunk.toString()).slice(-4000);
   });
   proc.on("error", (err) => {
+    clearTimeout(killTimer);
     cleanup();
     respond(500, { error: "Couldn't run whisper: " + err.message });
   });
   proc.on("close", (code) => {
+    clearTimeout(killTimer);
     if (code !== 0) {
       cleanup();
       respond(500, { error: `whisper exited with code ${code}\n${stderrTail.slice(-1000)}` });
@@ -556,15 +586,22 @@ function runNativePocketTts(text, language, respond) {
   if (POCKET_TTS_LANGUAGES.includes(language)) args.push("--language", language);
   if (DEBUG) console.log("[pocket-tts]", args.join(" "));
   const proc = spawn("uvx", args);
+  // Same reasoning as runNativeTranscribe's kill timer — a hung subprocess
+  // would otherwise hold a pocketTtsLimiter slot forever. 5 minutes covers
+  // even a slow first-ever `uvx` package download plus generation, well
+  // above the ~2s/generation this normally takes once cached.
+  const killTimer = setTimeout(() => { proc.kill("SIGKILL"); }, 5 * 60 * 1000);
   let stderrTail = "";
   proc.stderr.on("data", (chunk) => {
     stderrTail = (stderrTail + chunk.toString()).slice(-4000);
   });
   proc.on("error", (err) => {
+    clearTimeout(killTimer);
     cleanup();
     respond(500, { error: "Couldn't run pocket-tts (via uvx): " + err.message });
   });
   proc.on("close", (code) => {
+    clearTimeout(killTimer);
     if (code !== 0) {
       cleanup();
       respond(500, { error: `pocket-tts exited with code ${code}\n${stderrTail.slice(-1000)}` });

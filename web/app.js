@@ -1011,27 +1011,60 @@ async function streamChat(messages, onChunk) {
   const { url, headers, body } = buildChatRequest(provider, {
     model: getModel(), messages, temperature: 0.9, apiKey: key, baseUrl: apiBase(),
   });
-  const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  // Two separate bounds: the initial connection (a provider that's down/
+  // unreachable could otherwise hang at the fetch() call itself with no
+  // error and no recovery — the Generate button just stays "Generating..."
+  // forever) and a stall watchdog on the stream once it starts (a
+  // connection that stops delivering chunks mid-story, without ever
+  // formally closing, would otherwise hang forever at reader.read() too).
+  const ctrl = new AbortController();
+  const connectTimer = setTimeout(() => ctrl.abort(), 30000);
+  let resp;
+  try {
+    resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("Request timed out — the provider didn't respond within 30s.");
+    throw e;
+  } finally {
+    clearTimeout(connectTimer);
+  }
   if (!resp.ok) throw new Error("API error: " + resp.status);
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      const data = line.slice(6).trim();
-      if (data === "[DONE]") continue;
+  try {
+    while (true) {
+      let stallTimer;
+      const stallGuard = new Promise((_, reject) => {
+        stallTimer = setTimeout(() => reject(new Error("Story generation stalled — no data received for 60s.")), 60000);
+      });
+      let done, value;
       try {
-        const parsed = JSON.parse(data);
-        const text = parseSSEDelta(provider.api, parsed);
-        if (text) onChunk(text);
-      } catch (e) {}
+        ({ done, value } = await Promise.race([reader.read(), stallGuard]));
+      } finally {
+        clearTimeout(stallTimer);
+      }
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const data = line.slice(6).trim();
+        if (data === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(data);
+          const text = parseSSEDelta(provider.api, parsed);
+          if (text) onChunk(text);
+        } catch (e) {}
+      }
     }
+  } catch (e) {
+    // A stall throws out of the race above while reader.read() is still
+    // pending underneath it — cancel the reader so the underlying
+    // connection actually tears down instead of being silently abandoned.
+    try { await reader.cancel(); } catch (cancelErr) { /* best-effort */ }
+    throw e;
   }
 }
 
@@ -1777,12 +1810,12 @@ async function transcribeInBrowser(audioBlob) {
 //      isn't available, since native is strictly better when present.
 //   3. computeWordTimings' estimate, corrected by real detected pauses
 //      (VAD) when neither ASR tier produced anything usable.
-async function resolveWordTimings(text, audioBlob, durationSec, engineWordTimings) {
+async function resolveWordTimings(text, audioBlob, durationSec, engineWordTimings, onTranscribeProgress) {
   if (engineWordTimings && engineWordTimings.length) return engineWordTimings;
 
   let asrWords = null;
   if (nativeWhisperAvailable) {
-    asrWords = await transcribeNatively(audioBlob);
+    asrWords = await transcribeNatively(audioBlob, onTranscribeProgress);
   } else {
     const asrCheckbox = $("#enableBrowserAsr");
     if (asrCheckbox && asrCheckbox.checked) asrWords = await transcribeInBrowser(audioBlob);
@@ -1798,7 +1831,7 @@ async function resolveWordTimings(text, audioBlob, durationSec, engineWordTiming
   return words;
 }
 
-async function generateSpeech(text, voice, engineId) {
+async function generateSpeech(text, voice, engineId, onTranscribeProgress) {
   engineId = engineId || getEngine();
   const engine = TTS_ENGINES[engineId];
   if (!engine) throw new Error("Unknown TTS engine: " + engineId);
@@ -1836,7 +1869,7 @@ async function generateSpeech(text, voice, engineId) {
   }
   const { audioBlob, durationSec, wordTimings } = generated;
   const audioUrl = URL.createObjectURL(audioBlob);
-  const words = await resolveWordTimings(text, audioBlob, durationSec, wordTimings);
+  const words = await resolveWordTimings(text, audioBlob, durationSec, wordTimings, onTranscribeProgress);
   return { audioUrl, words };
 }
 
@@ -2096,16 +2129,47 @@ function renderVideoInWorker(payload, onProgress) {
 // alignWordsBySequence. Returns the raw {text,start,end}[] word list (not
 // yet aligned to the known script) or null on any failure, so the caller
 // falls through to the next tier cleanly.
-async function transcribeNatively(audioBlob) {
+async function transcribeNatively(audioBlob, onProgress) {
   const id = crypto.randomUUID();
   const model = $("#whisperModel") ? $("#whisperModel").value : "tiny.en";
+  // server.js's runNativeTranscribe already calls sendProgress(id, 10) at
+  // start and sendProgress(id, 90) near the end — nothing on the client
+  // ever listened for it, so the whole native-Whisper round trip (which can
+  // genuinely take minutes for a long story) showed a completely frozen
+  // "Generating voice..." with zero feedback, indistinguishable from a real
+  // hang. Opened before the POST, same ordering constraint as
+  // renderVideoNatively's SSE connection, so no tick can race ahead of it.
+  let es = null;
+  if (onProgress) {
+    es = new EventSource(`/transcribe-progress/${id}`);
+    es.onmessage = (e) => {
+      try { onProgress(JSON.parse(e.data)); } catch (err) { /* ignore malformed tick */ }
+    };
+  }
   try {
-    const resp = await fetch(`/transcribe?id=${id}&model=${encodeURIComponent(model)}`, { method: "POST", body: audioBlob });
+    // Bounds the wait against a hung whisper subprocess (server.js kills it
+    // after 10 minutes) — without this, a stuck transcription blocked the
+    // entire job (and everything showing "Generating voice...", since this
+    // runs inside generateSpeech()) with no recovery. Slightly longer than
+    // the server's own kill timeout so its error response has a chance to
+    // arrive instead of racing it.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 11 * 60 * 1000);
+    const resp = await fetch(`/transcribe?id=${id}&model=${encodeURIComponent(model)}`, {
+      method: "POST", body: audioBlob, signal: ctrl.signal,
+    });
+    clearTimeout(t);
     if (!resp.ok) return null;
     const data = await resp.json();
     return (data && data.words && data.words.length) ? data.words : null;
   } catch (e) {
     return null;
+  } finally {
+    // EventSource auto-reconnects by default when its connection drops —
+    // once the server ends the response (respond() -> closeProgressChannel),
+    // an un-closed EventSource here would keep retrying that same id
+    // forever even though the channel is already gone server-side.
+    if (es) es.close();
   }
 }
 
@@ -2396,7 +2460,14 @@ async function runJob(job, globalSettings, onUpdate) {
 
     update({ status: "voice", progressPct: 0, progressLabel: job.titleCardEnabled ? "Generating voice & title card..." : "Generating voice..." });
     const [{ audioUrl, words }, cardBlob] = await Promise.all([
-      generateSpeech(story, settings.voice, settings.ttsEngine),
+      generateSpeech(story, settings.voice, settings.ttsEngine, (tick) => {
+        // Native Whisper transcription (when it's the tier that ends up
+        // running) can genuinely take minutes for a long story — without
+        // this, "Generating voice & title card..." sat completely frozen
+        // the whole time, indistinguishable from an actual hang.
+        const pct = typeof tick === "number" ? tick : (tick && typeof tick.pct === "number" ? tick.pct : null);
+        if (pct != null) update({ progressPct: pct, progressLabel: `Transcribing narration for captions... ${pct}%` });
+      }),
       job.titleCardEnabled
         ? renderTitleCardImage({ title: titleText, channelName: globalSettings.channelName, w, h })
         : Promise.resolve(null),
@@ -2959,10 +3030,18 @@ async function renderTitleCardImage({ title, channelName, w, h }) {
   ctx.clip();
   if (channelProfilePicDataUrl) {
     try {
+      // A corrupted/malformed saved data URL can fail to fire EITHER
+      // onload or onerror in some browsers, leaving this Promise (and thus
+      // the Promise.all it's part of in runJob — the whole "Generating
+      // voice & title card..." step) hanging forever with no way to
+      // recover short of reloading the page. This is the same class of
+      // hang generateVideoThumbnail() was fixed for earlier — a timeout
+      // that falls back to the placeholder instead of blocking the job.
       const img = await new Promise((resolve, reject) => {
         const im = new Image();
-        im.onload = () => resolve(im);
-        im.onerror = () => reject(new Error("bad avatar image"));
+        const timer = setTimeout(() => reject(new Error("avatar image load timed out")), 5000);
+        im.onload = () => { clearTimeout(timer); resolve(im); };
+        im.onerror = () => { clearTimeout(timer); reject(new Error("bad avatar image")); };
         im.src = channelProfilePicDataUrl;
       });
       ctx.drawImage(img, avatarX, avatarY, avatarSize, avatarSize);

@@ -191,11 +191,26 @@ const OpenAIEngine = {
   defaultVoice() { return OPENAI_TTS_VOICES[0]; },
   async generate(text, voice, config) {
     if (!config || !config.apiKey) throw new Error("OpenAI TTS needs an API key (Settings → Narration Voice).");
-    const resp = await fetch("https://api.openai.com/v1/audio/speech", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${config.apiKey}` },
-      body: JSON.stringify({ model: config.model || "tts-1", voice, input: text, speed: config.speed || 1 }),
-    });
+    // Without this, a network-level stall (no response, connection never
+    // formally drops) hangs generateSpeech() — and thus the whole job's
+    // "Generating voice..." step — indefinitely, relying only on the
+    // browser's own default OS-level TCP timeout, which can be minutes.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 60000);
+    let resp;
+    try {
+      resp = await fetch("https://api.openai.com/v1/audio/speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ model: config.model || "tts-1", voice, input: text, speed: config.speed || 1 }),
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e.name === "AbortError") throw new Error("OpenAI TTS timed out — no response within 60s.");
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
     if (!resp.ok) throw new Error(`OpenAI TTS error: ${resp.status} — check your API key.`);
     const audioBlob = await resp.blob();
     const durationSec = await probeAudioDuration(audioBlob);
@@ -233,14 +248,28 @@ const ElevenLabsEngine = {
     // bytes — which lets captions land exactly when each word is actually
     // spoken instead of falling back to computeWordTimings' proportional
     // estimate.
-    const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "xi-api-key": config.apiKey },
-      body: JSON.stringify({
-        text, model_id: config.modelId || "eleven_multilingual_v2",
-        voice_settings: { stability: config.stability ?? 0.5, similarity_boost: config.similarityBoost ?? 0.75 },
-      }),
-    });
+    // Same reasoning as OpenAI TTS above — bounds the wait against a
+    // network-level stall instead of relying on the browser's own default
+    // (potentially multi-minute) TCP timeout.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 60000);
+    let resp;
+    try {
+      resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "xi-api-key": config.apiKey },
+        body: JSON.stringify({
+          text, model_id: config.modelId || "eleven_multilingual_v2",
+          voice_settings: { stability: config.stability ?? 0.5, similarity_boost: config.similarityBoost ?? 0.75 },
+        }),
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e.name === "AbortError") throw new Error("ElevenLabs timed out — no response within 60s.");
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
     if (!resp.ok) throw new Error(`ElevenLabs error: ${resp.status} — check your API key.`);
     const data = await resp.json();
     const audioBytes = Uint8Array.from(atob(data.audio_base64), c => c.charCodeAt(0));
@@ -409,11 +438,22 @@ const PocketTtsEngine = {
   listVoices() { return POCKET_TTS_VOICES; },
   defaultVoice() { return POCKET_TTS_VOICES[0].id; },
   async generate(text, voice) {
-    const resp = await fetch("/pockettts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice }),
-    });
+    // Slightly longer than server.js's own 5-minute kill timer on the
+    // pocket-tts subprocess, so its error response has a chance to arrive
+    // instead of this racing it and reporting a generic network failure.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5.5 * 60 * 1000);
+    let resp;
+    try {
+      resp = await fetch("/pockettts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice }),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(t);
+    }
     if (!resp.ok) {
       let msg = `PocketTTS error: ${resp.status}`;
       try { const errJson = await resp.json(); if (errJson.error) msg = errJson.error; } catch (e) { /* non-JSON error body */ }
