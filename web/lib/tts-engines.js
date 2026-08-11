@@ -150,39 +150,27 @@ const KokoroEngine = {
     // Kokoro's model has a hard ~510-token input limit per single generate()
     // call — text beyond that is silently truncated (no error), which cut
     // every long story's narration off at the same fixed ~20-30s regardless
-    // of its real length. tts.stream() with a sentence-boundary split
-    // keeps each chunk safely under that limit and yields one RawAudio per
-    // chunk instead of one call over the whole text.
+    // of its real length. Splitting on sentence boundaries and generating
+    // each chunk separately keeps every call safely under that limit.
     //
-    // kokoro-js's exported `env` only re-exposes `wasmPaths` (confirmed by
-    // inspecting the bundled source — see ensureKokoro() in app.js), so
-    // there's no config knob here to cap onnxruntime-web's thread pool the
-    // way Piper's OnnxWebRuntime explicitly does (numThreads: 1). Observed
-    // live: on a high core-count machine, the threaded WASM runtime can get
-    // stuck spinning up its pthread pool and never yield a single chunk —
-    // queueTTS's blunt 3-minute overall timeout eventually catches this, but
-    // gives no indication *what* stalled. Racing each individual chunk
-    // against a much shorter timeout catches a stuck iterator immediately
-    // and reports it clearly, instead of a long silent wait that ends in a
-    // generic "the TTS engine may have gotten stuck" message.
-    const CHUNK_TIMEOUT_MS = 45 * 1000;
+    // This used to go through tts.stream() with the same split_pattern
+    // (one library call instead of a manual loop) — reverted after
+    // confirming live that tts.stream() reliably deadlocks partway through
+    // its own internal generation loop (zero console output, zero network
+    // activity, never recovers) even for a single short sentence, on this
+    // exact model/voice/environment, while plain tts.generate() called
+    // per-chunk here does not. Root cause is inside kokoro-js's stream()
+    // implementation, not reachable from here — this works around it by
+    // simply not calling that method, rather than papering over the hang
+    // with a longer timeout.
+    const sentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+    const chunks = sentences.length ? sentences : [text];
     const sampleChunks = [];
     let sampleRate = 24000;
-    const iterator = tts.stream(text, { voice, speed, split_pattern: /(?<=[.!?])\s+/ })[Symbol.asyncIterator]();
-    for (;;) {
-      const result = await Promise.race([
-        iterator.next(),
-        new Promise((_, reject) => setTimeout(
-          () => reject(new Error(
-            `Kokoro voice generation stalled — no audio produced within ${CHUNK_TIMEOUT_MS / 1000}s. ` +
-            `This usually means the browser's threaded WASM runtime got stuck; try again, or switch to Piper in Settings → Voice.`
-          )),
-          CHUNK_TIMEOUT_MS
-        )),
-      ]);
-      if (result.done) break;
-      sampleChunks.push(result.value.audio.audio);
-      sampleRate = result.value.audio.sampling_rate;
+    for (const chunk of chunks) {
+      const audio = await tts.generate(chunk, { voice, speed });
+      sampleChunks.push(audio.audio);
+      sampleRate = audio.sampling_rate;
     }
     const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0);
     const merged = new Float32Array(totalLen);
