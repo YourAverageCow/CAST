@@ -113,6 +113,17 @@ function checkFfmpeg(cb) {
   // for input), which would otherwise leave every route gated behind this
   // check hanging indefinitely for that request.
   execFile("ffmpeg", ["-filters"], { timeout: 5000 }, (err, stdout) => {
+    // A timeout (err.killed) just means THIS check didn't finish in time —
+    // e.g. the machine was under heavy load right as the process started —
+    // it says nothing about whether ffmpeg itself is actually usable.
+    // Caching that as a permanent `false` (as this used to) silently hid the
+    // whole Performance section and native rendering for the rest of the
+    // server's lifetime, with no self-healing short of a manual Debug-tab
+    // Recheck or an app restart. Only a check that actually RAN — and either
+    // errored for a real reason (e.g. ENOENT, ffmpeg not installed) or
+    // completed without drawtext support — represents a stable fact worth
+    // caching.
+    if (err && err.killed) { cb(false); return; }
     ffmpegAvailable = !err && /drawtext/.test(stdout || "");
     cb(ffmpegAvailable);
   });
@@ -127,6 +138,10 @@ let whisperAvailable = null; // null = not checked yet, else boolean
 function checkWhisper(cb) {
   if (whisperAvailable !== null) { cb(whisperAvailable); return; }
   execFile("whisper", ["--help"], { timeout: 5000 }, (err, stdout) => {
+    // See checkFfmpeg's matching comment — a timeout is transient (system
+    // load, not a real "not installed"/"too old" answer), so it isn't
+    // cached, letting the next call re-check for real.
+    if (err && err.killed) { cb(false); return; }
     whisperAvailable = !err && /word_timestamps/.test(stdout || "");
     cb(whisperAvailable);
   });
@@ -146,6 +161,10 @@ function checkPocketTts(cb) {
   // Longer timeout than checkFfmpeg/checkWhisper — uvx downloads/caches the
   // package on first run, which genuinely takes a few real seconds.
   execFile("uvx", ["pocket-tts", "--help"], { timeout: 20000 }, (err, stdout) => {
+    // See checkFfmpeg's matching comment — don't let a transient timeout
+    // (system load, or a slow first-run package download taking a bit
+    // longer than usual) get cached as a permanent "not installed".
+    if (err && err.killed) { cb(false); return; }
     pocketTtsAvailable = !err && /generate/.test(stdout || "");
     cb(pocketTtsAvailable);
   });
