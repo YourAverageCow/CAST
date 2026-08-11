@@ -1691,8 +1691,29 @@ async function ensureKokoro() {
 // speechSynthesis instance. TTS is fast relative to rendering, so
 // serializing it costs little even under a large parallel batch.
 let ttsQueueTail = Promise.resolve();
+// Generous relative to even a slow WASM/ONNX synthesis of a long story on
+// CPU (Piper/Kokoro), but bounded. Without this, a genuinely hung engine
+// call — a real WASM/ONNX edge case, not just a network stall (which the
+// individual cloud engines already guard against with their own fetch
+// timeouts) — left fn() never settling, which meant ttsQueueTail never
+// settled either. Since every future queueTTS() call chains off that same
+// promise, ONE bad job permanently wedged voice generation for the rest
+// of the session, not just that job — this is what made the whole app
+// look stuck on "Generating voice..." forever with no recovery short of
+// a reload. Racing fn() against a timeout guarantees `run` (and therefore
+// ttsQueueTail) always settles, so the queue can never get stuck this way
+// again; the hung call itself just becomes an orphaned promise no longer
+// blocking anything.
+const TTS_QUEUE_TIMEOUT_MS = 3 * 60 * 1000;
 function queueTTS(fn) {
-  const run = ttsQueueTail.then(fn, fn);
+  const runOne = () => Promise.race([
+    fn(),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error(`Voice generation timed out after ${TTS_QUEUE_TIMEOUT_MS / 1000}s — the TTS engine may have gotten stuck.`)),
+      TTS_QUEUE_TIMEOUT_MS
+    )),
+  ]);
+  const run = ttsQueueTail.then(runOne, runOne);
   // Swallow rejections here so one failed job doesn't wedge the queue for
   // everything queued after it — the caller still sees the real rejection
   // via `run`, this is only to keep ttsQueueTail chainable.
