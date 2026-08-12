@@ -25,10 +25,29 @@ const JOB_OVERRIDE_FIELDS = [
   "ttsEngine",
 ];
 
-// Inert today — reserved so a future scheduled-upload feature doesn't need
-// to migrate the job shape. `targets` will hold e.g. ["youtube","tiktok"].
+// Publish/upload state — `targets` holds e.g. ["youtube"] today, room for
+// ["tiktok","instagram"] later without another job-shape migration.
+// status: "none" (never published) | "generating" (metadata/thumbnail being
+// built) | "ready" (reviewed, not yet uploading) | "uploading" |
+// "scheduled" (uploaded, YouTube will auto-publish at scheduledAt) |
+// "uploaded" | "failed".
 function createPublishState() {
-  return { targets: [], scheduledAt: null, status: "none" };
+  return {
+    targets: [],
+    accountId: null, // id of the youtube-accounts.json account to publish as
+    status: "none",
+    error: null,
+    scheduledAt: null, // ISO string, or null = publish immediately at privacyStatus
+    privacyStatus: "private", // private | unlisted | public
+    categoryId: "24", // YouTube category id, default "Entertainment"
+    title: null,
+    description: null,
+    tags: [],
+    thumbnailBlob: null,
+    thumbnailUrl: null,
+    videoId: null, // YouTube's id once uploaded
+    uploadProgressPct: 0,
+  };
 }
 
 function makeJobId() {

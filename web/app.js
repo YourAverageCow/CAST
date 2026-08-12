@@ -60,6 +60,7 @@ function setSettingsTab(tab) {
   localStorage.setItem(SETTINGS_TAB_KEY, tab);
   if (tab === "debug") { refreshSystemDiagnostics(); refreshCacheInfo(); }
   if (tab === "video") { updateCaptionPreviewBackground(); showCaptionSample(); }
+  if (tab === "publish") { refreshYoutubeAccounts(); }
 }
 function openSettings() {
   $("#settingsOverlay").classList.add("show");
@@ -435,6 +436,7 @@ const SETTINGS_FIELDS = [
   "enableBrowserAsr", "whisperModel",
   "renderConcurrency", "transcribeConcurrency", "renderBackendPref",
   "theme", "outputFolder",
+  "youtubeClientId", "youtubeClientSecret",
 ];
 function saveSettings() {
   try {
@@ -743,11 +745,28 @@ async function probeNativePocketTtsBackend() {
   }
 }
 
+// Not a real capability check (no external tool to probe) — just "is a
+// server present at all", same shape as the others. Naturally false on the
+// deployed GitHub Pages build, which is what makes the whole Publish tab
+// invisible there with no special-casing elsewhere.
+let youtubeAvailable = false;
+async function probeYoutubeCapability() {
+  try {
+    const resp = await fetch("/youtube-capability");
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return !!data.available;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable] = await Promise.all([
-    probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(),
+  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, youtubeAvailable] = await Promise.all([
+    probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeYoutubeCapability(),
   ]);
+  $("#publishTabBtn").style.display = youtubeAvailable ? "" : "none";
   buildEngineSelect();
   buildProviderSelect();
   buildFontSelect();
@@ -2675,10 +2694,12 @@ function renderResultCard(job, container, opts) {
         <button data-action="preview">Preview</button>
         <button data-action="download">Download</button>
         <button data-action="copy">Copy Link</button>
-      </div>`;
+      </div>
+      <div class="publish-section" data-job-id="${job.id}"></div>`;
     div.querySelector('[data-action="preview"]').onclick = () => previewExported(job.resultUrl);
     div.querySelector('[data-action="download"]').onclick = () => downloadVideo(job.resultUrl, videoFilenameFor(job));
     div.querySelector('[data-action="copy"]').onclick = () => copyVideoLink(job.resultUrl);
+    renderPublishSection(job, div.querySelector(".publish-section"));
   } else if (job.status === "error") {
     div.innerHTML = title +
       `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>` +
@@ -2691,6 +2712,154 @@ function renderResultCard(job, container, opts) {
       <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${job.progressPct || 0}%"></div></div>`;
   }
   return div;
+}
+
+// Per-job inline "Publish to YouTube" panel, appended into every finished
+// result card by renderResultCard() above. Collapsed to a single button
+// until clicked open, then an editable metadata form; becomes a progress
+// bar during upload via the exact same status-subline/progress-bar shape
+// renderResultCard already uses for render progress. Renders as nothing at
+// all when the feature isn't usable (no server, or a server but no
+// connected channel yet) — a browser-only/GitHub-Pages build and a fresh
+// install both look exactly like they did before this feature existed.
+function renderPublishSection(job, container) {
+  if (!container) return;
+  if (!youtubeAvailable) { container.innerHTML = ""; return; }
+  const pub = job.publish;
+  if (pub.status === "uploading") {
+    container.innerHTML = `
+      <div class="result-status">Uploading to YouTube... ${pub.uploadProgressPct || 0}%</div>
+      <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pub.uploadProgressPct || 0}%"></div></div>`;
+    return;
+  }
+  if (pub.status === "uploaded" || pub.status === "scheduled") {
+    const link = pub.videoId ? `https://youtube.com/watch?v=${pub.videoId}` : null;
+    container.innerHTML = `
+      <div class="result-status" style="color:var(--green);">
+        ${pub.status === "scheduled" ? "Scheduled" : "Uploaded"} to YouTube.
+        ${link ? `<a href="${link}" target="_blank" rel="noopener">View</a>` : ""}
+      </div>`;
+    return;
+  }
+  if (pub.status === "failed") {
+    container.innerHTML = `
+      <div class="result-error">YouTube upload failed: ${escapeHtml(pub.error || "unknown error")}</div>
+      <button data-action="publish-retry">Try Again</button>`;
+    container.querySelector('[data-action="publish-retry"]').onclick = () => { pub.status = "none"; renderPublishSection(job, container); };
+    return;
+  }
+  if (!youtubeAccountsCache.length) {
+    container.innerHTML = `<p style="font-size:0.72rem;color:var(--muted);">Connect a YouTube channel in Settings → Publish to upload directly.</p>`;
+    return;
+  }
+  if (!pub._panelOpen) {
+    container.innerHTML = `<button data-action="publish-open">Publish to YouTube</button>`;
+    container.querySelector('[data-action="publish-open"]').onclick = () => {
+      pub._panelOpen = true;
+      if (pub.title == null) pub.title = extractTitleFromStory(job.story) || "Untitled";
+      if (pub.description == null) pub.description = "";
+      if (pub.accountId == null) pub.accountId = youtubeAccountsCache[0].id;
+      renderPublishSection(job, container);
+    };
+    return;
+  }
+  container.innerHTML = `
+    <div class="publish-form" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:6px;">
+      <label>Channel</label>
+      <select data-field="accountId">
+        ${youtubeAccountsCache.map(a => `<option value="${a.id}" ${a.id === pub.accountId ? "selected" : ""}>${escapeHtml(a.channelTitle)}</option>`).join("")}
+      </select>
+      <label style="margin-top:6px;">Title</label>
+      <input type="text" data-field="title" value="${escapeHtml(pub.title || "")}" maxlength="100">
+      <label style="margin-top:6px;">Description</label>
+      <textarea data-field="description" rows="3">${escapeHtml(pub.description || "")}</textarea>
+      <label style="margin-top:6px;">Privacy</label>
+      <select data-field="privacyStatus">
+        <option value="private" ${pub.privacyStatus === "private" ? "selected" : ""}>Private</option>
+        <option value="unlisted" ${pub.privacyStatus === "unlisted" ? "selected" : ""}>Unlisted</option>
+        <option value="public" ${pub.privacyStatus === "public" ? "selected" : ""}>Public</option>
+      </select>
+      <label style="margin-top:6px;">Schedule (optional — leave blank to publish at the privacy status above immediately)</label>
+      <input type="datetime-local" data-field="scheduledAt" value="${pub.scheduledAt ? toLocalDatetimeInputValue(pub.scheduledAt) : ""}">
+      <div class="row" style="margin-top:8px;">
+        <button data-action="publish-cancel">Cancel</button>
+        <button class="primary" data-action="publish-upload">Upload</button>
+      </div>
+    </div>`;
+  container.querySelector('[data-field="accountId"]').onchange = (e) => { pub.accountId = e.target.value; };
+  container.querySelector('[data-field="title"]').oninput = (e) => { pub.title = e.target.value; };
+  container.querySelector('[data-field="description"]').oninput = (e) => { pub.description = e.target.value; };
+  container.querySelector('[data-field="privacyStatus"]').onchange = (e) => { pub.privacyStatus = e.target.value; };
+  container.querySelector('[data-field="scheduledAt"]').onchange = (e) => {
+    pub.scheduledAt = e.target.value ? new Date(e.target.value).toISOString() : null;
+  };
+  container.querySelector('[data-action="publish-cancel"]').onclick = () => { pub._panelOpen = false; renderPublishSection(job, container); };
+  container.querySelector('[data-action="publish-upload"]').onclick = () => uploadJobToYoutube(job, container);
+}
+
+function toLocalDatetimeInputValue(isoString) {
+  const d = new Date(isoString);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// POSTs the finished job's video (raw bytes, same length-prefixed-JSON-
+// header framing convention as renderVideoNatively's /render frame) to
+// server.js, which does the actual resumable upload to YouTube — an
+// EventSource on /youtube-upload-progress/:id (opened before the POST, same
+// ordering constraint as every other id-correlated SSE channel in this app)
+// drives the progress bar renderPublishSection shows while status is
+// "uploading".
+async function uploadJobToYoutube(job, container) {
+  const pub = job.publish;
+  if (!job.resultBlob) { alert("No finished video to upload."); return; }
+  if (!pub.title || !pub.title.trim()) { alert("Enter a title first."); return; }
+  pub.status = "uploading";
+  pub.uploadProgressPct = 0;
+  renderPublishSection(job, container);
+
+  const id = crypto.randomUUID();
+  let es = null;
+  try {
+    es = new EventSource(`/youtube-upload-progress/${id}`);
+    es.onmessage = (e) => {
+      try {
+        const tick = JSON.parse(e.data);
+        if (typeof tick.pct === "number") pub.uploadProgressPct = tick.pct;
+        renderPublishSection(job, container);
+      } catch (err) { /* ignore malformed tick */ }
+    };
+
+    const videoBytes = new Uint8Array(await job.resultBlob.arrayBuffer());
+    const meta = {
+      accountId: pub.accountId,
+      title: pub.title,
+      description: pub.description || "",
+      tags: pub.tags || [],
+      categoryId: pub.categoryId || "24",
+      privacyStatus: pub.privacyStatus,
+      scheduledAt: pub.scheduledAt,
+      hasThumbnail: false,
+      videoLen: videoBytes.length,
+    };
+    const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+    const header = new Uint8Array(4);
+    new DataView(header.buffer).setUint32(0, metaBytes.length, true);
+    const frame = new Blob([header, metaBytes, videoBytes]);
+
+    const resp = await fetch(`/youtube-upload?id=${id}`, { method: "POST", body: frame });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Upload failed.");
+    pub.status = data.status === "scheduled" ? "scheduled" : "uploaded";
+    pub.videoId = data.videoId;
+    pub.uploadProgressPct = 100;
+  } catch (e) {
+    pub.status = "failed";
+    pub.error = e && e.message ? e.message : String(e);
+  } finally {
+    if (es) es.close();
+    renderPublishSection(job, container);
+  }
 }
 
 // The sidebar's "quick single export" — builds one job from the current
@@ -3253,6 +3422,109 @@ async function clearAssetCache() {
     showToast("Cache cleared.");
   } catch (e) {
     alert("Couldn't clear cache: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// ---------- YouTube publish integration ----------
+async function saveYoutubeOauthClient() {
+  const clientId = $("#youtubeClientId").value.trim();
+  const clientSecret = $("#youtubeClientSecret").value.trim();
+  const statusEl = $("#youtubeClientStatus");
+  if (!clientId || !clientSecret) { statusEl.textContent = "Both fields are required."; return; }
+  try {
+    const resp = await fetch("/youtube-oauth-client", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId, clientSecret }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Failed to save.");
+    statusEl.textContent = "Saved. You can now sign in below.";
+  } catch (e) {
+    statusEl.textContent = "Error: " + (e && e.message ? e.message : String(e));
+  }
+}
+
+function renderYoutubeAccountsList(accounts) {
+  const list = $("#youtubeAccountsList");
+  if (!accounts.length) {
+    list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">No channels connected yet.</p>`;
+    return;
+  }
+  list.innerHTML = accounts.map(a => `
+    <div class="row" style="align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;">
+      <div class="row" style="align-items:center;gap:8px;">
+        ${a.channelThumbnail ? `<img src="${a.channelThumbnail}" style="width:28px;height:28px;border-radius:50%;">` : ""}
+        <span>${a.channelTitle}</span>
+      </div>
+      <button onclick="removeYoutubeAccount('${a.id}')" style="color:var(--danger);">Remove</button>
+    </div>
+  `).join("");
+}
+
+// Cache of the last-known account list — read by the per-job publish
+// panel's account picker (renderPublishPanel) so it doesn't need its own
+// separate fetch every time a result card renders.
+let youtubeAccountsCache = [];
+async function refreshYoutubeAccounts() {
+  try {
+    const resp = await fetch("/youtube-accounts");
+    const data = await resp.json();
+    youtubeAccountsCache = data.accounts || [];
+    renderYoutubeAccountsList(youtubeAccountsCache);
+  } catch (e) {
+    youtubeAccountsCache = [];
+    $("#youtubeAccountsList").innerHTML = `<p style="font-size:0.8rem;color:var(--danger);">Couldn't load accounts (no backend server).</p>`;
+  }
+}
+
+async function startYoutubeOAuth() {
+  const btn = $("#youtubeSignInBtn");
+  const originalLabel = btn.textContent;
+  btn.disabled = true; btn.textContent = "Opening Google sign-in...";
+  let es = null;
+  try {
+    const resp = await fetch("/youtube-oauth-start", { method: "POST" });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Couldn't start sign-in.");
+    // Listen for the result BEFORE opening the tab — same ordering
+    // constraint as every other id-correlated SSE channel in this app
+    // (renderVideoNatively, transcribeNatively), so no event can race ahead
+    // of the listener being attached.
+    const result = await new Promise((resolve, reject) => {
+      es = new EventSource(`/youtube-oauth-status/${data.state}`);
+      es.onmessage = (e) => {
+        try { resolve(JSON.parse(e.data)); } catch (err) { reject(err); }
+      };
+      es.onerror = () => reject(new Error("Lost connection waiting for sign-in to finish."));
+      // window.open here (not location.href) — in Electron, main.js's
+      // existing setWindowOpenHandler already routes any non-own-origin
+      // window.open to the system browser via shell.openExternal, so this
+      // needs zero Electron-specific code; in the plain browser build it's
+      // just a normal new tab.
+      window.open(data.authUrl, "_blank");
+      btn.textContent = "Waiting for you to finish signing in...";
+    });
+    if (result.status === "success") {
+      showToast(`Connected ${result.account.channelTitle}.`);
+      await refreshYoutubeAccounts();
+    } else {
+      throw new Error(result.error || "Sign-in failed.");
+    }
+  } catch (e) {
+    alert("YouTube sign-in failed: " + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (es) es.close();
+    btn.disabled = false; btn.textContent = originalLabel;
+  }
+}
+
+async function removeYoutubeAccount(id) {
+  if (!confirm("Disconnect this channel? You'll need to sign in again to publish to it.")) return;
+  try {
+    await fetch(`/youtube-accounts/${id}`, { method: "DELETE" });
+    await refreshYoutubeAccounts();
+  } catch (e) {
+    alert("Couldn't remove account: " + (e && e.message ? e.message : String(e)));
   }
 }
 

@@ -434,6 +434,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <button class="settings-tab-btn" data-tab="branding" onclick="setSettingsTab('branding')">Branding</button>
       <button class="settings-tab-btn" data-tab="performance" onclick="setSettingsTab('performance')">Performance</button>
       <button class="settings-tab-btn" data-tab="advanced" onclick="setSettingsTab('advanced')">Advanced</button>
+      <button class="settings-tab-btn" data-tab="publish" onclick="setSettingsTab('publish')" id="publishTabBtn" style="display:none;">Publish</button>
       <button class="settings-tab-btn" data-tab="debug" onclick="setSettingsTab('debug')">Debug</button>
     </div>
     <div class="settings-content">
@@ -738,6 +739,37 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <button class="primary" onclick="downloadAppUpdate()" id="downloadUpdateBtn" style="display:none;">Download Update</button>
             <button class="primary" onclick="installAppUpdate()" id="installUpdateBtn" style="display:none;">Restart &amp; Install</button>
           </div>
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-tab="publish">
+        <div class="settings-section">
+          <h3>YouTube — OAuth App</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">
+            Upload requires your own Google Cloud OAuth client (YouTube has no upload-capable API-key mode).
+            In <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a>:
+            create a project → enable "YouTube Data API v3" → OAuth consent screen (External, Testing is fine for personal use) →
+            Credentials → OAuth client ID → type <b>Desktop app</b>. Paste the resulting Client ID/Secret below, and add
+            <code>http://localhost:8123/youtube-oauth-callback</code> as an authorized redirect URI if prompted.
+          </p>
+          <label>Client ID</label>
+          <input type="text" id="youtubeClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
+          <label style="margin-top:8px;">Client Secret</label>
+          <input type="password" id="youtubeClientSecret" placeholder="GOCSPX-...">
+          <button class="accent" onclick="saveYoutubeOauthClient()" style="margin-top:8px;">Save Client Credentials</button>
+          <p id="youtubeClientStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
+        </div>
+        <div class="settings-section">
+          <h3>Connected Channels</h3>
+          <div id="youtubeAccountsList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px;">
+            <p style="font-size:0.8rem;color:var(--muted);">No channels connected yet.</p>
+          </div>
+          <button class="primary" onclick="startYoutubeOAuth()" id="youtubeSignInBtn">Sign in with Google</button>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:8px;">
+            Quota note: YouTube's default project quota allows roughly <b>6 uploads/day</b> (uploads cost 1600 of your 10,000 daily units).
+            Also, while your OAuth consent screen is in "Testing" mode, Google may require you to re-sign-in every ~7 days —
+            switch it to "In production" in Cloud Console (no full verification review needed for this scope) to avoid that.
+          </p>
         </div>
       </div>
 

@@ -30,7 +30,13 @@ test("createJob has sane defaults", () => {
   assert.equal(job.musicVolume, 0.25);
   assert.equal(job.titleCardEnabled, true);
   assert.equal(job.titleCardText, null);
-  assert.deepEqual(job.publish, { targets: [], scheduledAt: null, status: "none" });
+  assert.deepEqual(job.publish, {
+    targets: [], accountId: null, status: "none", error: null,
+    scheduledAt: null, privacyStatus: "private", categoryId: "24",
+    title: null, description: null, tags: [],
+    thumbnailBlob: null, thumbnailUrl: null,
+    videoId: null, uploadProgressPct: 0,
+  });
   assert.ok(job.id);
   assert.ok(job.createdAt > 0);
 });
