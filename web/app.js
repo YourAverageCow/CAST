@@ -437,6 +437,8 @@ const SETTINGS_FIELDS = [
   "renderConcurrency", "transcribeConcurrency", "renderBackendPref",
   "theme", "outputFolder",
   "youtubeClientId", "youtubeClientSecret",
+  "youtubeAutoGenerateMetadata", "youtubeTitleTemplate", "youtubeDescriptionTemplate",
+  "youtubeDefaultPrivacy", "youtubeDefaultCategoryId",
 ];
 function saveSettings() {
   try {
@@ -2754,13 +2756,11 @@ function renderPublishSection(job, container) {
   }
   if (!pub._panelOpen) {
     container.innerHTML = `<button data-action="publish-open">Publish to YouTube</button>`;
-    container.querySelector('[data-action="publish-open"]').onclick = () => {
-      pub._panelOpen = true;
-      if (pub.title == null) pub.title = extractTitleFromStory(job.story) || "Untitled";
-      if (pub.description == null) pub.description = "";
-      if (pub.accountId == null) pub.accountId = youtubeAccountsCache[0].id;
-      renderPublishSection(job, container);
-    };
+    container.querySelector('[data-action="publish-open"]').onclick = () => openPublishPanel(job, container);
+    return;
+  }
+  if (pub._generating) {
+    container.innerHTML = `<div class="result-status">Generating title/description from the story...</div>`;
     return;
   }
   container.innerHTML = `
@@ -2773,15 +2773,28 @@ function renderPublishSection(job, container) {
       <input type="text" data-field="title" value="${escapeHtml(pub.title || "")}" maxlength="100">
       <label style="margin-top:6px;">Description</label>
       <textarea data-field="description" rows="3">${escapeHtml(pub.description || "")}</textarea>
-      <label style="margin-top:6px;">Privacy</label>
-      <select data-field="privacyStatus">
-        <option value="private" ${pub.privacyStatus === "private" ? "selected" : ""}>Private</option>
-        <option value="unlisted" ${pub.privacyStatus === "unlisted" ? "selected" : ""}>Unlisted</option>
-        <option value="public" ${pub.privacyStatus === "public" ? "selected" : ""}>Public</option>
-      </select>
+      <label style="margin-top:6px;">Tags <span style="color:var(--muted);font-weight:normal;">(comma-separated)</span></label>
+      <input type="text" data-field="tags" value="${escapeHtml((pub.tags || []).join(", "))}">
+      <div class="row" style="margin-top:6px;">
+        <div style="flex:1;">
+          <label>Privacy</label>
+          <select data-field="privacyStatus">
+            <option value="private" ${pub.privacyStatus === "private" ? "selected" : ""}>Private</option>
+            <option value="unlisted" ${pub.privacyStatus === "unlisted" ? "selected" : ""}>Unlisted</option>
+            <option value="public" ${pub.privacyStatus === "public" ? "selected" : ""}>Public</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <label>Category</label>
+          <select data-field="categoryId">
+            ${YOUTUBE_CATEGORY_OPTIONS.map(c => `<option value="${c.id}" ${c.id === pub.categoryId ? "selected" : ""}>${c.label}</option>`).join("")}
+          </select>
+        </div>
+      </div>
       <label style="margin-top:6px;">Schedule (optional — leave blank to publish at the privacy status above immediately)</label>
       <input type="datetime-local" data-field="scheduledAt" value="${pub.scheduledAt ? toLocalDatetimeInputValue(pub.scheduledAt) : ""}">
       <div class="row" style="margin-top:8px;">
+        <button data-action="publish-regenerate">Regenerate</button>
         <button data-action="publish-cancel">Cancel</button>
         <button class="primary" data-action="publish-upload">Upload</button>
       </div>
@@ -2789,12 +2802,123 @@ function renderPublishSection(job, container) {
   container.querySelector('[data-field="accountId"]').onchange = (e) => { pub.accountId = e.target.value; };
   container.querySelector('[data-field="title"]').oninput = (e) => { pub.title = e.target.value; };
   container.querySelector('[data-field="description"]').oninput = (e) => { pub.description = e.target.value; };
+  container.querySelector('[data-field="tags"]').oninput = (e) => { pub.tags = e.target.value.split(",").map(t => t.trim()).filter(Boolean); };
   container.querySelector('[data-field="privacyStatus"]').onchange = (e) => { pub.privacyStatus = e.target.value; };
+  container.querySelector('[data-field="categoryId"]').onchange = (e) => { pub.categoryId = e.target.value; };
   container.querySelector('[data-field="scheduledAt"]').onchange = (e) => {
     pub.scheduledAt = e.target.value ? new Date(e.target.value).toISOString() : null;
   };
+  container.querySelector('[data-action="publish-regenerate"]').onclick = () => generatePublishMetadata(job, container, true);
   container.querySelector('[data-action="publish-cancel"]').onclick = () => { pub._panelOpen = false; renderPublishSection(job, container); };
   container.querySelector('[data-action="publish-upload"]').onclick = () => uploadJobToYoutube(job, container);
+}
+
+const YOUTUBE_CATEGORY_OPTIONS = [
+  { id: "24", label: "Entertainment" },
+  { id: "22", label: "People & Blogs" },
+  { id: "23", label: "Comedy" },
+  { id: "26", label: "Howto & Style" },
+  { id: "27", label: "Education" },
+  { id: "1", label: "Film & Animation" },
+];
+
+// First open of the panel for a job: apply the Settings tab's default
+// privacy/category once (a later re-open respects whatever the user already
+// set on this job, since pub.privacyStatus/categoryId are no longer at
+// their job-model defaults by then), pick a starting channel, then either
+// auto-generate metadata or fall back to the old plain-extraction behavior.
+function openPublishPanel(job, container) {
+  const pub = job.publish;
+  pub._panelOpen = true;
+  if (pub.accountId == null) pub.accountId = youtubeAccountsCache[0].id;
+  const defaultPrivacy = $("#youtubeDefaultPrivacy");
+  const defaultCategory = $("#youtubeDefaultCategoryId");
+  if (pub.privacyStatus === "private" && defaultPrivacy && defaultPrivacy.value) pub.privacyStatus = defaultPrivacy.value;
+  if (pub.categoryId === "24" && defaultCategory && defaultCategory.value) pub.categoryId = defaultCategory.value;
+  if (pub.title != null) { renderPublishSection(job, container); return; } // already generated/edited on a prior open
+  generatePublishMetadata(job, container, false);
+}
+
+// Shared by openPublishPanel (first open) and the form's own "Regenerate"
+// button — the only difference is whether there's already-edited text to
+// discard, which the caller decides by whether it calls this at all.
+async function generatePublishMetadata(job, container, forceRegenerate) {
+  const pub = job.publish;
+  const autoGenerate = $("#youtubeAutoGenerateMetadata") && $("#youtubeAutoGenerateMetadata").checked;
+  if (!autoGenerate) {
+    if (pub.title == null || forceRegenerate) pub.title = extractTitleFromStory(job.story) || "Untitled";
+    if (pub.description == null || forceRegenerate) pub.description = "";
+    renderPublishSection(job, container);
+    return;
+  }
+  pub._generating = true;
+  renderPublishSection(job, container);
+  try {
+    const meta = await generateYoutubeMetadata(job);
+    pub.title = meta.title;
+    pub.description = meta.description;
+    pub.tags = meta.tags;
+  } catch (e) {
+    if (pub.title == null) pub.title = extractTitleFromStory(job.story) || "Untitled";
+    if (pub.description == null) pub.description = "";
+    showToast("Auto-generate failed (" + (e && e.message ? e.message : String(e)) + ") — using a plain title instead.");
+  }
+  pub._generating = false;
+  renderPublishSection(job, container);
+}
+
+// {{placeholder}} substitution for the Settings → Publish title/description
+// templates — deliberately the same {{name}} syntax as nothing else in this
+// codebase (storySystemPrompt's override went the other way, hardcoding
+// ${wc} outside the editable text specifically to avoid template syntax) —
+// here the whole point IS a small template language, so it's the right
+// tool this one time.
+function substituteYoutubeTemplate(template, vars) {
+  return template.replace(/\{\{(\w+)\}\}/g, (m, key) => (vars[key] != null ? vars[key] : ""));
+}
+
+// Calls the story-gen LLM (same provider/model/key already configured in
+// Settings -> Story, via the existing streamChat()) for a short JSON
+// {title, description, tags} response, then composes it through the
+// optional Settings -> Publish templates. Template and auto-generation are
+// two stages of one pipeline, not separate modes — a blank template just
+// means "use the AI text as-is".
+async function generateYoutubeMetadata(job) {
+  const system = "You write YouTube titles, descriptions, and tags for short narrated Reddit-story videos (AITAH/relationship-drama style). " +
+    "Output ONLY a single JSON object with keys \"title\" (under 100 characters, punchy, no surrounding quotes), " +
+    "\"description\" (2-4 sentences, no hashtags), and \"tags\" (an array of 5-10 short lowercase keyword strings). " +
+    "No markdown, no code fences, no commentary outside the JSON.";
+  const user = "Story:\n" + (job.story || "").slice(0, 3000);
+  let raw = "";
+  await streamChat(
+    [{ role: "system", content: system }, { role: "user", content: user }],
+    (chunk) => { raw += chunk; }
+  );
+  let parsed;
+  try {
+    // A model that ignores "no code fences" still sometimes wraps its
+    // output in one — strip it before parsing rather than failing outright.
+    const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    throw new Error("couldn't parse the AI's response as JSON");
+  }
+  const aiTitle = typeof parsed.title === "string" ? parsed.title.trim() : "";
+  const aiDescription = typeof parsed.description === "string" ? parsed.description.trim() : "";
+  const aiTags = Array.isArray(parsed.tags) ? parsed.tags.filter(t => typeof t === "string").map(t => t.trim()).filter(Boolean).slice(0, 15) : [];
+  if (!aiTitle) throw new Error("the AI didn't return a title");
+
+  const vars = {
+    aiTitle, aiDescription, aiTags: aiTags.join(", "),
+    premise: job.premise || "", channelName: $("#channelName").value.trim() || "Anonymous",
+  };
+  const titleTemplate = $("#youtubeTitleTemplate").value.trim();
+  const descTemplate = $("#youtubeDescriptionTemplate").value.trim();
+  return {
+    title: (titleTemplate ? substituteYoutubeTemplate(titleTemplate, vars) : aiTitle).slice(0, 100),
+    description: descTemplate ? substituteYoutubeTemplate(descTemplate, vars) : aiDescription,
+    tags: aiTags,
+  };
 }
 
 function toLocalDatetimeInputValue(isoString) {

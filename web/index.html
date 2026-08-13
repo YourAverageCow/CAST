@@ -760,6 +760,39 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <p id="youtubeClientStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
         </div>
         <div class="settings-section">
+          <h3>Video Metadata</h3>
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="youtubeAutoGenerateMetadata" style="width:auto;" checked> Auto-generate title/description/tags from the story
+          </label>
+          <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px;">Uses your configured story-generation provider/model/key (Settings → Story). Off = starts blank/from the story's first line, same as before.</p>
+          <label>Title template <span style="color:var(--muted);font-weight:normal;">(optional — wraps the AI title; leave blank to use it as-is)</span></label>
+          <input type="text" id="youtubeTitleTemplate" placeholder="e.g. {{aiTitle}} | Reddit Stories #Shorts">
+          <label style="margin-top:8px;">Description template <span style="color:var(--muted);font-weight:normal;">(optional)</span></label>
+          <textarea id="youtubeDescriptionTemplate" rows="3" placeholder="e.g. {{aiDescription}}&#10;&#10;Subscribe for more stories from {{channelName}}!"></textarea>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:6px;">Placeholders: <code>{{aiTitle}}</code> <code>{{aiDescription}}</code> <code>{{aiTags}}</code> <code>{{premise}}</code> <code>{{channelName}}</code></p>
+          <div class="row" style="margin-top:8px;">
+            <div style="flex:1;">
+              <label>Default privacy</label>
+              <select id="youtubeDefaultPrivacy">
+                <option value="private" selected>Private</option>
+                <option value="unlisted">Unlisted</option>
+                <option value="public">Public</option>
+              </select>
+            </div>
+            <div style="flex:1;">
+              <label>Default category</label>
+              <select id="youtubeDefaultCategoryId">
+                <option value="24" selected>Entertainment</option>
+                <option value="22">People &amp; Blogs</option>
+                <option value="23">Comedy</option>
+                <option value="26">Howto &amp; Style</option>
+                <option value="27">Education</option>
+                <option value="1">Film &amp; Animation</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="settings-section">
           <h3>Connected Channels</h3>
           <div id="youtubeAccountsList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px;">
             <p style="font-size:0.8rem;color:var(--muted);">No channels connected yet.</p>
