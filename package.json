@@ -1,6 +1,6 @@
 {
   "name": "slopdaddy",
-  "version": "97.0.0",
+  "version": "98.0.0",
   "private": true,
   "description": "AITAH story video generator — standalone app (Electron wrapper around the same web/ UI + server.js backend used by the local/web versions).",
   "author": "YourAverageCow",
