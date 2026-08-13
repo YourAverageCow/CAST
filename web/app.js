@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 98;
+const VERSION = 99;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1241,7 +1241,15 @@ async function streamChatInner(messages, onChunk, temperature) {
   // connection that stops delivering chunks mid-story, without ever
   // formally closing, would otherwise hang forever at reader.read() too).
   const ctrl = new AbortController();
-  const connectTimer = setTimeout(() => ctrl.abort(), 30000);
+  // Toast fires the moment the timeout actually trips, not just after the
+  // caller's catch block eventually surfaces the thrown error — the whole
+  // point is real-time visibility into which request is stuck right now,
+  // especially during a batch where a per-card "Generating story..." label
+  // alone doesn't distinguish "still working normally" from "actually hung".
+  const connectTimer = setTimeout(() => {
+    showToast(`Story provider isn't responding — still waiting (30s)...`, 4000);
+    ctrl.abort();
+  }, 30000);
   let resp;
   try {
     resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
@@ -1259,7 +1267,10 @@ async function streamChatInner(messages, onChunk, temperature) {
     while (true) {
       let stallTimer;
       const stallGuard = new Promise((_, reject) => {
-        stallTimer = setTimeout(() => reject(new Error("Story generation stalled — no data received for 60s.")), 60000);
+        stallTimer = setTimeout(() => {
+          showToast("Story generation stalled — no data received for 60s.", 4000);
+          reject(new Error("Story generation stalled — no data received for 60s."));
+        }, 60000);
       });
       let done, value;
       try {
