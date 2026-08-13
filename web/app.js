@@ -2760,7 +2760,7 @@ function renderPublishSection(job, container) {
     return;
   }
   if (pub._generating) {
-    container.innerHTML = `<div class="result-status">Generating title/description from the story...</div>`;
+    container.innerHTML = `<div class="result-status">Generating title/description/thumbnail from the story...</div>`;
     return;
   }
   container.innerHTML = `
@@ -2769,6 +2769,15 @@ function renderPublishSection(job, container) {
       <select data-field="accountId">
         ${youtubeAccountsCache.map(a => `<option value="${a.id}" ${a.id === pub.accountId ? "selected" : ""}>${escapeHtml(a.channelTitle)}</option>`).join("")}
       </select>
+      <label style="margin-top:6px;">Thumbnail</label>
+      <div style="display:flex;gap:8px;align-items:flex-start;">
+        <img src="${pub.thumbnailUrl || ""}" style="width:160px;aspect-ratio:16/9;object-fit:cover;border-radius:4px;background:var(--surface);border:1px solid var(--border);${pub.thumbnailUrl ? "" : "display:none;"}">
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <button data-action="publish-regen-thumb">Regenerate Thumbnail</button>
+          <button data-action="publish-upload-thumb">Upload Custom...</button>
+          <input type="file" data-field="thumbnailFile" accept="image/jpeg,image/png" style="display:none;">
+        </div>
+      </div>
       <label style="margin-top:6px;">Title</label>
       <input type="text" data-field="title" value="${escapeHtml(pub.title || "")}" maxlength="100">
       <label style="margin-top:6px;">Description</label>
@@ -2794,12 +2803,17 @@ function renderPublishSection(job, container) {
       <label style="margin-top:6px;">Schedule (optional — leave blank to publish at the privacy status above immediately)</label>
       <input type="datetime-local" data-field="scheduledAt" value="${pub.scheduledAt ? toLocalDatetimeInputValue(pub.scheduledAt) : ""}">
       <div class="row" style="margin-top:8px;">
-        <button data-action="publish-regenerate">Regenerate</button>
+        <button data-action="publish-regenerate">Regenerate Metadata</button>
         <button data-action="publish-cancel">Cancel</button>
         <button class="primary" data-action="publish-upload">Upload</button>
       </div>
     </div>`;
   container.querySelector('[data-field="accountId"]').onchange = (e) => { pub.accountId = e.target.value; };
+  container.querySelector('[data-action="publish-regen-thumb"]').onclick = () => regeneratePublishThumbnail(job, container);
+  container.querySelector('[data-action="publish-upload-thumb"]').onclick = () => container.querySelector('[data-field="thumbnailFile"]').click();
+  container.querySelector('[data-field="thumbnailFile"]').onchange = (e) => {
+    if (e.target.files && e.target.files[0]) setPublishCustomThumbnail(job, container, e.target.files[0]);
+  };
   container.querySelector('[data-field="title"]').oninput = (e) => { pub.title = e.target.value; };
   container.querySelector('[data-field="description"]').oninput = (e) => { pub.description = e.target.value; };
   container.querySelector('[data-field="tags"]').oninput = (e) => { pub.tags = e.target.value.split(",").map(t => t.trim()).filter(Boolean); };
@@ -2845,25 +2859,56 @@ function openPublishPanel(job, container) {
 async function generatePublishMetadata(job, container, forceRegenerate) {
   const pub = job.publish;
   const autoGenerate = $("#youtubeAutoGenerateMetadata") && $("#youtubeAutoGenerateMetadata").checked;
+  pub._generating = true;
+  renderPublishSection(job, container);
   if (!autoGenerate) {
     if (pub.title == null || forceRegenerate) pub.title = extractTitleFromStory(job.story) || "Untitled";
     if (pub.description == null || forceRegenerate) pub.description = "";
-    renderPublishSection(job, container);
-    return;
+  } else {
+    try {
+      const meta = await generateYoutubeMetadata(job);
+      pub.title = meta.title;
+      pub.description = meta.description;
+      pub.tags = meta.tags;
+    } catch (e) {
+      if (pub.title == null) pub.title = extractTitleFromStory(job.story) || "Untitled";
+      if (pub.description == null) pub.description = "";
+      showToast("Auto-generate failed (" + (e && e.message ? e.message : String(e)) + ") — using a plain title instead.");
+    }
   }
+  await generatePublishThumbnail(job, forceRegenerate);
+  pub._generating = false;
+  renderPublishSection(job, container);
+}
+
+// Only (re)renders a thumbnail when asked to — either there's none yet, or
+// the caller explicitly wants a fresh one (a metadata regenerate, or the
+// dedicated Regenerate Thumbnail button). Revokes the previous object URL
+// first so repeated regeneration during one session doesn't leak blob URLs.
+async function generatePublishThumbnail(job, force) {
+  const pub = job.publish;
+  if (pub.thumbnailBlob && !force) return;
+  if (pub.thumbnailUrl) URL.revokeObjectURL(pub.thumbnailUrl);
+  const channelName = $("#channelName").value.trim() || "Anonymous";
+  const blob = await renderYoutubeThumbnailImage({ resultBlob: job.resultBlob, title: pub.title, channelName });
+  pub.thumbnailBlob = blob;
+  pub.thumbnailUrl = blob ? URL.createObjectURL(blob) : null;
+}
+
+async function regeneratePublishThumbnail(job, container) {
+  const pub = job.publish;
   pub._generating = true;
   renderPublishSection(job, container);
-  try {
-    const meta = await generateYoutubeMetadata(job);
-    pub.title = meta.title;
-    pub.description = meta.description;
-    pub.tags = meta.tags;
-  } catch (e) {
-    if (pub.title == null) pub.title = extractTitleFromStory(job.story) || "Untitled";
-    if (pub.description == null) pub.description = "";
-    showToast("Auto-generate failed (" + (e && e.message ? e.message : String(e)) + ") — using a plain title instead.");
-  }
+  await generatePublishThumbnail(job, true);
   pub._generating = false;
+  renderPublishSection(job, container);
+}
+
+function setPublishCustomThumbnail(job, container, file) {
+  const pub = job.publish;
+  if (pub.thumbnailUrl) URL.revokeObjectURL(pub.thumbnailUrl);
+  pub.thumbnailBlob = file;
+  pub.thumbnailUrl = URL.createObjectURL(file);
   renderPublishSection(job, container);
 }
 
@@ -2921,6 +2966,87 @@ async function generateYoutubeMetadata(job) {
   };
 }
 
+// YouTube thumbnails are 1280x720 (16:9) — this app's actual output is
+// 1080x1920 (9:16), so cover-fit cropping a mid-point frame the same way
+// generateVideoThumbnail() does for the 180x320 Media Library thumbnails
+// crops off most of the frame's top/bottom, not letterboxes it. That's a
+// real, visible tradeoff (the thumbnail shows a cropped middle strip of the
+// vertical video), not a bug — letterboxing a not-actually-widescreen
+// source looks worse for a thumbnail than a tight crop does. Same timeout-
+// guarded settle-once pattern as generateVideoThumbnail for the same
+// reason: a corrupt blob or an unfired "seeked" event must not hang the
+// publish panel's "Generating thumbnail..." state forever.
+function renderYoutubeThumbnailImage({ resultBlob, title, channelName }) {
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    const url = URL.createObjectURL(resultBlob);
+    let settled = false;
+    const cleanup = () => URL.revokeObjectURL(url);
+    const settle = (value) => { if (settled) return; settled = true; clearTimeout(timer); cleanup(); resolve(value); };
+    const timer = setTimeout(() => settle(null), 8000);
+    video.addEventListener("loadedmetadata", () => {
+      video.currentTime = (video.duration || 1) / 2;
+    });
+    video.addEventListener("seeked", () => {
+      try {
+        const W = 1280, H = 720;
+        const canvas = document.createElement("canvas");
+        canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext("2d");
+        const vw = video.videoWidth || W, vh = video.videoHeight || H;
+        const scale = Math.max(W / vw, H / vh);
+        const dw = vw * scale, dh = vh * scale;
+        ctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
+
+        // A bottom gradient so white title text stays legible over an
+        // arbitrary, unpredictable video frame — same reasoning as a caption
+        // box/shadow, just baked into the thumbnail instead of configurable.
+        const grad = ctx.createLinearGradient(0, H * 0.45, 0, H);
+        grad.addColorStop(0, "rgba(0,0,0,0)");
+        grad.addColorStop(1, "rgba(0,0,0,0.75)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, H * 0.45, W, H * 0.55);
+
+        const pad = Math.round(W * 0.05);
+        const maxTitleFontSize = 64, minTitleFontSize = 32;
+        const titleText = title || "Untitled";
+        const titleFontSize = shrinkFontToFit(maxTitleFontSize, minTitleFontSize, (size) => {
+          ctx.font = `800 ${size}px sans-serif`;
+          const lines = wrapCanvasText(ctx, titleText, W - pad * 2);
+          return lines.length <= 3;
+        });
+        ctx.font = `800 ${titleFontSize}px sans-serif`;
+        const lines = wrapCanvasText(ctx, titleText, W - pad * 2).slice(0, 3);
+        const lineHeight = titleFontSize * 1.2;
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = "rgba(0,0,0,0.6)";
+        ctx.lineWidth = Math.max(2, titleFontSize * 0.06);
+        ctx.textBaseline = "alphabetic";
+        let y = H - pad - (lines.length - 1) * lineHeight;
+        for (const line of lines) {
+          ctx.strokeText(line, pad, y);
+          ctx.fillText(line, pad, y);
+          y += lineHeight;
+        }
+
+        if (channelName) {
+          ctx.font = "600 22px sans-serif";
+          ctx.fillStyle = "rgba(255,255,255,0.85)";
+          ctx.fillText(channelName, pad, pad + 22);
+        }
+
+        canvas.toBlob((blob) => settle(blob), "image/png");
+      } catch (e) {
+        settle(null);
+      }
+    });
+    video.addEventListener("error", () => settle(null));
+    video.src = url;
+  });
+}
+
 function toLocalDatetimeInputValue(isoString) {
   const d = new Date(isoString);
   const pad = (n) => String(n).padStart(2, "0");
@@ -2955,6 +3081,7 @@ async function uploadJobToYoutube(job, container) {
     };
 
     const videoBytes = new Uint8Array(await job.resultBlob.arrayBuffer());
+    const thumbnailBytes = pub.thumbnailBlob ? new Uint8Array(await pub.thumbnailBlob.arrayBuffer()) : null;
     const meta = {
       accountId: pub.accountId,
       title: pub.title,
@@ -2963,13 +3090,21 @@ async function uploadJobToYoutube(job, container) {
       categoryId: pub.categoryId || "24",
       privacyStatus: pub.privacyStatus,
       scheduledAt: pub.scheduledAt,
-      hasThumbnail: false,
+      hasThumbnail: !!thumbnailBytes,
       videoLen: videoBytes.length,
+      thumbnailLen: thumbnailBytes ? thumbnailBytes.length : 0,
+      // A Regenerate always produces image/png (our own canvas.toBlob call);
+      // a custom "Upload Custom..." File carries its own real type (jpeg is
+      // common) — YouTube's thumbnails.set needs the Content-Type to match
+      // the actual bytes, so this can't just be hardcoded to png.
+      thumbnailMimeType: pub.thumbnailBlob ? (pub.thumbnailBlob.type || "image/png") : null,
     };
     const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
     const header = new Uint8Array(4);
     new DataView(header.buffer).setUint32(0, metaBytes.length, true);
-    const frame = new Blob([header, metaBytes, videoBytes]);
+    const frame = thumbnailBytes
+      ? new Blob([header, metaBytes, videoBytes, thumbnailBytes])
+      : new Blob([header, metaBytes, videoBytes]);
 
     const resp = await fetch(`/youtube-upload?id=${id}`, { method: "POST", body: frame });
     const data = await resp.json();
@@ -2977,6 +3112,7 @@ async function uploadJobToYoutube(job, container) {
     pub.status = data.status === "scheduled" ? "scheduled" : "uploaded";
     pub.videoId = data.videoId;
     pub.uploadProgressPct = 100;
+    refreshYoutubeQuotaText();
   } catch (e) {
     pub.status = "failed";
     pub.error = e && e.message ? e.message : String(e);
@@ -3598,6 +3734,19 @@ async function refreshYoutubeAccounts() {
   } catch (e) {
     youtubeAccountsCache = [];
     $("#youtubeAccountsList").innerHTML = `<p style="font-size:0.8rem;color:var(--danger);">Couldn't load accounts (no backend server).</p>`;
+  }
+  refreshYoutubeQuotaText();
+}
+
+async function refreshYoutubeQuotaText() {
+  const el = $("#youtubeQuotaText");
+  if (!el) return;
+  try {
+    const resp = await fetch("/youtube-usage");
+    const data = await resp.json();
+    el.textContent = `Uploaded ${data.uploadsToday} time${data.uploadsToday === 1 ? "" : "s"} today (across all channels). `;
+  } catch (e) {
+    el.textContent = "";
   }
 }
 
@@ -4928,6 +5077,15 @@ function updateBatchProgressStats() {
     ["Est. remaining", etaLabel],
     ["Videos done", `${doneCount} / ${totalJobs}`],
   ];
+  // Only shown once the feature is actually usable AND at least one job in
+  // this batch has touched publishing — an all-"none" batch (nobody clicked
+  // "Publish to YouTube" on anything yet) would otherwise show a permanent,
+  // always-zero tile with no useful information.
+  if (youtubeAvailable && jobs.some(j => j.publish && j.publish.status !== "none")) {
+    const uploadedCount = jobs.filter(j => j.publish.status === "uploaded" || j.publish.status === "scheduled").length;
+    const eligibleCount = jobs.filter(j => j.status === "done").length;
+    tiles.push(["Uploaded to YouTube", `${uploadedCount} / ${eligibleCount}`]);
+  }
   // The native backend's own render slots (renderLimiter, capped by
   // "Parallel renders") are what actually gate concurrency — split the
   // client-side "active" count into "really encoding right now" vs "waiting

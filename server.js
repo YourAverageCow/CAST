@@ -111,10 +111,25 @@ function loadYoutubeStore() {
     const raw = fs.readFileSync(YT_STORE_PATH, "utf8");
     const data = JSON.parse(raw);
     if (!data.accounts) data.accounts = [];
+    if (!data.uploadLog) data.uploadLog = [];
     return data;
   } catch (e) {
-    return { oauthClient: null, accounts: [] };
+    return { oauthClient: null, accounts: [], uploadLog: [] };
   }
+}
+// YouTube exposes no real quota-usage API — this is a local, best-effort
+// proxy: a timestamp per successful upload, trimmed to the last 2 days
+// (only "today" is ever displayed) so the store doesn't grow unbounded
+// across months of use.
+function recordYoutubeUpload(store) {
+  const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
+  store.uploadLog = (store.uploadLog || []).filter(t => t > cutoff);
+  store.uploadLog.push(Date.now());
+  saveYoutubeStore(store);
+}
+function countYoutubeUploadsToday(store) {
+  const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
+  return (store.uploadLog || []).filter(t => t >= startOfDay.getTime()).length;
 }
 function saveYoutubeStore(data) {
   fs.mkdirSync(path.dirname(YT_STORE_PATH), { recursive: true });
@@ -542,7 +557,9 @@ async function runYoutubeUpload(id, store, account, video, thumbnail, meta, resp
       try {
         const thumbResp = await fetch(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "image/png" },
+          // Must match the actual bytes — a Regenerate is always our own
+          // canvas.toBlob() PNG, but "Upload Custom..." can be a JPEG.
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": meta.thumbnailMimeType || "image/png" },
           body: thumbnail,
         });
         // Non-fatal — the video itself uploaded fine either way.
@@ -550,6 +567,7 @@ async function runYoutubeUpload(id, store, account, video, thumbnail, meta, resp
       } catch (e) { console.warn("YouTube thumbnail upload error:", e.message); }
     }
 
+    recordYoutubeUpload(store);
     sendProgress(id, { phase: "done", pct: 100, videoId });
     respond(200, { videoId, status: isScheduled ? "scheduled" : "uploaded" });
   } catch (e) {
@@ -1346,6 +1364,12 @@ function handleRequest(req, res) {
     const store = loadYoutubeStore();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ accounts: store.accounts.map(stripTokens) }));
+    return;
+  }
+  if (urlNoQuery === "/youtube-usage" && req.method === "GET") {
+    const store = loadYoutubeStore();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ uploadsToday: countYoutubeUploadsToday(store) }));
     return;
   }
   if (urlNoQuery.startsWith("/youtube-accounts/") && req.method === "DELETE") {
