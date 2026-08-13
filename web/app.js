@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 99;
+const VERSION = 100;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1263,6 +1263,17 @@ async function streamChatInner(messages, onChunk, temperature) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // Reasoning models (e.g. DeepSeek's deepseek-reasoner) stream real bytes —
+  // delta.reasoning_content "thinking" tokens — for a real stretch (can be
+  // a minute or more on a complex prompt) before any delta.content shows up.
+  // parseSSEDelta only ever looks at delta.content, so those chunks reset
+  // the stall watchdog below (real data IS arriving) but never call
+  // onChunk() — the textarea stays empty with no error and no stall toast,
+  // which reads as a total hang even though the model is actively working.
+  // Told once, not per-chunk, the moment reasoning starts.
+  let sawRealContent = false;
+  let toldReasoning = false;
+  const reasoningStallStart = { t: null };
   try {
     while (true) {
       let stallTimer;
@@ -1289,7 +1300,24 @@ async function streamChatInner(messages, onChunk, temperature) {
         try {
           const parsed = JSON.parse(data);
           const text = parseSSEDelta(provider.api, parsed);
-          if (text) onChunk(text);
+          if (text) {
+            sawRealContent = true;
+            onChunk(text);
+          } else if (!sawRealContent) {
+            const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+            if (delta && delta.reasoning_content) {
+              if (!toldReasoning) {
+                toldReasoning = true;
+                reasoningStallStart.t = Date.now();
+                showToast(`${provider.label} is thinking before it answers — this can take a while on a reasoning model.`, 5000);
+              } else if (Date.now() - reasoningStallStart.t > 30000) {
+                // Re-remind every 30s while still only reasoning, so a long
+                // wait doesn't quietly go silent again after the one-time toast.
+                reasoningStallStart.t = Date.now();
+                showToast(`Still thinking (${provider.label})... this is normal for a reasoning model, just slow.`, 5000);
+              }
+            }
+          }
         } catch (e) {}
       }
     }
