@@ -43,6 +43,21 @@
   --hover-bg: #eaeef2;
   --hover-border: #afb8c1;
 }
+/* Compact layout — a body class (not a data-attr, to compose freely with
+   the theme attribute) tightening the same spacing/font-size properties
+   across sidebar, settings panels, labels, and buttons rather than a
+   parallel set of components. Deliberately modest reductions — enough to
+   fit more on screen without breaking wrapping/alignment. */
+body.compact .sidebar { padding: 12px; }
+body.compact .settings-section { margin-bottom: 12px; }
+body.compact label { font-size: 0.7rem; margin-top: 6px; margin-bottom: 2px; }
+body.compact select, body.compact input, body.compact textarea { padding: 5px 7px; }
+body.compact button { padding: 6px 0; font-size: 0.75rem; }
+/* Reduce motion — a blanket transition/animation kill switch rather than
+   hunting down each individual transition property, since new ones get
+   added to this file often as features ship. !important is deliberate:
+   this needs to win over every existing per-element transition rule. */
+body.reduce-motion, body.reduce-motion * { transition: none !important; animation: none !important; }
 /* Same TTF files vendored for the actual render (web/vendor/fonts/) —
    declared here so the caption preview uses the exact face that will
    render, not a generic system-font approximation of "Anton"/"Bebas Neue"
@@ -331,6 +346,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 .app-gear { position: fixed; top: 16px; right: 16px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; z-index: 220; padding: 0; }
 .app-gear:hover { color: var(--text); border-color: var(--accent); background: var(--hover-bg); }
+.app-theme-toggle { position: fixed; top: 16px; right: 60px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.05rem; display: flex; align-items: center; justify-content: center; z-index: 220; padding: 0; }
+.app-theme-toggle:hover { color: var(--text); border-color: var(--accent); background: var(--hover-bg); }
 .app-version { position: fixed; bottom: 12px; right: 16px; font-family: 'SF Mono', Menlo, monospace; font-size: 0.7rem; color: var(--accent); background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); padding: 2px 8px; border-radius: 4px; z-index: 80; }
 
 /* Settings modal (centered popup, left tab rail) */
@@ -753,6 +770,22 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <option value="light">Light</option>
             <option value="system">Match system</option>
           </select>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:4px;">Also toggleable any time from the <span style="font-size:1em;">&#9789;</span> button next to Settings, top-right — this dropdown is where "Match system" lives.</p>
+          <label style="margin-top:10px;">Accent color</label>
+          <button type="button" class="color-swatch-btn" id="accentColorBtn" onclick="openColorPicker('accentColor', this)">
+            <span class="color-swatch" id="accentColorSwatch"></span>
+            <span class="color-swatch-label" id="accentColorLabel"></span>
+          </button>
+          <input type="hidden" id="accentColor" value="#58a6ff">
+          <button type="button" onclick="resetAccentColor()" style="margin-top:6px;">Reset to default</button>
+          <label style="margin-top:10px;">UI text size (<span id="uiFontScaleValue">100%</span>)</label>
+          <input type="range" id="uiFontScale" min="80" max="130" step="5" value="100">
+          <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+            <input type="checkbox" id="compactMode" style="width:auto;"> Compact layout — tighter spacing, fits more on screen
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+            <input type="checkbox" id="reduceMotion" style="width:auto;"> Reduce motion — disable UI transitions/animations
+          </label>
         </div>
         <div class="settings-section" id="outputFolderSection" style="display:none;">
           <h3>Default Output Folder</h3>
@@ -1056,6 +1089,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 </div>
 
 <div class="main">
+  <button class="app-theme-toggle" onclick="toggleThemeQuick()" id="themeToggleBtn" title="Toggle dark/light theme">&#9789;</button>
   <button class="gear-btn app-gear" onclick="toggleSettings()" title="Settings">&#9881;</button>
   <span class="version app-version" id="versionBadge">v0</span>
 

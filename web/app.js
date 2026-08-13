@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 96;
+const VERSION = 97;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -358,6 +358,58 @@ function applyTheme(value) {
   } else {
     delete document.documentElement.dataset.theme;
   }
+  updateThemeToggleIcon();
+}
+
+// Quick top-right toggle — flips between dark/light directly rather than
+// cycling through "system" too, since that's a deliberate user choice best
+// left to the Settings dropdown (this button syncs #theme to whichever
+// concrete value it lands on, so opening Settings afterward shows the
+// truth rather than a stale "system" that no longer reflects what's shown).
+function toggleThemeQuick() {
+  const isLight = document.documentElement.dataset.theme === "light";
+  const next = isLight ? "dark" : "light";
+  $("#theme").value = next;
+  applyTheme(next);
+  saveSettings();
+}
+function updateThemeToggleIcon() {
+  const btn = $("#themeToggleBtn");
+  if (!btn) return;
+  // Sun icon when currently dark (click to go light), moon icon when
+  // currently light (click to go dark) — the icon shows the destination,
+  // not the current state, matching how most apps' theme toggles read.
+  btn.innerHTML = document.documentElement.dataset.theme === "light" ? "&#9789;" : "&#9728;";
+}
+
+const DEFAULT_ACCENT_COLOR = "#58a6ff";
+function applyAccentColor() {
+  const value = ($("#accentColor").value || "").trim();
+  if (!value || value.toLowerCase() === DEFAULT_ACCENT_COLOR) {
+    document.documentElement.style.removeProperty("--accent");
+  } else {
+    document.documentElement.style.setProperty("--accent", value);
+  }
+}
+function resetAccentColor() {
+  $("#accentColor").value = DEFAULT_ACCENT_COLOR;
+  $("#accentColor").dispatchEvent(new Event("input", { bubbles: true }));
+  syncColorSwatchDisplay("accentColor");
+}
+
+function applyCompactMode() {
+  document.body.classList.toggle("compact", !!$("#compactMode").checked);
+}
+function applyReduceMotion() {
+  document.body.classList.toggle("reduce-motion", !!$("#reduceMotion").checked);
+}
+// Every font-size in this file's CSS is in rem, so scaling the root
+// font-size scales the whole UI proportionally — no per-component overrides
+// needed the way compact mode requires.
+function applyUiFontScale() {
+  const pct = parseInt($("#uiFontScale").value, 10) || 100;
+  document.documentElement.style.fontSize = pct === 100 ? "" : (16 * pct / 100) + "px";
+  $("#uiFontScaleValue").textContent = pct + "%";
 }
 
 // ---------- API config ----------
@@ -437,7 +489,7 @@ const SETTINGS_FIELDS = [
   "browserSpeechRate", "browserSpeechPitch",
   "enableBrowserAsr", "whisperModel",
   "renderConcurrency", "transcribeConcurrency", "renderBackendPref", "storyGenConcurrency",
-  "theme", "outputFolder",
+  "theme", "outputFolder", "accentColor", "compactMode", "reduceMotion", "uiFontScale",
   "youtubeAutoGenerateMetadata", "youtubeTitleTemplate", "youtubeDescriptionTemplate",
   "youtubeDefaultPrivacy", "youtubeDefaultCategoryId",
   "youtubeAutoUpload", "youtubeAutoUploadAccountId",
@@ -513,6 +565,11 @@ async function applyLoadedSettings() {
   syncColorSwatchDisplay("highlightColor");
   syncColorSwatchDisplay("boxColor");
   syncColorSwatchDisplay("shadowColor");
+  syncColorSwatchDisplay("accentColor");
+  applyAccentColor();
+  applyCompactMode();
+  applyReduceMotion();
+  applyUiFontScale();
   updateCaptionBoxShadowRows();
   // loadSettings() above restores each slider's raw .value from storage
   // without dispatching input events, so their live value-label <span>s
@@ -874,6 +931,10 @@ async function init() {
     storyGenLimiter.setMax(parseInt($("#storyGenConcurrency").value, 10) || DEFAULT_STORY_GEN_CONCURRENCY);
   });
   $("#theme").addEventListener("change", () => applyTheme($("#theme").value));
+  $("#accentColor").addEventListener("input", applyAccentColor);
+  $("#compactMode").addEventListener("change", applyCompactMode);
+  $("#reduceMotion").addEventListener("change", applyReduceMotion);
+  $("#uiFontScale").addEventListener("input", applyUiFontScale);
   $("#captionBox").addEventListener("change", updateCaptionBoxShadowRows);
   $("#captionShadow").addEventListener("change", updateCaptionBoxShadowRows);
   // Per-engine TTS sliders (Settings -> Voice) — same "live value label next
