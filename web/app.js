@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 94;
+const VERSION = 95;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -765,8 +765,15 @@ async function probeNativeKokoroBackend() {
   try {
     const ctrl = new AbortController();
     // Must outlast checkKokoroNative's 60s server-side timeout — first-ever
-    // check resolves/installs several real Python dependencies via uvx.
-    const t = setTimeout(() => ctrl.abort(), 61000);
+    // check resolves/installs several real Python dependencies via uvx. A
+    // wider margin than the other probes' fixed 1s buffer on purpose: at
+    // this absolute timeout scale, the server's own execFile timeout
+    // firing, killing the subprocess, and formatting/sending the response
+    // can plausibly eat more than 1s under the exact heavy-load conditions
+    // (concurrent uvx installs) this check exists to handle — this now
+    // gates a background probe (see init()), not app startup, so a wider
+    // margin costs nothing.
+    const t = setTimeout(() => ctrl.abort(), 65000);
     const resp = await fetch("/kokoro-native-capability", { signal: ctrl.signal });
     clearTimeout(t);
     if (!resp.ok) return false;
@@ -795,9 +802,30 @@ async function probeYoutubeCapability() {
 
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, nativeKokoroAvailable, youtubeAvailable] = await Promise.all([
-    probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeNativeKokoroBackend(), probeYoutubeCapability(),
+  // probeNativeKokoroBackend is deliberately NOT in this Promise.all — its
+  // first-ever check can take up to ~60s (uvx resolving/installing kokoro's
+  // real dependencies), and awaiting it here would leave the whole app
+  // non-interactive for that long on first launch, with no loading
+  // indicator. Runs in the background instead; buildEngineSelect() re-runs
+  // once it settles so the "Kokoro — native" option's availability updates
+  // in place rather than blocking everything else.
+  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, youtubeAvailable] = await Promise.all([
+    probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeYoutubeCapability(),
   ]);
+  probeNativeKokoroBackend().then((available) => {
+    nativeKokoroAvailable = available;
+    // buildEngineSelect() rebuilds both <select>'s options via innerHTML,
+    // which resets .value to the first option — save/restore the user's
+    // already-loaded engine choice around the rebuild, same pattern
+    // applyLoadedSettings() uses when populateVoices() does the same thing
+    // to #voice, so a late-resolving probe can't silently revert the
+    // engine dropdown back to Piper.
+    const savedEngine = $("#ttsEngine").value;
+    const savedEngineQuick = $("#ttsEngineQuick").value;
+    buildEngineSelect();
+    if (savedEngine) $("#ttsEngine").value = savedEngine;
+    if (savedEngineQuick) $("#ttsEngineQuick").value = savedEngineQuick;
+  });
   $("#publishTabBtn").style.display = youtubeAvailable ? "" : "none";
   $("#scheduleTabBtn").style.display = youtubeAvailable ? "" : "none";
   // Fire-and-forget, not awaited — populates youtubeAccountsCache (and, via
@@ -1106,7 +1134,15 @@ const storyGenLimiter = makeClientSlotLimiter(DEFAULT_STORY_GEN_CONCURRENCY);
 // Every call — bulk batch, per-card buttons, single-video sidebar — goes
 // through storyGenLimiter, so the concurrency cap is enforced app-wide
 // rather than only inside the one caller that made the problem obvious.
-async function streamChat(messages, onChunk, temperature) {
+async function streamChat(messages, onChunk, temperature, skipLimiter) {
+  // skipLimiter is for call sites that fire once per already-finished job
+  // (e.g. generateYoutubeMetadata, right before an auto-upload) rather than
+  // in a bulk-generate burst — storyGenLimiter exists to cap concurrent
+  // ideas/story requests in a batch, and routing a one-off metadata call
+  // through the same queue just means it can get stuck behind unrelated
+  // jobs' story generation, stalling an otherwise-ready upload for no
+  // rate-limit benefit (that call was never going to be part of a burst).
+  if (skipLimiter) return streamChatInner(messages, onChunk, temperature);
   await storyGenLimiter.acquire();
   try {
     return await streamChatInner(messages, onChunk, temperature);
@@ -1568,6 +1604,13 @@ function stopCaptionSampleLoop() {
 // with no background video uploaded, since the preview lives in Settings.
 function showCaptionSample() {
   stopCaptionSampleLoop();
+  // If a real preview is already playing (Settings opened mid-playback,
+  // restoring its last-used "video" tab via setSettingsTab), don't clobber
+  // the shared subtitles/previewKaraokeGroups globals captionsLoop() is
+  // actively driving from real audio — the sample loop only ever gets
+  // stopped by closeSettings()/startPreview(), neither of which fires
+  // when Settings opens on top of an already-running preview.
+  if (previewActive) return;
   const grouping = currentCaptionGrouping();
   const { subtitles: sampleSubs, karaokeGroups, duration } = buildCaptionSampleCues(grouping);
   subtitles = sampleSubs;
@@ -3117,9 +3160,15 @@ async function generateYoutubeMetadata(job) {
     "No markdown, no code fences, no commentary outside the JSON.";
   const user = "Story:\n" + (job.story || "").slice(0, 3000);
   let raw = "";
+  // skipLimiter=true — this fires once per already-rendered job right
+  // before an auto-upload, not as part of a bulk-generate burst, so it
+  // shouldn't queue behind other jobs' unrelated ideas/story calls and
+  // stall a video that's otherwise ready to publish.
   await streamChat(
     [{ role: "system", content: system }, { role: "user", content: user }],
-    (chunk) => { raw += chunk; }
+    (chunk) => { raw += chunk; },
+    undefined,
+    true
   );
   let parsed;
   try {

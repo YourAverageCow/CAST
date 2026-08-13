@@ -186,7 +186,16 @@ function loadYoutubeStore() {
 // entire point of supporting multiple projects.
 function recordYoutubeUpload(store, oauthClientId) {
   const client = store.oauthClients.find(c => c.id === oauthClientId);
-  if (!client) return;
+  // Reachable if the project was deleted mid-upload (a race: DELETE
+  // /youtube-oauth-clients/:id vs. an in-flight upload whose access token
+  // was still valid, so ensureFreshAccessToken never re-checked the
+  // client exists) — the upload still succeeds on YouTube's side, but
+  // there's no client left to record quota against. Log it rather than
+  // silently dropping the record with zero diagnostic anywhere.
+  if (!client) {
+    console.warn(`recordYoutubeUpload: no oauthClient ${oauthClientId} — upload succeeded but wasn't counted against any project's quota.`);
+    return;
+  }
   const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
   client.uploadLog = (client.uploadLog || []).filter(t => t > cutoff);
   client.uploadLog.push(Date.now());
@@ -220,6 +229,14 @@ function pickAccountForUpload(store, accountId) {
   const alt = store.accounts.find(a =>
     a.id !== requested.id &&
     a.channelId === requested.channelId &&
+    // Skip an orphaned connection (its project was deleted — DELETE
+    // /youtube-oauth-clients/:id deliberately leaves these accounts in
+    // place, see that route's comment) — countYoutubeUploadsToday returns
+    // 0 for a missing client, which would otherwise make a dead
+    // connection look like the BEST candidate and redirect a normally-
+    // working upload into a guaranteed "project no longer configured"
+    // failure instead of just using the requested (quota-capped) one.
+    store.oauthClients.some(c => c.id === a.oauthClientId) &&
     countYoutubeUploadsToday(store, a.oauthClientId) < YOUTUBE_QUOTA_SOFT_LIMIT
   );
   return alt || requested;
@@ -468,7 +485,12 @@ function checkKokoroNative(cb) {
   if (kokoroNativeAvailable !== null) { cb(kokoroNativeAvailable); return; }
   // Long timeout — uvx resolves/installs kokoro + its dependencies (torch,
   // spacy, transformers, ...) on first run, which is genuinely slow.
-  execFile("uvx", ["--with", "kokoro", "--with", "soundfile", "python3", "-c", "import kokoro"], { timeout: 60000 }, (err) => {
+  // Imports soundfile/numpy too, not just kokoro — scripts/kokoro_native.py
+  // needs all three at real invocation time (soundfile especially needs a
+  // real libsndfile binary dependency on some platforms), so a check that
+  // only exercised "import kokoro" could report available:true while a
+  // real generation still fails on a missing soundfile install.
+  execFile("uvx", ["--with", "kokoro", "--with", "soundfile", "python3", "-c", "import kokoro, soundfile, numpy"], { timeout: 60000 }, (err) => {
     if (err && err.killed) { cb(false); return; }
     kokoroNativeAvailable = !err;
     cb(kokoroNativeAvailable);
@@ -1121,18 +1143,28 @@ function runNativeKokoro(text, voice, speed, respond) {
   const killTimer = setTimeout(() => { proc.kill("SIGKILL"); }, 8 * 60 * 1000);
   let stdout = "";
   let stderrTail = "";
+  // A spawn failure (uvx missing from PATH, EACCES, EMFILE) fires BOTH
+  // 'error' and 'close' (with code null) for the same process — without
+  // this guard both handlers would call respond(), and the second call
+  // throws ERR_HTTP_HEADERS_SENT since the response already ended.
+  let responded = false;
+  const respondOnce = (status, data) => {
+    if (responded) return;
+    responded = true;
+    respond(status, data);
+  };
   proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
   proc.stderr.on("data", (chunk) => { stderrTail = (stderrTail + chunk.toString()).slice(-4000); });
   proc.on("error", (err) => {
     clearTimeout(killTimer);
     cleanup();
-    respond(500, { error: "Couldn't run the native Kokoro backend (via uvx): " + err.message });
+    respondOnce(500, { error: "Couldn't run the native Kokoro backend (via uvx): " + err.message });
   });
   proc.on("close", (code) => {
     clearTimeout(killTimer);
     if (code !== 0) {
       cleanup();
-      respond(500, { error: `Native Kokoro exited with code ${code}\n${stderrTail.slice(-1000)}` });
+      respondOnce(500, { error: `Native Kokoro exited with code ${code}\n${stderrTail.slice(-1000)}` });
       return;
     }
     let meta;
@@ -1144,7 +1176,7 @@ function runNativeKokoro(text, voice, speed, respond) {
       meta = JSON.parse(lastLine);
     } catch (e) {
       cleanup();
-      respond(500, { error: "Native Kokoro finished but its output was unparseable: " + e.message });
+      respondOnce(500, { error: "Native Kokoro finished but its output was unparseable: " + e.message });
       return;
     }
     let audioBuf;
@@ -1152,11 +1184,11 @@ function runNativeKokoro(text, voice, speed, respond) {
       audioBuf = fs.readFileSync(outPath);
     } catch (e) {
       cleanup();
-      respond(500, { error: "Native Kokoro finished but the audio file was missing: " + e.message });
+      respondOnce(500, { error: "Native Kokoro finished but the audio file was missing: " + e.message });
       return;
     }
     cleanup();
-    respond(200, {
+    respondOnce(200, {
       audioBase64: audioBuf.toString("base64"),
       durationSec: meta.durationSec,
       wordTimings: (meta.words || []).map(w => ({ text: w.text, start: w.start, end: w.end })),
