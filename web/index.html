@@ -716,6 +716,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       </div>
 
       <div class="settings-tab-panel" data-tab="performance">
+        <div class="settings-section">
+          <h3>Story Generation</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">
+            How many story/idea requests a batch can have in flight to your story provider at once. Higher is faster for a
+            big batch, but a low-rate-limit API key can get throttled by the provider under high concurrency — that can
+            make one or two videos in a batch sit on "Generating story..." far longer than the rest. Lower this if that
+            happens.
+          </p>
+          <label>Concurrent story requests (<span id="storyGenConcurrencyValue">3</span>)</label>
+          <input type="range" id="storyGenConcurrency" min="1" max="10" step="1" value="3">
+        </div>
         <div class="settings-section" id="performanceSection" style="display:none;">
           <h3>Performance</h3>
           <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Controls the native render/transcribe backend (only shown when it's available). Higher values use more CPU cores at once — dial back if a batch render makes your machine unresponsive.</p>

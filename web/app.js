@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 92;
+const VERSION = 93;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -436,7 +436,7 @@ const SETTINGS_FIELDS = [
   "elevenlabsModel", "elevenlabsStability", "elevenlabsSimilarity",
   "browserSpeechRate", "browserSpeechPitch",
   "enableBrowserAsr", "whisperModel",
-  "renderConcurrency", "transcribeConcurrency", "renderBackendPref",
+  "renderConcurrency", "transcribeConcurrency", "renderBackendPref", "storyGenConcurrency",
   "theme", "outputFolder",
   "youtubeAutoGenerateMetadata", "youtubeTitleTemplate", "youtubeDescriptionTemplate",
   "youtubeDefaultPrivacy", "youtubeDefaultCategoryId",
@@ -527,6 +527,11 @@ async function applyLoadedSettings() {
     const el = document.getElementById(id);
     const valueEl = document.getElementById(id + "Value");
     if (el && valueEl) valueEl.textContent = parseFloat(el.value).toFixed(2);
+  }
+  const storySlider = document.getElementById("storyGenConcurrency");
+  if (storySlider) {
+    $("#storyGenConcurrencyValue").textContent = storySlider.value;
+    storyGenLimiter.setMax(parseInt(storySlider.value, 10) || DEFAULT_STORY_GEN_CONCURRENCY);
   }
   return savedData;
 }
@@ -824,6 +829,13 @@ async function init() {
     $("#transcribeConcurrencyValue").textContent = $("#transcribeConcurrency").value;
     postTranscribeConcurrencySettings();
   });
+  $("#storyGenConcurrency").addEventListener("input", () => {
+    $("#storyGenConcurrencyValue").textContent = $("#storyGenConcurrency").value;
+    // Takes effect immediately, including mid-batch — a lower cap here
+    // just makes future streamChat() calls wait for a slot; it doesn't
+    // touch requests already in flight.
+    storyGenLimiter.setMax(parseInt($("#storyGenConcurrency").value, 10) || DEFAULT_STORY_GEN_CONCURRENCY);
+  });
   $("#theme").addEventListener("change", () => applyTheme($("#theme").value));
   $("#captionBox").addEventListener("change", updateCaptionBoxShadowRows);
   $("#captionShadow").addEventListener("change", updateCaptionBoxShadowRows);
@@ -1047,13 +1059,62 @@ function getVoice() {
   return $("#voice").value || TTS_ENGINES[getEngine()].defaultVoice() || "";
 }
 
+// Client-side counterpart to server.js's makeSlotLimiter — same shape (a
+// mutable-cap slot queue), used here to cap how many story-generation
+// requests can be in flight to the user's story provider at once. Without
+// this, a bulk batch's Promise.all fires up to count*2 concurrent requests
+// (ideas + story per job) straight at the provider — a low-rate-limit key
+// gets throttled, and since a throttled response often trickles in slowly
+// rather than erroring outright, streamChat's per-chunk stall watchdog
+// never trips, so the affected job(s) just sit on "Generating story..." far
+// longer than the rest of the batch while everything else sails through.
+function makeClientSlotLimiter(max) {
+  let active = 0;
+  const queue = [];
+  const state = { max };
+  return {
+    acquire() {
+      return new Promise((resolve) => {
+        const tryAcquire = () => {
+          if (active < state.max) { active++; resolve(); }
+          else queue.push(tryAcquire);
+        };
+        tryAcquire();
+      });
+    },
+    release() {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    },
+    setMax(n) {
+      state.max = n;
+      while (active < state.max && queue.length) queue.shift()();
+    },
+    getMax() { return state.max; },
+  };
+}
+const DEFAULT_STORY_GEN_CONCURRENCY = 3;
+const storyGenLimiter = makeClientSlotLimiter(DEFAULT_STORY_GEN_CONCURRENCY);
+
 // ---------- Story generation (streaming, client-side) ----------
 // Provider-agnostic: STORY_PROVIDERS (web/lib/story-providers.js) supplies
 // buildChatRequest() (the {url, headers, body} to send) and parseSSEDelta()
 // (how to pull the next text chunk out of one parsed `data: ` line) — this
 // function is just the shared fetch + SSE-read loop every provider streams
 // through, regardless of whether its wire format is OpenAI's or Anthropic's.
+// Every call — bulk batch, per-card buttons, single-video sidebar — goes
+// through storyGenLimiter, so the concurrency cap is enforced app-wide
+// rather than only inside the one caller that made the problem obvious.
 async function streamChat(messages, onChunk, temperature) {
+  await storyGenLimiter.acquire();
+  try {
+    return await streamChatInner(messages, onChunk, temperature);
+  } finally {
+    storyGenLimiter.release();
+  }
+}
+async function streamChatInner(messages, onChunk, temperature) {
   const provider = getStoryProvider();
   const key = getApiKey();
   // Throw, don't silently return — every caller treats a resolved
