@@ -744,15 +744,34 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
       <div class="settings-tab-panel" data-tab="publish">
         <div class="settings-section">
-          <h3>YouTube — OAuth App</h3>
-          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">
-            Upload requires your own Google Cloud OAuth client (YouTube has no upload-capable API-key mode).
-            In <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a>:
-            create a project → enable "YouTube Data API v3" → OAuth consent screen (External, Testing is fine for personal use) →
-            Credentials → OAuth client ID → type <b>Desktop app</b>. Paste the resulting Client ID/Secret below, and add
-            <code>http://localhost:8123/youtube-oauth-callback</code> as an authorized redirect URI if prompted.
+          <h3>YouTube — One-Time Setup</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:10px;">
+            Google requires every app to register its own OAuth client before anyone can "Sign in with Google" through it —
+            there's no way around this step, and Slopdaddy can't do it on your behalf (a shared key baked into a public app
+            would mean everyone who uses it fights over the same tiny daily quota). It's four clicks, about 3 minutes total.
+            Each step below opens the exact right page — you don't need to find anything yourself.
           </p>
-          <label>Client ID</label>
+          <ol style="font-size:0.8rem;padding-left:20px;display:flex;flex-direction:column;gap:10px;margin:0;">
+            <li>
+              Create a Google Cloud project (any name).
+              <div><button onclick="window.open('https://console.cloud.google.com/projectcreate','_blank')">1. Open: Create Project →</button></div>
+            </li>
+            <li>
+              With that project selected, enable the YouTube Data API.
+              <div><button onclick="window.open('https://console.cloud.google.com/apis/library/youtube.googleapis.com','_blank')">2. Open: Enable YouTube Data API →</button></div>
+            </li>
+            <li>
+              Set up the consent screen: choose <b>External</b>, fill in just the required app name/email fields, and on
+              "Test users" add your own Google account's email.
+              <div><button onclick="window.open('https://console.cloud.google.com/apis/credentials/consent','_blank')">3. Open: Consent Screen →</button></div>
+            </li>
+            <li>
+              Create the credentials: <b>Create Credentials → OAuth client ID → Desktop app</b>. A popup shows your Client ID
+              and Client Secret — copy both into the fields below.
+              <div><button onclick="window.open('https://console.cloud.google.com/apis/credentials','_blank')">4. Open: Create Credentials →</button></div>
+            </li>
+          </ol>
+          <label style="margin-top:14px;">Client ID</label>
           <input type="text" id="youtubeClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
           <label style="margin-top:8px;">Client Secret</label>
           <input type="password" id="youtubeClientSecret" placeholder="GOCSPX-...">

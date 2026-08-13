@@ -3686,11 +3686,31 @@ async function clearAssetCache() {
 }
 
 // ---------- YouTube publish integration ----------
+// Catches the two most common copy-paste mistakes (fields swapped, or only
+// part of a value copied) with a specific, actionable message right here —
+// instead of letting a malformed value sail through to a much more
+// confusing failure later, deep inside an actual OAuth redirect.
+function validateYoutubeOauthClientFormat(clientId, clientSecret) {
+  const looksLikeClientId = (s) => s.endsWith(".apps.googleusercontent.com");
+  if (looksLikeClientId(clientSecret) && !looksLikeClientId(clientId)) {
+    return "These look swapped — the Client ID ends in \".apps.googleusercontent.com\", the Client Secret doesn't.";
+  }
+  if (!looksLikeClientId(clientId)) {
+    return "That doesn't look like a Client ID — it should end in \".apps.googleusercontent.com\". Copy it again from step 4.";
+  }
+  if (clientSecret.length < 10 || /\s/.test(clientSecret)) {
+    return "That Client Secret looks incomplete or has extra whitespace — copy it again from the popup in step 4.";
+  }
+  return null;
+}
+
 async function saveYoutubeOauthClient() {
   const clientId = $("#youtubeClientId").value.trim();
   const clientSecret = $("#youtubeClientSecret").value.trim();
   const statusEl = $("#youtubeClientStatus");
   if (!clientId || !clientSecret) { statusEl.textContent = "Both fields are required."; return; }
+  const formatError = validateYoutubeOauthClientFormat(clientId, clientSecret);
+  if (formatError) { statusEl.textContent = formatError; return; }
   try {
     const resp = await fetch("/youtube-oauth-client", {
       method: "POST", headers: { "Content-Type": "application/json" },
