@@ -1094,6 +1094,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <select id="batchParallelism"></select>
           </label>
           <button class="primary" onclick="renderAllBatch()" id="renderAllBtn">Generate All</button>
+          <button onclick="resetBatch()" id="resetBatchBtn" style="color:var(--danger);">New Batch</button>
         </div>
         <p class="batch-hint" id="batchParallelismHint"></p>
       </div>

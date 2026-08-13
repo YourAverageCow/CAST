@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 90;
+const VERSION = 91;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -3240,6 +3240,34 @@ function cancelCurrentBatch() {
   const btn = $("#batchCancelBtn");
   if (btn) { btn.disabled = true; btn.textContent = "Cancelling..."; }
   showToast("Cancelling — finishing any renders already in progress...");
+}
+
+// Wipes the whole batch — every card, every result, the progress panel —
+// and returns to the bulk-generate setup screen, so a cancelled (or just
+// unwanted) batch doesn't have to be cleared one card at a time via
+// removeBatchCard() before a genuinely new batch can start. Cancelling a
+// batch on its own (cancelCurrentBatch, above) deliberately does NOT do
+// this — a cancelled job still shows "Cancelled" with its own Retry button,
+// which this would destroy; this is the separate, explicit "start over"
+// action for when the user wants that too.
+function resetBatch() {
+  if (batchJobs.length && !confirm("Start a new batch? This clears every current card and result.")) return;
+  for (const job of batchJobs) {
+    if (job.bgUrl) URL.revokeObjectURL(job.bgUrl);
+    if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+    if (job.publish && job.publish.thumbnailUrl) URL.revokeObjectURL(job.publish.thumbnailUrl);
+  }
+  batchJobs = [];
+  $("#batchCardList").innerHTML = "";
+  $("#resultsGrid").innerHTML = "";
+  $("#batchProgressGrid").innerHTML = "";
+  if (batchProgressState) clearInterval(batchProgressState.tickHandle);
+  batchProgressState = null;
+  currentBatchCancel = { cancelled: false };
+  $("#batchProgressOverlay").classList.remove("show");
+  $("#batchProgressReopenBtn").style.display = "none";
+  setBatchViewMode("setup");
+  showToast("Batch cleared.");
 }
 
 // The sidebar's "quick single export" — builds one job from the current

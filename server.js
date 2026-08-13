@@ -140,6 +140,16 @@ function loadYoutubeStore() {
     if (!data.uploadLog) data.uploadLog = [];
     return data;
   } catch (e) {
+    // ENOENT (first run, nothing saved yet) is expected and silent — any
+    // other failure means the file EXISTS but is corrupt (e.g. a truncated
+    // write from an app kill/crash mid-save, before saveYoutubeStore()
+    // wrote atomically) and every connected account is about to silently
+    // vanish from the user's perspective with zero indication why. Loud on
+    // purpose: there's no way to recover the data at this point, but a
+    // silent, invisible wipe is strictly worse than a visible warning.
+    if (e.code !== "ENOENT") {
+      console.error(`YouTube account store at ${YT_STORE_PATH} exists but failed to load (${e.message}) — treating as empty. Any connected channels will need to be reconnected.`);
+    }
     return { oauthClient: null, accounts: [], uploadLog: [] };
   }
 }
@@ -159,7 +169,17 @@ function countYoutubeUploadsToday(store) {
 }
 function saveYoutubeStore(data) {
   fs.mkdirSync(path.dirname(YT_STORE_PATH), { recursive: true });
-  fs.writeFileSync(YT_STORE_PATH, JSON.stringify(data, null, 2), { mode: 0o600 });
+  // Write to a temp file then rename over the real path, rather than
+  // writing YT_STORE_PATH directly — fs.rename is atomic on both POSIX and
+  // NTFS, so a process kill/crash mid-save can only ever leave the OLD file
+  // intact or the NEW one fully written, never a half-written/truncated
+  // file in between. Without this, an interrupted write (confirmed real:
+  // this session killed the app with `pkill -9` many times while debugging
+  // OAuth) could corrupt the store, and loadYoutubeStore() would then
+  // silently treat every connected account as if it never existed.
+  const tmpPath = YT_STORE_PATH + ".tmp";
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+  fs.renameSync(tmpPath, YT_STORE_PATH);
   try { fs.chmodSync(YT_STORE_PATH, 0o600); } catch (e) { /* best-effort — no-op on platforms without POSIX perms (Windows) */ }
 }
 
