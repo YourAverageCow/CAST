@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 100;
+const VERSION = 101;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1297,28 +1297,40 @@ async function streamChatInner(messages, onChunk, temperature) {
         if (!line.startsWith("data: ")) continue;
         const data = line.slice(6).trim();
         if (data === "[DONE]") continue;
+        let parsed;
         try {
-          const parsed = JSON.parse(data);
-          const text = parseSSEDelta(provider.api, parsed);
-          if (text) {
-            sawRealContent = true;
-            onChunk(text);
-          } else if (!sawRealContent) {
-            const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
-            if (delta && delta.reasoning_content) {
-              if (!toldReasoning) {
-                toldReasoning = true;
-                reasoningStallStart.t = Date.now();
-                showToast(`${provider.label} is thinking before it answers — this can take a while on a reasoning model.`, 5000);
-              } else if (Date.now() - reasoningStallStart.t > 30000) {
-                // Re-remind every 30s while still only reasoning, so a long
-                // wait doesn't quietly go silent again after the one-time toast.
-                reasoningStallStart.t = Date.now();
-                showToast(`Still thinking (${provider.label})... this is normal for a reasoning model, just slow.`, 5000);
-              }
+          parsed = JSON.parse(data);
+        } catch (e) {
+          continue; // a malformed/partial SSE line is expected occasionally — skip it, not a real error
+        }
+        const text = parseSSEDelta(provider.api, parsed);
+        if (text) {
+          sawRealContent = true;
+          // Deliberately NOT wrapped in try/catch — this used to be, which
+          // silently swallowed any error a caller's onChunk threw (e.g. a
+          // stale/removed DOM element mid-batch). That let the underlying
+          // network request keep succeeding invisibly while the real bug
+          // vanished with no error, no toast, nothing — exactly the kind of
+          // "looks hung, network tab shows success" report this caused.
+          // Let it propagate: the outer catch below cancels the reader and
+          // rethrows, so the real error reaches the caller's own handling
+          // (a batch job's card shows "Failed" with the actual message).
+          onChunk(text);
+        } else if (!sawRealContent) {
+          const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+          if (delta && delta.reasoning_content) {
+            if (!toldReasoning) {
+              toldReasoning = true;
+              reasoningStallStart.t = Date.now();
+              showToast(`${provider.label} is thinking before it answers — this can take a while on a reasoning model.`, 5000);
+            } else if (Date.now() - reasoningStallStart.t > 30000) {
+              // Re-remind every 30s while still only reasoning, so a long
+              // wait doesn't quietly go silent again after the one-time toast.
+              reasoningStallStart.t = Date.now();
+              showToast(`Still thinking (${provider.label})... this is normal for a reasoning model, just slow.`, 5000);
             }
           }
-        } catch (e) {}
+        }
       }
     }
   } catch (e) {
