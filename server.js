@@ -736,7 +736,17 @@ async function runYoutubeUpload(id, store, account, video, thumbnail, meta, resp
 
     recordYoutubeUpload(store, account.oauthClientId);
     sendProgress(id, { phase: "done", pct: 100, videoId });
-    respond(200, { videoId, status: isScheduled ? "scheduled" : "uploaded" });
+    // account may differ from the account meta.accountId originally
+    // requested — pickAccountForUpload silently substitutes a different
+    // project's connection to the same channel when the requested one is
+    // near today's soft quota limit. Surface that here so the client can
+    // tell the user what actually happened instead of it being invisible.
+    const usedClient = store.oauthClients.find(c => c.id === account.oauthClientId);
+    respond(200, {
+      videoId, status: isScheduled ? "scheduled" : "uploaded",
+      switchedProject: account.id !== meta.accountId,
+      oauthClientLabel: usedClient ? usedClient.label : null,
+    });
   } catch (e) {
     sendProgress(id, { phase: "error", error: e.message });
     respond(500, { error: e.message });

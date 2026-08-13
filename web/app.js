@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 93;
+const VERSION = 94;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2921,7 +2921,8 @@ function renderPublishSection(job, container) {
       <div class="result-status" style="color:var(--green);">
         ${pub.status === "scheduled" ? "Scheduled" : "Uploaded"} to YouTube.
         ${link ? `<a href="${link}" target="_blank" rel="noopener">View</a>` : ""}
-      </div>`;
+      </div>
+      ${pub.uploadedViaLabel ? `<div style="font-size:0.7rem;color:var(--muted);margin-top:2px;">Sent via "${escapeHtml(pub.uploadedViaLabel)}" — the usual project was near today's quota.</div>` : ""}`;
     return;
   }
   if (pub.status === "failed") {
@@ -3293,6 +3294,14 @@ async function uploadJobToYoutube(job, container) {
     pub.status = data.status === "scheduled" ? "scheduled" : "uploaded";
     pub.videoId = data.videoId;
     pub.uploadProgressPct = 100;
+    // The server may have silently switched to a different Google Cloud
+    // project's connection to this same channel (see pickAccountForUpload
+    // in server.js) if the originally-picked one was near today's quota —
+    // surface that so it's not invisible when it happens.
+    if (data.switchedProject && data.oauthClientLabel) {
+      pub.uploadedViaLabel = data.oauthClientLabel;
+      showToast(`Uploaded via "${data.oauthClientLabel}" — the usual project was near today's quota.`);
+    }
     refreshYoutubeQuotaText();
   } catch (e) {
     pub.status = "failed";
