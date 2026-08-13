@@ -140,6 +140,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .row { display: flex; gap: 8px; }
 .row button { flex: 1; }
 
+.key-field-row { display: flex; gap: 6px; align-items: stretch; }
+.key-field-row input { flex: 1; min-width: 0; }
+.key-field-row button { flex: 0 0 auto; padding: 8px 10px; font-size: 0.78rem; }
+
 #videoUploadArea { border: 2px dashed var(--border); border-radius: 8px; padding: 20px; text-align: center; cursor: pointer; transition: border-color 0.15s; margin-top: 8px; }
 #videoUploadArea:hover, #videoUploadArea.drag { border-color: var(--accent); }
 #videoUploadArea p { color: var(--muted); font-size: 0.8rem; }
@@ -435,6 +439,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <button class="settings-tab-btn" data-tab="performance" onclick="setSettingsTab('performance')">Performance</button>
       <button class="settings-tab-btn" data-tab="advanced" onclick="setSettingsTab('advanced')">Advanced</button>
       <button class="settings-tab-btn" data-tab="publish" onclick="setSettingsTab('publish')" id="publishTabBtn" style="display:none;">Publish</button>
+      <button class="settings-tab-btn" data-tab="schedule" onclick="setSettingsTab('schedule')" id="scheduleTabBtn" style="display:none;">Schedule</button>
       <button class="settings-tab-btn" data-tab="debug" onclick="setSettingsTab('debug')">Debug</button>
     </div>
     <div class="settings-content">
@@ -455,7 +460,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           </div>
           <div id="apiKeyRow">
             <label>API Key</label>
-            <input type="text" id="apiKey" placeholder="Your API key">
+            <div class="key-field-row">
+              <input type="password" id="apiKey" placeholder="Your API key">
+              <button type="button" onclick="toggleKeyVisibility('apiKey', this)">Show</button>
+              <button type="button" onclick="copyKeyToClipboard('apiKey', this)">Copy</button>
+            </div>
           </div>
           <label>Story Length</label>
           <select id="storyLength">
@@ -481,11 +490,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <p id="engineNote" style="font-size:0.72rem;color:var(--muted);margin:6px 0;"></p>
           <div id="ttsOpenaiKeyRow" style="display:none;">
             <label>OpenAI TTS API Key</label>
-            <input type="text" id="ttsOpenaiKey" placeholder="sk-...">
+            <div class="key-field-row">
+              <input type="password" id="ttsOpenaiKey" placeholder="sk-...">
+              <button type="button" onclick="toggleKeyVisibility('ttsOpenaiKey', this)">Show</button>
+              <button type="button" onclick="copyKeyToClipboard('ttsOpenaiKey', this)">Copy</button>
+            </div>
           </div>
           <div id="ttsElevenlabsKeyRow" style="display:none;">
             <label>ElevenLabs API Key</label>
-            <input type="text" id="ttsElevenlabsKey" placeholder="Your ElevenLabs API key">
+            <div class="key-field-row">
+              <input type="password" id="ttsElevenlabsKey" placeholder="Your ElevenLabs API key">
+              <button type="button" onclick="toggleKeyVisibility('ttsElevenlabsKey', this)">Show</button>
+              <button type="button" onclick="copyKeyToClipboard('ttsElevenlabsKey', this)">Copy</button>
+            </div>
           </div>
           <label style="margin-top:8px;">Voice</label>
           <div class="voice-row">
@@ -789,12 +806,24 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <code>http://127.0.0.1:8123/youtube-oauth-callback</code> under "Authorized redirect URIs" there, or just delete it
             and recreate it as Desktop app instead.
           </p>
-          <label style="margin-top:14px;">Client ID</label>
+          <label style="margin-top:14px;">Project label <span style="color:var(--muted);font-weight:normal;">(just for your own reference)</span></label>
+          <input type="text" id="youtubeClientLabel" placeholder="e.g. Project A">
+          <label style="margin-top:8px;">Client ID</label>
           <input type="text" id="youtubeClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
           <label style="margin-top:8px;">Client Secret</label>
-          <input type="password" id="youtubeClientSecret" placeholder="GOCSPX-...">
-          <button class="accent" onclick="saveYoutubeOauthClient()" style="margin-top:8px;">Save Client Credentials</button>
+          <div class="key-field-row">
+            <input type="password" id="youtubeClientSecret" placeholder="GOCSPX-...">
+            <button type="button" onclick="toggleKeyVisibility('youtubeClientSecret', this)">Show</button>
+            <button type="button" onclick="copyKeyToClipboard('youtubeClientSecret', this)">Copy</button>
+          </div>
+          <button class="accent" onclick="saveYoutubeOauthClient()" style="margin-top:8px;">Add Project</button>
           <p id="youtubeClientStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:10px;">
+            You can register more than one Google Cloud project (repeat the steps above) and connect the same channel under
+            each — uploads then automatically spread across whichever project still has quota left today, instead of one
+            project's ~6/day limit capping the whole app.
+          </p>
+          <div id="youtubeOauthClientsList" style="display:flex;flex-direction:column;gap:6px;margin-top:8px;"></div>
         </div>
         <div class="settings-section">
           <h3>Video Metadata</h3>
@@ -834,7 +863,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <div id="youtubeAccountsList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px;">
             <p style="font-size:0.8rem;color:var(--muted);">No channels connected yet.</p>
           </div>
-          <button class="primary" onclick="startYoutubeOAuth()" id="youtubeSignInBtn">Sign in with Google</button>
+          <div class="row" style="align-items:center;gap:8px;">
+            <select id="youtubeSigninClientSelect" style="flex:1;"></select>
+            <button class="primary" onclick="startYoutubeOAuth()" id="youtubeSignInBtn" style="flex:0 0 auto;">Sign in with Google</button>
+          </div>
           <p style="font-size:0.72rem;color:var(--muted);margin-top:8px;">
             <span id="youtubeQuotaText"></span>
             YouTube's default project quota allows roughly <b>6 uploads/day</b> (uploads cost 1600 of your 10,000 daily units) —
@@ -857,6 +889,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <select id="youtubeAutoUploadAccountId">
             <option value="">First connected channel</option>
           </select>
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-tab="schedule">
+        <div class="settings-section">
+          <h3>Scheduled Uploads</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">
+            Every video from this session with a YouTube publish time set, in one place — from single exports and every batch.
+            Cleared on app restart, same as the videos themselves.
+          </p>
+          <div id="scheduleDashboardList" style="display:flex;flex-direction:column;gap:8px;">
+            <p style="font-size:0.8rem;color:var(--muted);">Nothing scheduled yet.</p>
+          </div>
         </div>
       </div>
 

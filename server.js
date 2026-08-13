@@ -137,7 +137,32 @@ function loadYoutubeStore() {
     const raw = fs.readFileSync(YT_STORE_PATH, "utf8");
     const data = JSON.parse(raw);
     if (!data.accounts) data.accounts = [];
-    if (!data.uploadLog) data.uploadLog = [];
+    // Migrate the old single-oauthClient/top-level-uploadLog shape (every
+    // store on disk before multi-project support) into the new
+    // oauthClients list — additive only, never drops an existing account.
+    // The migrated client keeps the old top-level uploadLog so today's
+    // upload count doesn't reset to zero mid-migration, and every existing
+    // account gets tagged with the migrated client's id (they were all
+    // necessarily connected under that one client, since there was no
+    // other option before).
+    if (!data.oauthClients) {
+      data.oauthClients = [];
+      if (data.oauthClient && data.oauthClient.clientId) {
+        const migratedId = crypto.randomUUID();
+        data.oauthClients.push({
+          id: migratedId,
+          label: "Default",
+          clientId: data.oauthClient.clientId,
+          clientSecret: data.oauthClient.clientSecret,
+          uploadLog: Array.isArray(data.uploadLog) ? data.uploadLog : [],
+        });
+        for (const account of data.accounts) {
+          if (!account.oauthClientId) account.oauthClientId = migratedId;
+        }
+      }
+    }
+    delete data.oauthClient;
+    delete data.uploadLog;
     return data;
   } catch (e) {
     // ENOENT (first run, nothing saved yet) is expected and silent — any
@@ -150,22 +175,54 @@ function loadYoutubeStore() {
     if (e.code !== "ENOENT") {
       console.error(`YouTube account store at ${YT_STORE_PATH} exists but failed to load (${e.message}) — treating as empty. Any connected channels will need to be reconnected.`);
     }
-    return { oauthClient: null, accounts: [], uploadLog: [] };
+    return { oauthClients: [], accounts: [] };
   }
 }
 // YouTube exposes no real quota-usage API — this is a local, best-effort
 // proxy: a timestamp per successful upload, trimmed to the last 2 days
 // (only "today" is ever displayed) so the store doesn't grow unbounded
-// across months of use.
-function recordYoutubeUpload(store) {
+// across months of use. Per-client (per Google Cloud project), not global —
+// quota is a property of the PROJECT, not the app as a whole, which is the
+// entire point of supporting multiple projects.
+function recordYoutubeUpload(store, oauthClientId) {
+  const client = store.oauthClients.find(c => c.id === oauthClientId);
+  if (!client) return;
   const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
-  store.uploadLog = (store.uploadLog || []).filter(t => t > cutoff);
-  store.uploadLog.push(Date.now());
+  client.uploadLog = (client.uploadLog || []).filter(t => t > cutoff);
+  client.uploadLog.push(Date.now());
   saveYoutubeStore(store);
 }
-function countYoutubeUploadsToday(store) {
+function countYoutubeUploadsToday(store, oauthClientId) {
+  const client = store.oauthClients.find(c => c.id === oauthClientId);
+  if (!client) return 0;
   const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-  return (store.uploadLog || []).filter(t => t >= startOfDay.getTime()).length;
+  return (client.uploadLog || []).filter(t => t >= startOfDay.getTime()).length;
+}
+// YouTube's default per-project quota (10,000 units/day ÷ 1600 per upload)
+// allows roughly 6 uploads/day — used here as a soft, LOCAL heuristic (not
+// an authoritative check; Google's real quota could differ) for deciding
+// when to prefer a different connection to the same channel under a less-
+// used project, before a real 403 quotaExceeded forces the issue.
+const YOUTUBE_QUOTA_SOFT_LIMIT = 6;
+// The requested account is used as-is unless its project looks to be at
+// today's soft limit AND the same real channel (channelId) is ALSO
+// connected under a different, less-used project — in which case that
+// connection is used instead, silently keeping "upload to channel X"
+// working across a quota boundary. Falls back to the originally requested
+// account if no better option exists, even if it's over the soft limit —
+// a real 403 from Google is a clearer signal than this app refusing
+// pre-emptively on its own guess.
+function pickAccountForUpload(store, accountId) {
+  const requested = store.accounts.find(a => a.id === accountId);
+  if (!requested) return null;
+  const requestedUsage = countYoutubeUploadsToday(store, requested.oauthClientId);
+  if (requestedUsage < YOUTUBE_QUOTA_SOFT_LIMIT) return requested;
+  const alt = store.accounts.find(a =>
+    a.id !== requested.id &&
+    a.channelId === requested.channelId &&
+    countYoutubeUploadsToday(store, a.oauthClientId) < YOUTUBE_QUOTA_SOFT_LIMIT
+  );
+  return alt || requested;
 }
 function saveYoutubeStore(data) {
   fs.mkdirSync(path.dirname(YT_STORE_PATH), { recursive: true });
@@ -271,8 +328,9 @@ async function ensureFreshAccessToken(store, account) {
   if (account.accessToken && account.accessTokenExpiresAt > Date.now() + TOKEN_REFRESH_SKEW_MS) {
     return account.accessToken;
   }
-  if (!store.oauthClient) throw new Error("No YouTube OAuth client configured.");
-  const refreshed = await refreshYoutubeToken(store.oauthClient, account.refreshToken);
+  const client = store.oauthClients.find(c => c.id === account.oauthClientId);
+  if (!client) throw new Error("This account's OAuth project is no longer configured — reconnect it from Settings.");
+  const refreshed = await refreshYoutubeToken(client, account.refreshToken);
   account.accessToken = refreshed.access_token;
   account.accessTokenExpiresAt = Date.now() + (refreshed.expires_in || 3600) * 1000;
   saveYoutubeStore(store);
@@ -294,7 +352,7 @@ async function fetchYoutubeChannel(accessToken) {
   };
 }
 
-function stripTokens(account) {
+function stripTokens(account, store) {
   const { accessToken, refreshToken, ...rest } = account;
   // Always report the locally-cached, same-origin copy (see
   // downloadYoutubeChannelThumbnail) instead of account.channelThumbnail's
@@ -302,6 +360,13 @@ function stripTokens(account) {
   // reference/debugging, never sent to the client.
   const cachedPath = path.join(YT_THUMB_DIR, account.id + ".jpg");
   rest.channelThumbnail = fs.existsSync(cachedPath) ? `/youtube-account-thumbnail/${account.id}` : null;
+  // Lets the client tell apart two connections to the same channel under
+  // different projects (see pickAccountForUpload) in the account picker —
+  // "Slop Daddy Stories (Project 2)" instead of two identical-looking rows.
+  if (store) {
+    const client = store.oauthClients.find(c => c.id === account.oauthClientId);
+    rest.oauthClientLabel = client ? client.label : null;
+  }
   return rest;
 }
 
@@ -387,6 +452,29 @@ function checkPocketTts(cb) {
   });
 }
 
+// ---------- native Kokoro (Python) availability ----------
+// The browser's Kokoro (kokoro-js/ONNX, see web/lib/tts-engines.js) never
+// returns real per-word timestamps — every generation falls through to the
+// VAD-estimate/native-Whisper caption-sync cascade instead. The official
+// Python `kokoro` package (hexgrad/Kokoro-82M) DOES expose real per-token
+// start_ts/end_ts derived straight from the model's own synthesis, via its
+// KPipeline — confirmed live (see scripts/kokoro_native.py). No official CLI
+// exists, so this shells out to a small bundled Python script via `uvx`
+// instead, same "no native app dependency baked in" shape as PocketTTS.
+// Checking availability just imports the package — doesn't trigger a model
+// download, which only happens lazily on the first real KPipeline() call.
+let kokoroNativeAvailable = null; // null = not checked yet, else boolean
+function checkKokoroNative(cb) {
+  if (kokoroNativeAvailable !== null) { cb(kokoroNativeAvailable); return; }
+  // Long timeout — uvx resolves/installs kokoro + its dependencies (torch,
+  // spacy, transformers, ...) on first run, which is genuinely slow.
+  execFile("uvx", ["--with", "kokoro", "--with", "soundfile", "python3", "-c", "import kokoro"], { timeout: 60000 }, (err) => {
+    if (err && err.killed) { cb(false); return; }
+    kokoroNativeAvailable = !err;
+    cb(kokoroNativeAvailable);
+  });
+}
+
 // ---------- concurrency limiter ----------
 // Mirrors FFmpegWorkerPool's job (web/worker-pool.js) for native processes —
 // batch "Generate All" can fire off several renders (and now transcriptions)
@@ -435,6 +523,7 @@ const CPU_COUNT = os.cpus().length;
 const renderLimiter = makeSlotLimiter(CPU_COUNT);
 const transcribeLimiter = makeSlotLimiter(CPU_COUNT);
 const pocketTtsLimiter = makeSlotLimiter(CPU_COUNT);
+const kokoroNativeLimiter = makeSlotLimiter(CPU_COUNT);
 // Deliberately small and NOT tied to CPU_COUNT like the others — this limits
 // concurrent HTTP upload requests, not CPU-bound local work, and YouTube's
 // default quota (10,000 units/day, 1600 per upload) allows roughly 6
@@ -645,7 +734,7 @@ async function runYoutubeUpload(id, store, account, video, thumbnail, meta, resp
       } catch (e) { console.warn("YouTube thumbnail upload error:", e.message); }
     }
 
-    recordYoutubeUpload(store);
+    recordYoutubeUpload(store, account.oauthClientId);
     sendProgress(id, { phase: "done", pct: 100, videoId });
     respond(200, { videoId, status: isScheduled ? "scheduled" : "uploaded" });
   } catch (e) {
@@ -992,6 +1081,79 @@ function runNativePocketTts(text, language, respond) {
   });
 }
 
+// af_/am_ voices need American English ('a'), bf_/bm_ need British ('b') —
+// KPipeline requires this up front (it picks the g2p/phonemizer), unlike the
+// browser build where kokoro-js infers it internally. Falls back to 'a' for
+// any unrecognized id rather than erroring, since new voices are a config
+// change (KOKORO_VOICES in web/lib/tts-engines.js), not a code change here.
+function kokoroLangForVoice(voice) {
+  return typeof voice === "string" && voice.startsWith("b") ? "b" : "a";
+}
+
+function runNativeKokoro(text, voice, speed, respond) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-kokoro-"));
+  const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
+  const textPath = path.join(dir, "text.txt");
+  const outPath = path.join(dir, "out.wav");
+  fs.writeFileSync(textPath, text, "utf8");
+  const scriptPath = path.join(__dirname, "scripts", "kokoro_native.py");
+  const args = [
+    "--with", "kokoro", "--with", "soundfile", "python3", scriptPath,
+    "--text-file", textPath, "--voice", voice, "--lang", kokoroLangForVoice(voice),
+    "--speed", String(speed || 1), "--out", outPath,
+  ];
+  if (DEBUG) console.log("[kokoro-native]", args.join(" "));
+  const proc = spawn("uvx", args);
+  // Real generations take a few seconds once cached; a first-ever run also
+  // pays for uvx's dependency resolution (torch etc.) and the model's own
+  // one-time HuggingFace download — same reasoning as PocketTTS's kill
+  // timer, sized generously so that doesn't get mistaken for a hang.
+  const killTimer = setTimeout(() => { proc.kill("SIGKILL"); }, 8 * 60 * 1000);
+  let stdout = "";
+  let stderrTail = "";
+  proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+  proc.stderr.on("data", (chunk) => { stderrTail = (stderrTail + chunk.toString()).slice(-4000); });
+  proc.on("error", (err) => {
+    clearTimeout(killTimer);
+    cleanup();
+    respond(500, { error: "Couldn't run the native Kokoro backend (via uvx): " + err.message });
+  });
+  proc.on("close", (code) => {
+    clearTimeout(killTimer);
+    if (code !== 0) {
+      cleanup();
+      respond(500, { error: `Native Kokoro exited with code ${code}\n${stderrTail.slice(-1000)}` });
+      return;
+    }
+    let meta;
+    try {
+      // Metadata is the LAST line of stdout — everything before it is
+      // kokoro/spacy/torch's own warnings/progress output, which this
+      // script doesn't (and can't fully) suppress.
+      const lastLine = stdout.trim().split("\n").pop();
+      meta = JSON.parse(lastLine);
+    } catch (e) {
+      cleanup();
+      respond(500, { error: "Native Kokoro finished but its output was unparseable: " + e.message });
+      return;
+    }
+    let audioBuf;
+    try {
+      audioBuf = fs.readFileSync(outPath);
+    } catch (e) {
+      cleanup();
+      respond(500, { error: "Native Kokoro finished but the audio file was missing: " + e.message });
+      return;
+    }
+    cleanup();
+    respond(200, {
+      audioBase64: audioBuf.toString("base64"),
+      durationSec: meta.durationSec,
+      wordTimings: (meta.words || []).map(w => ({ text: w.text, start: w.start, end: w.end })),
+    });
+  });
+}
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -1320,6 +1482,47 @@ function handleRequest(req, res) {
     });
     return;
   }
+  if (urlNoQuery === "/kokoro-native-capability" && req.method === "GET") {
+    checkKokoroNative((available) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ available }));
+    });
+    return;
+  }
+  if (urlNoQuery === "/kokoro-native" && req.method === "POST") {
+    checkKokoroNative((available) => {
+      if (!available) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "The native Kokoro backend isn't available — install uv (https://docs.astral.sh/uv/) so `uvx` can run it, then restart the server." }));
+        return;
+      }
+      readBodyWithLimit(req, res, 2 * 1024 * 1024, async (buf) => {
+        let body;
+        try {
+          body = JSON.parse(buf.toString("utf8") || "{}");
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Malformed JSON body: " + e.message }));
+          return;
+        }
+        const text = typeof body.text === "string" ? body.text.trim() : "";
+        const voice = typeof body.voice === "string" && body.voice ? body.voice : "af_heart";
+        if (!text) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing text" }));
+          return;
+        }
+        await kokoroNativeLimiter.acquire();
+        const respond = (status, data) => {
+          kokoroNativeLimiter.release();
+          res.writeHead(status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(data));
+        };
+        runNativeKokoro(text, voice, body.speed, respond);
+      });
+    });
+    return;
+  }
 
   // ---- YouTube upload integration ----
   // {available: true} unconditionally — this is a "is a server present at
@@ -1333,7 +1536,19 @@ function handleRequest(req, res) {
     res.end(JSON.stringify({ available: true }));
     return;
   }
-  if (urlNoQuery === "/youtube-oauth-client" && req.method === "POST") {
+  // Multiple OAuth clients (= Google Cloud projects) can be registered so
+  // the same real channel can be connected more than once, once per
+  // project, and pickAccountForUpload() spreads uploads across whichever
+  // project still has quota — see the module-level comment on that
+  // function. Client secrets are returned as-is here: this is a purely
+  // local desktop server, same trust boundary as the store file on disk.
+  if (urlNoQuery === "/youtube-oauth-clients" && req.method === "GET") {
+    const store = loadYoutubeStore();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ clients: store.oauthClients }));
+    return;
+  }
+  if (urlNoQuery === "/youtube-oauth-clients" && req.method === "POST") {
     readBodyWithLimit(req, res, 4 * 1024, (buf) => {
       let body;
       try { body = JSON.parse(buf.toString("utf8") || "{}"); } catch (e) {
@@ -1343,42 +1558,69 @@ function handleRequest(req, res) {
       }
       const clientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
       const clientSecret = typeof body.clientSecret === "string" ? body.clientSecret.trim() : "";
+      const label = typeof body.label === "string" && body.label.trim() ? body.label.trim() : "Project";
       if (!clientId || !clientSecret) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Both Client ID and Client Secret are required." }));
         return;
       }
       const store = loadYoutubeStore();
-      store.oauthClient = { clientId, clientSecret };
+      const client = { id: crypto.randomUUID(), label, clientId, clientSecret, uploadLog: [] };
+      store.oauthClients.push(client);
       saveYoutubeStore(store);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+      res.end(JSON.stringify({ ok: true, client }));
     });
     return;
   }
-  if (urlNoQuery === "/youtube-oauth-start" && req.method === "POST") {
+  if (urlNoQuery.startsWith("/youtube-oauth-clients/") && req.method === "DELETE") {
+    const clientIdToRemove = urlNoQuery.slice("/youtube-oauth-clients/".length);
     const store = loadYoutubeStore();
-    if (!store.oauthClient) {
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Set your YouTube OAuth Client ID/Secret first." }));
+    const idx = store.oauthClients.findIndex(c => c.id === clientIdToRemove);
+    if (idx === -1) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "No such project." }));
       return;
     }
-    const state = crypto.randomBytes(16).toString("hex");
-    const { verifier, challenge } = generatePkcePair();
-    pkceChallenges.set(state, verifier);
-    const authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
-      client_id: store.oauthClient.clientId,
-      redirect_uri: YOUTUBE_REDIRECT_URI,
-      response_type: "code",
-      scope: YOUTUBE_SCOPES,
-      access_type: "offline",
-      prompt: "consent",
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      state,
-    }).toString();
+    // Deliberately leaves any accounts that reference this client alone —
+    // they just fail with a clear "reconnect it" error on next token
+    // refresh (see ensureFreshAccessToken) rather than being silently
+    // deleted along with the project.
+    store.oauthClients.splice(idx, 1);
+    saveYoutubeStore(store);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ authUrl, state }));
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  if (urlNoQuery === "/youtube-oauth-start" && req.method === "POST") {
+    readBodyWithLimit(req, res, 4 * 1024, (buf) => {
+      let body = {};
+      try { body = JSON.parse(buf.toString("utf8") || "{}"); } catch (e) { /* fall through to missing-client error below */ }
+      const store = loadYoutubeStore();
+      const oauthClientId = typeof body.oauthClientId === "string" ? body.oauthClientId : null;
+      const client = oauthClientId ? store.oauthClients.find(c => c.id === oauthClientId) : null;
+      if (!client) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Add a Google Cloud project (Client ID/Secret) and pick it first." }));
+        return;
+      }
+      const state = crypto.randomBytes(16).toString("hex");
+      const { verifier, challenge } = generatePkcePair();
+      pkceChallenges.set(state, { verifier, oauthClientId });
+      const authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
+        client_id: client.clientId,
+        redirect_uri: YOUTUBE_REDIRECT_URI,
+        response_type: "code",
+        scope: YOUTUBE_SCOPES,
+        access_type: "offline",
+        prompt: "consent",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        state,
+      }).toString();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ authUrl, state }));
+    });
     return;
   }
   if (urlNoQuery.startsWith("/youtube-oauth-status/") && req.method === "GET") {
@@ -1398,16 +1640,22 @@ function handleRequest(req, res) {
       try {
         if (oauthError) throw new Error(oauthError);
         if (!code || !state) throw new Error("Missing code or state in Google's redirect.");
-        const verifier = pkceChallenges.get(state);
-        if (!verifier) throw new Error("This sign-in link expired or was already used — try again from Settings.");
+        const pending = pkceChallenges.get(state);
+        if (!pending) throw new Error("This sign-in link expired or was already used — try again from Settings.");
         pkceChallenges.delete(state);
+        const { verifier, oauthClientId } = pending;
         const store = loadYoutubeStore();
-        if (!store.oauthClient) throw new Error("OAuth client was cleared before sign-in finished.");
-        const tokens = await exchangeYoutubeCode(store.oauthClient, code, verifier, YOUTUBE_REDIRECT_URI);
+        const client = store.oauthClients.find(c => c.id === oauthClientId);
+        if (!client) throw new Error("That project was removed before sign-in finished — try again from Settings.");
+        const tokens = await exchangeYoutubeCode(client, code, verifier, YOUTUBE_REDIRECT_URI);
         const channel = await fetchYoutubeChannel(tokens.access_token);
-        const existing = store.accounts.find(a => a.channelId === channel.channelId);
+        // Dedup by (channel, project) pair, not channel alone — the same
+        // real channel connected through a second project is a distinct
+        // account entry on purpose, since each has its own quota.
+        const existing = store.accounts.find(a => a.channelId === channel.channelId && a.oauthClientId === oauthClientId);
         const account = {
           id: existing ? existing.id : crypto.randomUUID(),
+          oauthClientId,
           channelId: channel.channelId,
           channelTitle: channel.channelTitle,
           channelThumbnail: channel.channelThumbnail,
@@ -1424,7 +1672,7 @@ function handleRequest(req, res) {
         await downloadYoutubeChannelThumbnail(account.id, channel.channelThumbnail);
         if (existing) Object.assign(existing, account); else store.accounts.push(account);
         saveYoutubeStore(store);
-        if (channelKey) sendProgress(channelKey, { status: "success", account: stripTokens(account) });
+        if (channelKey) sendProgress(channelKey, { status: "success", account: stripTokens(account, store) });
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(oauthCallbackPage(`Connected <b>${channel.channelTitle}</b>.`, true));
       } catch (e) {
@@ -1440,13 +1688,18 @@ function handleRequest(req, res) {
   if (urlNoQuery === "/youtube-accounts" && req.method === "GET") {
     const store = loadYoutubeStore();
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ accounts: store.accounts.map(stripTokens) }));
+    res.end(JSON.stringify({ accounts: store.accounts.map(a => stripTokens(a, store)) }));
     return;
   }
   if (urlNoQuery === "/youtube-usage" && req.method === "GET") {
     const store = loadYoutubeStore();
+    const clients = store.oauthClients.map(c => ({
+      id: c.id, label: c.label,
+      uploadsToday: countYoutubeUploadsToday(store, c.id),
+    }));
+    const uploadsToday = clients.reduce((sum, c) => sum + c.uploadsToday, 0);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ uploadsToday: countYoutubeUploadsToday(store) }));
+    res.end(JSON.stringify({ uploadsToday, clients }));
     return;
   }
   if (urlNoQuery.startsWith("/youtube-account-thumbnail/") && req.method === "GET") {
@@ -1503,7 +1756,11 @@ function handleRequest(req, res) {
         return;
       }
       const store = loadYoutubeStore();
-      const account = store.accounts.find(a => a.id === parsed.meta.accountId);
+      // Picks whichever project-connection for this channel still has quota
+      // remaining today — see pickAccountForUpload's own comment. Falls
+      // back to the requested account (which then just hits YouTube's own
+      // real quota error) if every connection for this channel is full.
+      const account = pickAccountForUpload(store, parsed.meta.accountId);
       if (!account) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No such connected YouTube account — sign in again from Settings." }));

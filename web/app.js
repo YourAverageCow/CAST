@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 91;
+const VERSION = 92;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -62,13 +62,14 @@ function setSettingsTab(tab) {
   if (tab === "video") { updateCaptionPreviewBackground(); showCaptionSample(); }
   if (tab === "publish") { refreshYoutubeAccounts(); }
   if (tab === "branding" && $("#channelBrandingMode").value === "sync") { refreshYoutubeAccounts(); }
+  if (tab === "schedule") { refreshScheduleDashboard(); }
 }
 function openSettings() {
   $("#settingsOverlay").classList.add("show");
   $("#settingsPanel").classList.add("open");
   setSettingsTab(localStorage.getItem(SETTINGS_TAB_KEY) || "story");
 }
-function closeSettings() { $("#settingsOverlay").classList.remove("show"); $("#settingsPanel").classList.remove("open"); }
+function closeSettings() { $("#settingsOverlay").classList.remove("show"); $("#settingsPanel").classList.remove("open"); stopCaptionSampleLoop(); }
 function toggleSettings() {
   if ($("#settingsPanel").classList.contains("open")) closeSettings();
   else openSettings();
@@ -437,7 +438,6 @@ const SETTINGS_FIELDS = [
   "enableBrowserAsr", "whisperModel",
   "renderConcurrency", "transcribeConcurrency", "renderBackendPref",
   "theme", "outputFolder",
-  "youtubeClientId", "youtubeClientSecret",
   "youtubeAutoGenerateMetadata", "youtubeTitleTemplate", "youtubeDescriptionTemplate",
   "youtubeDefaultPrivacy", "youtubeDefaultCategoryId",
   "youtubeAutoUpload", "youtubeAutoUploadAccountId",
@@ -584,7 +584,7 @@ function buildEngineSelect() {
     // unlike Piper/Kokoro's bundled/CDN-fetched browser models or the cloud
     // engines' API-key gating) — grey it out with a clear reason instead of
     // letting it be picked and only failing on generate.
-    const unavailable = e.id === "pocketTts" && !nativePocketTtsAvailable;
+    const unavailable = (e.id === "pocketTts" && !nativePocketTtsAvailable) || (e.id === "kokoroNative" && !nativeKokoroAvailable);
     const label = unavailable ? `${e.label} — not installed` : e.label;
     return `<option value="${e.id}"${unavailable ? " disabled" : ""}>${escapeHtml(label)}</option>`;
   }).join("");
@@ -751,6 +751,27 @@ async function probeNativePocketTtsBackend() {
   }
 }
 
+// Same probe pattern again, for server.js's /kokoro-native (shells out to
+// the official Python `kokoro` package via uvx for real per-word timing —
+// see scripts/kokoro_native.py). Also always false on the deployed GitHub
+// Pages build (no server).
+let nativeKokoroAvailable = false;
+async function probeNativeKokoroBackend() {
+  try {
+    const ctrl = new AbortController();
+    // Must outlast checkKokoroNative's 60s server-side timeout — first-ever
+    // check resolves/installs several real Python dependencies via uvx.
+    const t = setTimeout(() => ctrl.abort(), 61000);
+    const resp = await fetch("/kokoro-native-capability", { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return !!data.available;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Not a real capability check (no external tool to probe) — just "is a
 // server present at all", same shape as the others. Naturally false on the
 // deployed GitHub Pages build, which is what makes the whole Publish tab
@@ -769,10 +790,11 @@ async function probeYoutubeCapability() {
 
 async function init() {
   $("#versionBadge").textContent = `v${VERSION}`;
-  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, youtubeAvailable] = await Promise.all([
-    probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeYoutubeCapability(),
+  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, nativeKokoroAvailable, youtubeAvailable] = await Promise.all([
+    probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeNativeKokoroBackend(), probeYoutubeCapability(),
   ]);
   $("#publishTabBtn").style.display = youtubeAvailable ? "" : "none";
+  $("#scheduleTabBtn").style.display = youtubeAvailable ? "" : "none";
   // Fire-and-forget, not awaited — populates youtubeAccountsCache (and, via
   // refreshChannelBrandingSyncAccountSelect, applies the default "sync with
   // connected channel" branding) without the user needing to open the
@@ -1031,7 +1053,7 @@ function getVoice() {
 // (how to pull the next text chunk out of one parsed `data: ` line) — this
 // function is just the shared fetch + SSE-read loop every provider streams
 // through, regardless of whether its wire format is OpenAI's or Anthropic's.
-async function streamChat(messages, onChunk) {
+async function streamChat(messages, onChunk, temperature) {
   const provider = getStoryProvider();
   const key = getApiKey();
   // Throw, don't silently return — every caller treats a resolved
@@ -1040,7 +1062,7 @@ async function streamChat(messages, onChunk) {
   // still empty. Callers already wrap this in try/catch and alert(e.message).
   if (key === null) throw new Error("Enter your API key in Settings first.");
   const { url, headers, body } = buildChatRequest(provider, {
-    model: getModel(), messages, temperature: 0.9, apiKey: key, baseUrl: apiBase(),
+    model: getModel(), messages, temperature: temperature == null ? 0.9 : temperature, apiKey: key, baseUrl: apiBase(),
   });
   // Two separate bounds: the initial connection (a provider that's down/
   // unreachable could otherwise hang at the fetch() call itself with no
@@ -1128,10 +1150,12 @@ async function getIdeas() {
   btn.disabled = true;
   ta.value = "";
   try {
+    const category = STORY_CATEGORIES[Math.floor(Math.random() * STORY_CATEGORIES.length)];
     await streamChat(
       [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
-       { role: "user", content: ideasPrompt() }],
-      (chunk) => { ta.value += chunk; autoGrow(ta); }
+       { role: "user", content: ideasPrompt(category) }],
+      (chunk) => { ta.value += chunk; autoGrow(ta); },
+      1.05 // slightly higher than the story-writing call's 0.9 — spreads ideas apart without making the prose itself less coherent
     );
     validateInputs();
   } catch (e) { alert("Failed: " + e.message); }
@@ -1444,28 +1468,57 @@ function captionsLoop() {
   if (ttsAudio && !ttsAudio.paused) renderCaption(ttsAudio.currentTime);
   previewRAF = requestAnimationFrame(captionsLoop);
 }
-// Shows a static, draggable sample caption whenever nothing is actively
-// narrating — lets the user position/size captions without needing a
-// generated story or a running preview first. Works even with no background
-// video uploaded, since the preview now lives in Settings, not on the main
-// page next to the upload area.
-function showCaptionSample() {
-  const grouping = currentCaptionGrouping();
+// A fixed sample sentence, fed through the exact same cue-builder functions
+// real playback uses (buildWordCues/buildSubsFromWords/buildKaraokeGroups)
+// so the idle preview genuinely shows how each mode groups/paces words,
+// not just a placeholder string. The ~0.6s trailing gap after the last
+// word (before the loop restarts) mirrors the natural pause real narration
+// has between sentences, rather than an abrupt instant restart.
+const CAPTION_SAMPLE_WORDS = [
+  { text: "This", start: 0.0, end: 0.35 },
+  { text: "is", start: 0.35, end: 0.6 },
+  { text: "how", start: 0.6, end: 0.85 },
+  { text: "your", start: 0.85, end: 1.15 },
+  { text: "captions", start: 1.15, end: 1.75 },
+  { text: "will", start: 1.75, end: 2.0 },
+  { text: "actually", start: 2.0, end: 2.55 },
+  { text: "look.", start: 2.55, end: 2.95 },
+];
+function buildCaptionSampleCues(grouping) {
+  const lastEnd = CAPTION_SAMPLE_WORDS[CAPTION_SAMPLE_WORDS.length - 1].end;
   if (grouping === "karaoke") {
-    const sample = [
-      { text: "This", start: 0, end: 1 },
-      { text: "is", start: 1, end: 2 },
-      { text: "karaoke", start: 2, end: 3 },
-    ];
-    $("#captionText").style.display = "none";
-    $("#captionKaraokeWrap").style.display = "inline";
-    renderKaraokeCaption({ start: 0, end: 3, words: sample }, 1.5);
+    return { subtitles: [], karaokeGroups: buildKaraokeGroups(CAPTION_SAMPLE_WORDS), duration: lastEnd + 0.6 };
+  } else if (grouping === "word") {
+    return { subtitles: buildWordCues(CAPTION_SAMPLE_WORDS), karaokeGroups: null, duration: lastEnd + 0.6 };
   } else {
-    $("#captionKaraokeWrap").style.display = "none";
-    $("#captionText").style.display = "inline";
-    $("#captionText").textContent = $("#captionUppercase").checked ? "YOUR CAPTION HERE" : "Your Caption Here";
+    return { subtitles: buildSubsFromWords(CAPTION_SAMPLE_WORDS), karaokeGroups: null, duration: lastEnd + 0.6 };
   }
-  $("#captionOverlay").classList.add("show");
+}
+let captionSampleLoopHandle = null;
+function stopCaptionSampleLoop() {
+  if (captionSampleLoopHandle) { clearInterval(captionSampleLoopHandle); captionSampleLoopHandle = null; }
+}
+// Loops a short sample caption whenever nothing is actively narrating —
+// lets the user position/size/preview-the-pacing-of captions without
+// needing a generated story or a running preview first, for all three
+// grouping modes equally (previously only karaoke got even a single static
+// highlighted frame; word/phrase just showed inert placeholder text with
+// no indication of how those modes actually group/pace words). Works even
+// with no background video uploaded, since the preview lives in Settings.
+function showCaptionSample() {
+  stopCaptionSampleLoop();
+  const grouping = currentCaptionGrouping();
+  const { subtitles: sampleSubs, karaokeGroups, duration } = buildCaptionSampleCues(grouping);
+  subtitles = sampleSubs;
+  previewKaraokeGroups = karaokeGroups;
+  let t = 0;
+  const tick = () => {
+    renderCaption(t);
+    t += 0.15;
+    if (t > duration) t = 0;
+  };
+  tick();
+  captionSampleLoopHandle = setInterval(tick, 150);
   updateCaptionStyle();
 }
 // Shows a frozen frame of the uploaded background video (or a neutral
@@ -1881,7 +1934,20 @@ async function transcribeInBrowser(audioBlob) {
 //   3. computeWordTimings' estimate, corrected by real detected pauses
 //      (VAD) when neither ASR tier produced anything usable.
 async function resolveWordTimings(text, audioBlob, durationSec, engineWordTimings, onTranscribeProgress) {
-  if (engineWordTimings && engineWordTimings.length) return engineWordTimings;
+  // Even an engine's own real timing is timing for whatever text was
+  // actually SPOKEN (config.speed aside, that's speechText from
+  // generateSpeech — AITAH expanded to "am I the a**hole", for one) which
+  // can differ from the known script `text` this function receives.
+  // Realigning through the same LCS word-matcher used for ASR transcription
+  // keeps the documented invariant true for every engine, not just the
+  // Whisper-based tiers below: captions show the known script's word, never
+  // whatever the engine actually said. Falls back to the raw timings
+  // untouched only if alignment fails outright (e.g. wildly different
+  // text) — real-but-mislabeled timing still beats discarding it.
+  if (engineWordTimings && engineWordTimings.length) {
+    const aligned = alignWordsBySequence(text, engineWordTimings, durationSec);
+    return aligned || engineWordTimings;
+  }
 
   let asrWords = null;
   if (nativeWhisperAvailable) {
@@ -1922,12 +1988,21 @@ async function generateSpeech(text, voice, engineId, onTranscribeProgress) {
   // batch jobs' transcriptions run concurrently, bounded by the server's own
   // independent transcribeLimiter instead of being serialized behind every
   // other job's TTS+transcription combined.
+  // Only the TTS-bound copy gets AITAH/AITA spelled out — `text` itself
+  // stays untouched below for resolveWordTimings(), so captions keep
+  // showing "AITAH" exactly as written even though it's spoken as "am I
+  // the asshole". Known tradeoff: for the native-Whisper caption tier,
+  // real transcribed "am I the asshole" won't literally match "AITAH" in
+  // the known script, so alignWordsBySequence's fail-closed mismatch
+  // handling falls back to the VAD-estimate tier for that portion — a
+  // minor accuracy cost on one word, not a crash or garbled output.
+  const speechText = expandAitahForSpeech(text);
   let generated;
   try {
     generated = await queueTTS(async () => {
       showDownloadToast(`Generating voice (${engine.label})...`);
       try {
-        return await engine.generate(text, voice, config);
+        return await engine.generate(speechText, voice, config);
       } finally {
         hideDownloadToast();
       }
@@ -1994,6 +2069,7 @@ async function startPreview() {
   if (!story) { alert("Generate or paste a story first."); return; }
   if (!currentVideo) { alert("Upload a background video first."); return; }
   if (previewActive) { stopPreview(); return; }
+  stopCaptionSampleLoop(); // real playback drives subtitles/previewKaraokeGroups from here — the idle sample loop must not keep overwriting them mid-playback
 
   const btn = $("#previewBtn");
   btn.textContent = "Loading...";
@@ -2342,7 +2418,7 @@ function getEngineConfig(engineId) {
   // stays consistent/self-documenting rather than Piper being a silent
   // special case.
   if (engineId === "piper") return { speed: parseFloat($("#piperSpeed").value) || 1 };
-  if (engineId === "kokoro") return { speed: parseFloat($("#kokoroSpeed").value) || 1 };
+  if (engineId === "kokoro" || engineId === "kokoroNative") return { speed: parseFloat($("#kokoroSpeed").value) || 1 };
   if (engineId === "browserSpeech") {
     return { rate: parseFloat($("#browserSpeechRate").value) || 1, pitch: parseFloat($("#browserSpeechPitch").value) || 1 };
   }
@@ -2359,7 +2435,7 @@ async function onEngineChangeUI() {
   $("#ttsOpenaiKeyRow").style.display = engineId === "openaiTts" ? "" : "none";
   $("#ttsElevenlabsKeyRow").style.display = engineId === "elevenlabs" ? "" : "none";
   $("#piperSpeedRow").style.display = engineId === "piper" ? "" : "none";
-  $("#kokoroSpeedRow").style.display = engineId === "kokoro" ? "" : "none";
+  $("#kokoroSpeedRow").style.display = (engineId === "kokoro" || engineId === "kokoroNative") ? "" : "none";
   $("#openaiTtsExtraRow").style.display = engineId === "openaiTts" ? "" : "none";
   $("#elevenlabsExtraRow").style.display = engineId === "elevenlabs" ? "" : "none";
   $("#browserSpeechExtraRow").style.display = engineId === "browserSpeech" ? "" : "none";
@@ -2372,6 +2448,9 @@ async function onEngineChangeUI() {
     pocketTts: nativePocketTtsAvailable
       ? "Runs locally via a small CPU-only Python process. Free, no API key. \"Voice\" is really language — each picks Kyutai's built-in voice for that language."
       : "Not available — needs uv installed (https://docs.astral.sh/uv/) so `uvx pocket-tts` works, then restart the server.",
+    kokoroNative: nativeKokoroAvailable
+      ? "Same Kokoro model as the browser version, run natively — real per-word caption timing instead of an estimate, at the cost of a slower first-ever generation while the model downloads."
+      : "Not available — needs uv installed (https://docs.astral.sh/uv/) so `uvx` can run it, then restart the server.",
   };
   $("#engineNote").textContent = notes[engineId] || "";
   await populateVoices(engineId);
@@ -3283,7 +3362,7 @@ async function exportVideo() {
   btn.textContent = "Exporting...";
   btn.disabled = true;
 
-  const job = createJob({
+  const job = trackJob(createJob({
     story,
     bgFile: currentVideo,
     bgUnsupportedCodec: currentVideoUnsupportedCodec,
@@ -3292,7 +3371,7 @@ async function exportVideo() {
     titleCardText: $("#titleCardText").value.trim() || null,
     musicFile: sidebarMusicFile,
     musicVolume: parseFloat($("#musicVolume").value) || 0.25,
-  });
+  }));
 
   await ensureRenderBackend(1);
   const globalSettings = getGlobalSettings();
@@ -3833,6 +3912,34 @@ async function clearAssetCache() {
   }
 }
 
+// ---------- Key field privacy (mask/reveal/copy) ----------
+// Shared by every API-key-shaped field (#apiKey, #ttsOpenaiKey,
+// #ttsElevenlabsKey, #youtubeClientSecret) — all start masked
+// (type="password" in the HTML) so a key isn't sitting in plain view any
+// time Settings is open; these two functions are the entire show/hide and
+// clipboard-copy behavior, wired via onclick on each field's own pair of
+// buttons rather than a single delegated listener, matching this file's
+// existing convention for small per-control handlers.
+function toggleKeyVisibility(id, btn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const revealing = el.type === "password";
+  el.type = revealing ? "text" : "password";
+  btn.textContent = revealing ? "Hide" : "Show";
+}
+async function copyKeyToClipboard(id, btn) {
+  const el = document.getElementById(id);
+  if (!el || !el.value) return;
+  try {
+    await navigator.clipboard.writeText(el.value);
+    const original = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch (e) {
+    alert("Couldn't copy to clipboard: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
 // ---------- YouTube publish integration ----------
 // Catches the two most common copy-paste mistakes (fields swapped, or only
 // part of a value copied) with a specific, actionable message right here —
@@ -3853,22 +3960,79 @@ function validateYoutubeOauthClientFormat(clientId, clientSecret) {
 }
 
 async function saveYoutubeOauthClient() {
+  const label = $("#youtubeClientLabel").value.trim();
   const clientId = $("#youtubeClientId").value.trim();
   const clientSecret = $("#youtubeClientSecret").value.trim();
   const statusEl = $("#youtubeClientStatus");
-  if (!clientId || !clientSecret) { statusEl.textContent = "Both fields are required."; return; }
+  if (!clientId || !clientSecret) { statusEl.textContent = "Client ID and Client Secret are required."; return; }
   const formatError = validateYoutubeOauthClientFormat(clientId, clientSecret);
   if (formatError) { statusEl.textContent = formatError; return; }
   try {
-    const resp = await fetch("/youtube-oauth-client", {
+    const resp = await fetch("/youtube-oauth-clients", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId, clientSecret }),
+      body: JSON.stringify({ label, clientId, clientSecret }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || "Failed to save.");
-    statusEl.textContent = "Saved. You can now sign in below.";
+    statusEl.textContent = "Added. You can now sign in below.";
+    $("#youtubeClientLabel").value = "";
+    $("#youtubeClientId").value = "";
+    $("#youtubeClientSecret").value = "";
+    await refreshYoutubeOauthClients();
   } catch (e) {
     statusEl.textContent = "Error: " + (e && e.message ? e.message : String(e));
+  }
+}
+
+// Cache of registered OAuth clients (= Google Cloud projects) — read by the
+// sign-in project picker and the accounts list (to label which project each
+// connected channel is using).
+let youtubeOauthClientsCache = [];
+async function refreshYoutubeOauthClients() {
+  try {
+    const resp = await fetch("/youtube-oauth-clients");
+    const data = await resp.json();
+    youtubeOauthClientsCache = data.clients || [];
+  } catch (e) {
+    youtubeOauthClientsCache = [];
+  }
+  renderYoutubeOauthClientsList(youtubeOauthClientsCache);
+  const sel = $("#youtubeSigninClientSelect");
+  if (sel) {
+    const prev = sel.value;
+    sel.innerHTML = youtubeOauthClientsCache.length
+      ? youtubeOauthClientsCache.map(c => `<option value="${c.id}">${escapeHtml(c.label)}</option>`).join("")
+      : `<option value="">Add a project above first</option>`;
+    if (youtubeOauthClientsCache.some(c => c.id === prev)) sel.value = prev;
+  }
+}
+
+function renderYoutubeOauthClientsList(clients) {
+  const list = $("#youtubeOauthClientsList");
+  if (!list) return;
+  if (!clients.length) { list.innerHTML = ""; return; }
+  list.innerHTML = clients.map(c => `
+    <div class="row" style="align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;">
+      <div>
+        <div style="font-size:0.8rem;font-weight:600;">${escapeHtml(c.label)}</div>
+        <div style="font-size:0.7rem;color:var(--muted);">${escapeHtml(c.clientId)}</div>
+      </div>
+      <button onclick="removeYoutubeOauthClient('${c.id}')" style="color:var(--danger);">Remove</button>
+    </div>
+  `).join("");
+}
+
+async function removeYoutubeOauthClient(id) {
+  const client = youtubeOauthClientsCache.find(c => c.id === id);
+  const label = client ? client.label : "this project";
+  if (!confirm(`Remove "${label}"? Any channels connected through it will need to be reconnected under a different project.`)) return;
+  try {
+    const resp = await fetch(`/youtube-oauth-clients/${id}`, { method: "DELETE" });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Failed to remove.");
+    await refreshYoutubeOauthClients();
+  } catch (e) {
+    alert("Couldn't remove project: " + (e && e.message ? e.message : String(e)));
   }
 }
 
@@ -3882,7 +4046,7 @@ function renderYoutubeAccountsList(accounts) {
     <div class="row" style="align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;">
       <div class="row" style="align-items:center;gap:8px;">
         ${a.channelThumbnail ? `<img src="${a.channelThumbnail}" style="width:28px;height:28px;border-radius:50%;">` : ""}
-        <span>${a.channelTitle}</span>
+        <span>${a.channelTitle}${a.oauthClientLabel ? ` <span style="color:var(--muted);font-size:0.72rem;">(${escapeHtml(a.oauthClientLabel)})</span>` : ""}</span>
       </div>
       <button onclick="removeYoutubeAccount('${a.id}')" style="color:var(--danger);">Remove</button>
     </div>
@@ -3894,6 +4058,7 @@ function renderYoutubeAccountsList(accounts) {
 // separate fetch every time a result card renders.
 let youtubeAccountsCache = [];
 async function refreshYoutubeAccounts() {
+  await refreshYoutubeOauthClients();
   try {
     const resp = await fetch("/youtube-accounts");
     const data = await resp.json();
@@ -3906,6 +4071,44 @@ async function refreshYoutubeAccounts() {
   refreshYoutubeQuotaText();
   refreshYoutubeAutoUploadAccountSelect();
   refreshChannelBrandingSyncAccountSelect();
+}
+
+// Lists every job from allSessionJobs (single-export or any batch card,
+// tracked at creation via trackJob()) whose publish state is "scheduled" —
+// pulls fresh every time this tab is opened rather than pushing live
+// updates, which is enough given a schedule only ever gets set by an
+// explicit upload action the user just took. Deliberately display-only:
+// actually changing/cancelling a schedule means a real videos.update PUT
+// call against YouTube's API that overwrites the video's status resource,
+// and getting that payload wrong (missing a required field videos.update
+// expects) risks silently damaging metadata on a real, already-scheduled
+// video with no way to verify the fix from here — "Manage in YouTube
+// Studio" links straight to the one place that's already guaranteed safe
+// for that.
+function refreshScheduleDashboard() {
+  const list = $("#scheduleDashboardList");
+  if (!list) return;
+  const scheduled = allSessionJobs.filter(j => j.publish && j.publish.status === "scheduled");
+  if (!scheduled.length) {
+    list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">Nothing scheduled yet.</p>`;
+    return;
+  }
+  // Soonest-first — the ones about to actually publish are the most
+  // actionable if something needs to change.
+  const sorted = scheduled.slice().sort((a, b) => new Date(a.publish.scheduledAt) - new Date(b.publish.scheduledAt));
+  list.innerHTML = sorted.map(job => {
+    const pub = job.publish;
+    const account = youtubeAccountsCache.find(a => a.id === pub.accountId);
+    const channelLabel = account ? account.channelTitle : "Unknown channel";
+    const when = pub.scheduledAt ? new Date(pub.scheduledAt).toLocaleString() : "—";
+    const studioLink = pub.videoId ? `https://studio.youtube.com/video/${pub.videoId}/edit` : null;
+    return `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;">
+        <div style="font-weight:600;font-size:0.85rem;">${escapeHtml(pub.title || "Untitled")}</div>
+        <div style="font-size:0.72rem;color:var(--muted);margin-top:4px;">${escapeHtml(channelLabel)} &middot; publishes ${escapeHtml(when)}</div>
+        ${studioLink ? `<a href="${studioLink}" target="_blank" rel="noopener" style="font-size:0.72rem;">Manage in YouTube Studio</a>` : ""}
+      </div>`;
+  }).join("");
 }
 
 // The auto-upload account picker's options depend on youtubeAccountsCache,
@@ -4003,7 +4206,10 @@ async function refreshYoutubeQuotaText() {
   try {
     const resp = await fetch("/youtube-usage");
     const data = await resp.json();
-    el.textContent = `Uploaded ${data.uploadsToday} time${data.uploadsToday === 1 ? "" : "s"} today (across all channels). `;
+    const perClient = (data.clients || []).length > 1
+      ? " (" + data.clients.map(c => `${escapeHtml(c.label)}: ${c.uploadsToday}`).join(", ") + ")"
+      : "";
+    el.textContent = `Uploaded ${data.uploadsToday} time${data.uploadsToday === 1 ? "" : "s"} today across all connected projects${perClient}. `;
   } catch (e) {
     el.textContent = "";
   }
@@ -4016,12 +4222,17 @@ async function refreshYoutubeQuotaText() {
 const YOUTUBE_SIGNIN_TIMEOUT_MS = 5 * 60 * 1000;
 
 async function startYoutubeOAuth() {
+  const oauthClientId = $("#youtubeSigninClientSelect").value;
+  if (!oauthClientId) { alert("Add a Google Cloud project above first, then pick it here."); return; }
   const btn = $("#youtubeSignInBtn");
   const originalLabel = btn.textContent;
   btn.disabled = true; btn.textContent = "Opening Google sign-in...";
   let es = null, closePollTimer = null, giveUpTimer = null;
   try {
-    const resp = await fetch("/youtube-oauth-start", { method: "POST" });
+    const resp = await fetch("/youtube-oauth-start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ oauthClientId }),
+    });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || "Couldn't start sign-in.");
     // Listen for the result BEFORE opening the tab — same ordering
@@ -4672,6 +4883,20 @@ function initMediaLibraryUI() {
 // override. Batch and Single share one ffmpegPool/runJob() pipeline.
 let currentFlow = "single";
 let batchJobs = [];
+// Every job created this session (single-export or any batch card),
+// regardless of which of those two lists currently owns/displays it —
+// resetBatch()/removeBatchCard() only ever touch batchJobs, and a single-
+// export job was never tracked in any persistent list at all before this.
+// Exists so the scheduling dashboard (openScheduleDashboard, below) can
+// enumerate every job with a YouTube schedule set, not just whatever
+// happens to be in the currently-open batch. Session-lived only — this
+// intentionally doesn't persist across an app restart (jobs themselves,
+// including their in-memory resultBlob, don't either).
+let allSessionJobs = [];
+function trackJob(job) {
+  allSessionJobs.push(job);
+  return job;
+}
 const MAX_PARALLEL_RENDERS = 15;
 
 function setFlow(flow) {
@@ -4786,7 +5011,7 @@ function updateParallelismHint() {
 }
 
 function addBatchCard() {
-  const job = createJob();
+  const job = trackJob(createJob());
   batchJobs.push(job);
   const el = buildBatchCardElement(job);
   $("#batchCardList").appendChild(el);
@@ -5040,10 +5265,12 @@ async function getIdeasForCard(job, btn, ta) {
   btn.disabled = true;
   ta.value = "";
   try {
+    const category = STORY_CATEGORIES[Math.floor(Math.random() * STORY_CATEGORIES.length)];
     await streamChat(
       [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
-       { role: "user", content: ideasPrompt() }],
-      (chunk) => { ta.value += chunk; job.premise = ta.value; autoGrow(ta); }
+       { role: "user", content: ideasPrompt(category) }],
+      (chunk) => { ta.value += chunk; job.premise = ta.value; autoGrow(ta); },
+      1.05
     );
   } catch (e) { alert("Failed: " + e.message); }
   btn.textContent = "Suggest Ideas";
@@ -5122,15 +5349,16 @@ function applyBulkJobDefaults(job, cardEl, { voice, ttsEngine, captionPreset, ti
 // addBatchCard()), so this streams straight into that card's own textareas
 // instead of taking them as separate live-typing targets — same streamChat
 // calls, same prompts, just orchestrated in a loop rather than by hand.
-async function generateIdeaAndStoryForJob(job, cardEl) {
+async function generateIdeaAndStoryForJob(job, cardEl, category) {
   const premiseTa = cardEl.querySelector(".bc-premise");
   const storyTa = cardEl.querySelector(".bc-story");
 
   let premise = "";
   await streamChat(
     [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
-     { role: "user", content: ideasPrompt() }],
-    (chunk) => { premise += chunk; job.premise = premise; premiseTa.value = premise; autoGrow(premiseTa); }
+     { role: "user", content: ideasPrompt(category) }],
+    (chunk) => { premise += chunk; job.premise = premise; premiseTa.value = premise; autoGrow(premiseTa); },
+    1.05
   );
 
   let story = "";
@@ -5268,6 +5496,12 @@ async function bulkGenerateBatch() {
   // failure — a rate limit, a bad response — doesn't abort every other
   // job's already-in-flight generation/render.
   const cancelToken = currentBatchCancel;
+  // Shuffled ONCE, up front — every job's ideas call assigns
+  // batchCategories[i % length] deterministically, so no two jobs in this
+  // batch converge on the same scenario category even though their ideas
+  // calls all start concurrently (there's no way to track "already picked"
+  // across calls that literally begin at the same instant).
+  const batchCategories = shuffledStoryCategories();
   await Promise.all(jobs.map(async ({ job, cardEl }, i) => {
     // Story generation/media assignment happen entirely outside runJob(),
     // so they need their own cancel guard — runJob()'s own checkCancelled()
@@ -5280,7 +5514,7 @@ async function bulkGenerateBatch() {
     try {
       await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
       await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
-      await generateIdeaAndStoryForJob(job, cardEl);
+      await generateIdeaAndStoryForJob(job, cardEl, batchCategories[i % batchCategories.length]);
       job.progressLabel = "Story ready";
       renderResultCard(job, grid);
       if (cancelToken.cancelled) {
@@ -5590,8 +5824,44 @@ Use normal punctuation. Break the story into short paragraphs separated by blank
 
 Plain text only.`;
 }
-function ideasPrompt() {
-  return `Generate ONE creative idea for an AITAH Reddit post. Output ONLY the idea as a single string like "AITAH for [doing something dramatic]". No JSON, no quotes, no formatting.`;
+// Without a category steer, every "Suggest Ideas" call starts from the
+// exact same generic instruction — nothing pushes the model toward a
+// different scenario shape each time, so repeated generations (especially
+// within one batch, where every job's ideas call is independently
+// identical) converge on the same handful of familiar AITAH tropes. This
+// doesn't fix story QUALITY, just widens which scenario shapes get picked.
+const STORY_CATEGORIES = [
+  "family drama (parents, siblings, in-laws)",
+  "workplace or coworker conflict",
+  "friendship falling out",
+  "money disagreement (splitting bills, lending, inheritance)",
+  "wedding or engagement drama",
+  "roommate conflict",
+  "romantic relationship conflict, not a breakup",
+  "parenting disagreement",
+  "neighbor dispute",
+  "travel or vacation conflict",
+  "pet-related conflict",
+  "holiday or family-gathering drama",
+];
+// Fisher-Yates — used both for a single "Suggest Ideas" click (pick one at
+// random) and for bulkGenerateBatch(), which shuffles once per batch and
+// assigns each job categories[i % length] so every job in the SAME batch
+// gets a different category deterministically, with no race condition
+// between jobs' independently-concurrent ideas calls (there'd be no way to
+// track "categories already picked" across calls that literally start at
+// the same instant).
+function shuffledStoryCategories() {
+  const arr = STORY_CATEGORIES.slice();
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+function ideasPrompt(category) {
+  const hint = category ? ` Make the scenario specifically about: ${category}.` : "";
+  return `Generate ONE creative idea for an AITAH Reddit post.${hint} Output ONLY the idea as a single string like "AITAH for [doing something dramatic]". No JSON, no quotes, no formatting.`;
 }
 
 // ---------- Input validation ----------

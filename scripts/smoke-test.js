@@ -265,6 +265,42 @@ async function main() {
     } else if (pocketTtsCap) {
       skip("POST /pockettts", "pocket-tts (uvx) unavailable on this machine");
     }
+
+    let kokoroNativeCap = null;
+    try {
+      const resp = await fetch(`${BASE}/kokoro-native-capability`);
+      kokoroNativeCap = await resp.json();
+      if (typeof kokoroNativeCap.available === "boolean") {
+        ok("GET /kokoro-native-capability", `available=${kokoroNativeCap.available}`);
+      } else {
+        fail("GET /kokoro-native-capability", "unexpected response shape: " + JSON.stringify(kokoroNativeCap));
+      }
+    } catch (e) {
+      fail("GET /kokoro-native-capability", e.message);
+    }
+
+    if (kokoroNativeCap && kokoroNativeCap.available) {
+      try {
+        const resp = await fetch(`${BASE}/kokoro-native`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: "This is a smoke test.", voice: "af_heart" }),
+        });
+        if (!resp.ok) {
+          fail("POST /kokoro-native", `HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+        } else {
+          const data = await resp.json();
+          if (data.audioBase64 && Array.isArray(data.wordTimings)) {
+            ok("POST /kokoro-native", `${data.audioBase64.length} b64 chars, ${data.wordTimings.length} word timings`);
+          } else {
+            fail("POST /kokoro-native", "unexpected response shape: " + JSON.stringify(Object.keys(data)));
+          }
+        }
+      } catch (e) {
+        fail("POST /kokoro-native", e.message);
+      }
+    } else if (kokoroNativeCap) {
+      skip("POST /kokoro-native", "native Kokoro (uvx) unavailable on this machine");
+    }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

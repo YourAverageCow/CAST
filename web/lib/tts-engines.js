@@ -136,6 +136,32 @@ function encodeMonoFloat32Wav(samples, sampleRate) {
   for (let i = 0; i < samples.length; i++, offset += bytesPerSample) view.setFloat32(offset, samples[i], true);
   return buffer;
 }
+// Kokoro's per-sentence-chunk concatenation (see KokoroEngine.generate below)
+// used to be a raw, unmodified splice of each chunk's audio — no gap
+// insertion, but also no trimming, so each chunk's own leading/trailing
+// silence (which varies chunk-to-chunk — StyleTTS2-family models don't
+// synthesize a consistent amount of silence around punctuation) stacked
+// directly against the next chunk's, producing pauses that felt random in
+// length and placement rather than a clean, consistent inter-sentence beat.
+// Live waveform inspection (energy-threshold scan, same technique
+// detectSilenceGaps() already uses for caption-sync in app.js) confirmed
+// this: individual chunks' silent runs at their own start/end ranged from
+// ~40ms to over 400ms with no correlation to punctuation type. Fix: trim
+// each chunk's own leading/trailing near-silence first, then insert exactly
+// one fixed, deliberate gap between chunks — trading "however much silence
+// the model happened to generate" for a single controlled value.
+const KOKORO_SILENCE_RMS_THRESHOLD = 0.01;
+const KOKORO_MAX_TRIM_SEC = 0.6;
+const KOKORO_INTER_CHUNK_GAP_SEC = 0.12;
+function trimSilenceFloat32(samples, sampleRate, maxTrimSec) {
+  const maxTrimSamples = Math.floor(maxTrimSec * sampleRate);
+  let start = 0;
+  while (start < samples.length && start < maxTrimSamples && Math.abs(samples[start]) < KOKORO_SILENCE_RMS_THRESHOLD) start++;
+  let end = samples.length;
+  const minEnd = Math.max(start, samples.length - maxTrimSamples);
+  while (end > minEnd && Math.abs(samples[end - 1]) < KOKORO_SILENCE_RMS_THRESHOLD) end--;
+  return samples.subarray(start, end);
+}
 const KokoroEngine = {
   id: "kokoro",
   label: "Kokoro (local, free, higher quality)",
@@ -169,13 +195,18 @@ const KokoroEngine = {
     let sampleRate = 24000;
     for (const chunk of chunks) {
       const audio = await tts.generate(chunk, { voice, speed });
-      sampleChunks.push(audio.audio);
       sampleRate = audio.sampling_rate;
+      sampleChunks.push(trimSilenceFloat32(audio.audio, sampleRate, KOKORO_MAX_TRIM_SEC));
     }
-    const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0);
+    const gapSamples = sampleChunks.length > 1 ? Math.floor(KOKORO_INTER_CHUNK_GAP_SEC * sampleRate) : 0;
+    const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0) + gapSamples * Math.max(0, sampleChunks.length - 1);
     const merged = new Float32Array(totalLen);
     let offset = 0;
-    for (const chunk of sampleChunks) { merged.set(chunk, offset); offset += chunk.length; }
+    sampleChunks.forEach((chunk, i) => {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+      if (i < sampleChunks.length - 1) offset += gapSamples; // stays zero-filled — silence
+    });
     const wavBuffer = encodeMonoFloat32Wav(merged, sampleRate);
     const audioBlob = new Blob([wavBuffer], { type: "audio/wav" });
     // Parse the WAV header directly (same parseWavDurationSec the ffmpeg
@@ -485,9 +516,60 @@ const PocketTtsEngine = {
   },
 };
 
+// ---------- Kokoro, native backend (real per-word timestamps) ----------
+// Same voice/model as the browser's Kokoro (KOKORO_VOICES above), run
+// through the official Python `kokoro` package instead of kokoro-js/ONNX —
+// no browser build exposes real per-word timestamps, but the Python
+// KPipeline does (real start_ts/end_ts derived during synthesis itself, not
+// a separate ASR pass — see server.js's runNativeKokoro/scripts/kokoro_native.py).
+// This is the one engine whose generate() actually populates wordTimings,
+// which resolveWordTimings()'s `if (engineWordTimings && engineWordTimings.length)
+// return engineWordTimings;` short-circuit (app.js) already knows how to use —
+// no caption-sync changes needed for this to take effect.
+const KokoroNativeEngine = {
+  id: "kokoroNative",
+  label: "Kokoro — native (local, free, real word timing)",
+  isFree: true,
+  needsApiKey: false,
+  requiresOncePerSessionPermission: false,
+  listVoices() { return KOKORO_VOICES; },
+  defaultVoice() { return KOKORO_VOICES[0].id; },
+  async generate(text, voice, config) {
+    const speed = (config && config.speed) || 1;
+    // A first-ever call pays for uvx resolving kokoro's dependencies plus
+    // the model's one-time HuggingFace download — generous timeout to match
+    // server.js's own 8-minute kill timer on the subprocess.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8.5 * 60 * 1000);
+    let resp;
+    try {
+      resp = await fetch("/kokoro-native", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice, speed }),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(t);
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `Native Kokoro error: ${resp.status}`);
+    const byteChars = atob(data.audioBase64);
+    const bytes = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+    const audioBlob = new Blob([bytes], { type: "audio/wav" });
+    return {
+      audioBlob,
+      durationSec: data.durationSec || await probeAudioDuration(audioBlob),
+      wordTimings: Array.isArray(data.wordTimings) ? data.wordTimings : undefined,
+    };
+  },
+};
+
 const TTS_ENGINES = {
   piper: PiperEngine,
   kokoro: KokoroEngine,
+  kokoroNative: KokoroNativeEngine,
   openaiTts: OpenAIEngine,
   elevenlabs: ElevenLabsEngine,
   browserSpeech: BrowserSpeechEngine,

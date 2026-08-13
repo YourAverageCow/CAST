@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
   computeWordTimings, alignWordsFromCharacters, alignWordsBySequence, snapPausesToWords,
   countFirstParagraphWords, groupWords, buildSubsFromWords, buildKaraokeGroups, buildWordCues, sanitizeText,
+  expandAitahForSpeech,
 } = require("./captions.js");
 
 test("computeWordTimings distributes duration proportionally to word length", () => {
@@ -304,6 +305,26 @@ test("sanitizeText strips lone surrogates but keeps valid surrogate pairs", () =
 test("sanitizeText returns empty string for non-string input", () => {
   assert.equal(sanitizeText(null), "");
   assert.equal(sanitizeText(undefined), "");
+});
+
+test("expandAitahForSpeech spells out AITAH and AITA, case-insensitively", () => {
+  assert.equal(expandAitahForSpeech("AITAH for eating the last slice?"), "am I the asshole for eating the last slice?");
+  assert.equal(expandAitahForSpeech("aitah for this?"), "am I the asshole for this?");
+  assert.equal(expandAitahForSpeech("AITA for leaving early?"), "am I the asshole for leaving early?");
+});
+
+test("expandAitahForSpeech doesn't touch words that merely contain the pattern", () => {
+  assert.equal(expandAitahForSpeech("WAITAHOUR and AITAHOLIC are not AITAH"), "WAITAHOUR and AITAHOLIC are not am I the asshole");
+});
+
+test("expandAitahForSpeech leaves the rest of the story untouched", () => {
+  const story = "AITAH for this? My sister said AITA too. Anyway here's the story.";
+  assert.equal(expandAitahForSpeech(story), "am I the asshole for this? My sister said am I the asshole too. Anyway here's the story.");
+});
+
+test("expandAitahForSpeech returns empty string for non-string input", () => {
+  assert.equal(expandAitahForSpeech(null), "");
+  assert.equal(expandAitahForSpeech(undefined), "");
 });
 
 test("buildWordCues maps each word 1:1 to its own cue, unlike buildSubsFromWords' grouping", () => {
