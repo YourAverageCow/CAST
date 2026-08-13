@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 101;
+const VERSION = 102;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -468,8 +468,68 @@ function populateModels() {
     $("#customBaseUrl").value = provider.baseUrl;
   }
   $("#apiKeyRow").style.display = provider.needsApiKey ? "" : "none";
+  // Not awaited — populateModels() itself isn't async and every existing
+  // caller (provider-change listener, init()) doesn't need to block on a
+  // local network round trip just to show/hide the rest of the panel.
+  refreshOllamaModelList();
 }
 $("#provider").addEventListener("change", populateModels);
+
+// Ollama exposes its own native model-list API at /api/tags — a sibling to
+// the OpenAI-compatibility endpoint at /v1 this app otherwise talks to for
+// actual generation, not part of the OpenAI-compatible surface itself, so
+// this is genuinely Ollama-specific rather than something every provider on
+// the "editable base URL" field (LM Studio, vLLM, ...) could also use.
+// Lets the model field auto-detect what's actually pulled instead of
+// requiring the user to type an exact model name/tag from memory.
+async function refreshOllamaModelList() {
+  const provider = getStoryProvider();
+  const select = $("#ollamaModelSelect");
+  const status = $("#ollamaModelStatus");
+  if (provider.id !== "ollama") { select.style.display = "none"; status.textContent = ""; return; }
+  const baseUrl = $("#customBaseUrl").value.trim() || provider.baseUrl;
+  const tagsUrl = baseUrl.replace(/\/v1\/?$/, "") + "/api/tags";
+  try {
+    const ctrl = new AbortController();
+    // Local server — should respond near-instantly if it's actually
+    // running; a short timeout means "not running" fails fast instead of
+    // making the Story tab feel stuck for the default 3+ minutes fetch()
+    // would otherwise wait on a connection nothing is listening on.
+    const t = setTimeout(() => ctrl.abort(), 3000);
+    let resp;
+    try {
+      resp = await fetch(tagsUrl, { signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    const models = (data.models || []).map(m => m.name || m.model).filter(Boolean);
+    if (!models.length) {
+      select.style.display = "none";
+      status.textContent = "No models found — pull one with `ollama pull <model>`, or enter a name manually below.";
+      return;
+    }
+    select.innerHTML = models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+    select.style.display = "";
+    // Prefer whatever's already saved if it's still actually installed,
+    // otherwise default to the first detected model rather than leaving
+    // the field blank.
+    const saved = $("#modelCustom").value.trim();
+    select.value = models.includes(saved) ? saved : models[0];
+    onOllamaModelSelectChange();
+    status.textContent = `${models.length} model${models.length === 1 ? "" : "s"} detected — pick one, or type a different name below.`;
+  } catch (e) {
+    select.style.display = "none";
+    status.textContent = "Couldn't detect models — make sure Ollama is running, or enter a model name manually below.";
+  }
+}
+function onOllamaModelSelectChange() {
+  const select = $("#ollamaModelSelect");
+  if (!select.value) return;
+  $("#modelCustom").value = select.value;
+  $("#modelCustom").dispatchEvent(new Event("input", { bubbles: true }));
+}
 
 // Persist all settings in localStorage so they survive page reloads / hard resets.
 const SETTINGS_FIELDS = [
@@ -932,6 +992,15 @@ async function init() {
   });
   $("#theme").addEventListener("change", () => applyTheme($("#theme").value));
   $("#accentColor").addEventListener("input", applyAccentColor);
+  // Re-detect Ollama's installed models when the base URL changes (e.g.
+  // pointing at a different port/host) — debounced-ish via a simple
+  // trailing timer so this doesn't fire a network request on every
+  // keystroke while typing a new URL.
+  let ollamaModelRefreshTimer;
+  $("#customBaseUrl").addEventListener("input", () => {
+    clearTimeout(ollamaModelRefreshTimer);
+    ollamaModelRefreshTimer = setTimeout(refreshOllamaModelList, 500);
+  });
   $("#compactMode").addEventListener("change", applyCompactMode);
   $("#reduceMotion").addEventListener("change", applyReduceMotion);
   $("#uiFontScale").addEventListener("input", applyUiFontScale);

@@ -483,7 +483,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <label>Model</label>
           <select id="model"></select>
           <div id="modelCustomRow" style="display:none;">
+            <select id="ollamaModelSelect" style="display:none;" onchange="onOllamaModelSelectChange()"></select>
             <input type="text" id="modelCustom" placeholder="e.g. llama3.1, mistral, phi3...">
+            <p id="ollamaModelStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;"></p>
           </div>
           <div id="apiKeyRow">
             <label>API Key</label>
