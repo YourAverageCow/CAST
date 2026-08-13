@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 89;
+const VERSION = 90;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2487,9 +2487,26 @@ function describeRenderProgress(data) {
   return patch;
 }
 
-async function runJob(job, globalSettings, onUpdate) {
+// Thrown by runJob()'s checkCancelled() checkpoints — caught separately
+// from a real failure so a cancelled job gets status "cancelled" (offered
+// a Retry, no scary error text) instead of "error".
+class JobCancelledError extends Error {}
+
+// isCancelled (optional): a `() => boolean` a batch run passes in so this
+// job can bail out at the next checkpoint once the user hits Cancel. Only
+// checked between phases (start, before transcode, before voice/title-card,
+// before the actual render call) — a job already inside the WASM/native
+// render pool (submitted and either waiting for a slot or actively
+// encoding) finishes normally rather than being interrupted mid-render;
+// threading real abort support into the worker pool / native fetch is a
+// separate, more invasive change. This still means Cancel stops every job
+// that hasn't reached its (usually longest) render phase yet, which is
+// most of a large batch's remaining work.
+async function runJob(job, globalSettings, onUpdate, isCancelled) {
   const update = (patch) => { Object.assign(job, patch); if (onUpdate) onUpdate(job); };
+  const checkCancelled = () => { if (isCancelled && isCancelled()) throw new JobCancelledError("Cancelled"); };
   try {
+    checkCancelled();
     if (!job.bgFile) throw new Error("No background video.");
     const story = sanitizeText((job.story || "").trim());
     if (!story) throw new Error("No story text.");
@@ -2497,6 +2514,7 @@ async function runJob(job, globalSettings, onUpdate) {
     const settings = resolveJobSettings(job, globalSettings);
 
     let bgFile = job.bgFile;
+    checkCancelled();
     if (job.bgUnsupportedCodec) {
       if (!job.bgTranscoded) {
         const codec = job.bgUnsupportedCodec;
@@ -2518,6 +2536,7 @@ async function runJob(job, globalSettings, onUpdate) {
     const h = parseInt(settings.resH) || 1920;
     const fps = parseInt(settings.fps) || 30;
 
+    checkCancelled();
     // Title-card image generation has zero data dependency on TTS output —
     // it only needs title/channelName/w/h, all already available — so it
     // runs concurrently with generateSpeech() instead of waiting for it.
@@ -2605,6 +2624,7 @@ async function runJob(job, globalSettings, onUpdate) {
       musicPayload = await readMusicFileBytes(job.musicFile);
     }
 
+    checkCancelled();
     update({ status: "render", progressPct: 30, progressLabel: "Rendering..." });
     const [bg, audioData] = await Promise.all([
       readBgFileBytes(bgFile),
@@ -2669,6 +2689,10 @@ async function runJob(job, globalSettings, onUpdate) {
     job.resultBlob = blob;
     update({ status: "done", progressPct: 100, progressLabel: "Done", resultUrl: URL.createObjectURL(blob) });
   } catch (e) {
+    if (e instanceof JobCancelledError) {
+      update({ status: "cancelled", error: null, progressLabel: "Cancelled" });
+      return;
+    }
     console.error(e);
     update({ status: "error", error: (e && e.message) || String(e) });
   }
@@ -2716,6 +2740,12 @@ function renderResultCard(job, container, opts) {
   } else if (job.status === "error") {
     div.innerHTML = title +
       `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>` +
+      (isBatchGrid ? `<button class="result-retry-btn" data-action="retry">Retry</button>` : "");
+    const retryBtn = div.querySelector('[data-action="retry"]');
+    if (retryBtn) retryBtn.onclick = () => retryBatchJob(job);
+  } else if (job.status === "cancelled") {
+    div.innerHTML = title +
+      `<div class="result-status" style="color:var(--muted);">Cancelled</div>` +
       (isBatchGrid ? `<button class="result-retry-btn" data-action="retry">Retry</button>` : "");
     const retryBtn = div.querySelector('[data-action="retry"]');
     if (retryBtn) retryBtn.onclick = () => retryBatchJob(job);
@@ -3195,6 +3225,21 @@ async function publishAllBatch() {
   }));
   if (btn) { btn.textContent = "Publish All to YouTube"; btn.disabled = false; }
   updateBatchProgressStats();
+}
+
+// Signals every runJob() call currently in flight (via its isCancelled
+// closure, see runJob's checkCancelled()) to bail at its next phase
+// checkpoint, and bulkGenerateBatch()'s own pre-runJob guard to do the
+// same for jobs still in story-generation. Deliberately does NOT try to
+// interrupt a job already inside the render pool (mid-render, or queued
+// for a slot) — that finishes normally; see runJob()'s isCancelled doc
+// comment for why that's an intentional scope limit, not an oversight.
+function cancelCurrentBatch() {
+  if (!batchProgressState || currentBatchCancel.cancelled) return;
+  currentBatchCancel.cancelled = true;
+  const btn = $("#batchCancelBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Cancelling..."; }
+  showToast("Cancelling — finishing any renders already in progress...");
 }
 
 // The sidebar's "quick single export" — builds one job from the current
@@ -3936,11 +3981,17 @@ async function refreshYoutubeQuotaText() {
   }
 }
 
+// How long to wait for a result before giving up and resetting the button
+// on its own — a real constant (not inlined) so a live test can shrink it
+// without waiting the real 5 minutes, same technique used for
+// TTS_QUEUE_TIMEOUT_MS earlier in this file.
+const YOUTUBE_SIGNIN_TIMEOUT_MS = 5 * 60 * 1000;
+
 async function startYoutubeOAuth() {
   const btn = $("#youtubeSignInBtn");
   const originalLabel = btn.textContent;
   btn.disabled = true; btn.textContent = "Opening Google sign-in...";
-  let es = null;
+  let es = null, closePollTimer = null, giveUpTimer = null;
   try {
     const resp = await fetch("/youtube-oauth-start", { method: "POST" });
     const data = await resp.json();
@@ -3959,9 +4010,24 @@ async function startYoutubeOAuth() {
       // existing setWindowOpenHandler already routes any non-own-origin
       // window.open to the system browser via shell.openExternal, so this
       // needs zero Electron-specific code; in the plain browser build it's
-      // just a normal new tab.
-      window.open(data.authUrl, "_blank");
+      // just a normal new tab. That routing means winRef is null in the
+      // Electron build specifically (a real system-browser tab isn't a
+      // same-process window at all) — the poll below only ever fires in
+      // the plain-browser build, where window.open() does return a real
+      // reference. Without the timeout below, closing that tab (or, in
+      // Electron, the external browser tab, which the poll can never see)
+      // without finishing left this button stuck on "Waiting..." forever,
+      // with no way to retry short of restarting the app.
+      const winRef = window.open(data.authUrl, "_blank");
       btn.textContent = "Waiting for you to finish signing in...";
+      if (winRef) {
+        closePollTimer = setInterval(() => {
+          if (winRef.closed) reject(new Error("The sign-in tab was closed before finishing."));
+        }, 1000);
+      }
+      giveUpTimer = setTimeout(() => {
+        reject(new Error(`Didn't hear back after ${YOUTUBE_SIGNIN_TIMEOUT_MS / 60000} minutes — the sign-in tab may have been closed. Try again.`));
+      }, YOUTUBE_SIGNIN_TIMEOUT_MS);
     });
     if (result.status === "success") {
       showToast(`Connected ${result.account.channelTitle}.`);
@@ -3973,6 +4039,8 @@ async function startYoutubeOAuth() {
     alert("YouTube sign-in failed: " + (e && e.message ? e.message : String(e)));
   } finally {
     if (es) es.close();
+    if (closePollTimer) clearInterval(closePollTimer);
+    if (giveUpTimer) clearTimeout(giveUpTimer);
     btn.disabled = false; btn.textContent = originalLabel;
   }
 }
@@ -5121,6 +5189,7 @@ async function bulkGenerateBatch() {
   const btn = $("#bulkGenerateBtn");
   btn.disabled = true;
   setBatchViewMode("cards");
+  currentBatchCancel = { cancelled: false };
 
   const jobs = [];
   for (let i = 0; i < count; i++) {
@@ -5170,20 +5239,34 @@ async function bulkGenerateBatch() {
   // Per-job try/catch (not one Promise.all-wide try/catch) so one job's
   // failure — a rate limit, a bad response — doesn't abort every other
   // job's already-in-flight generation/render.
+  const cancelToken = currentBatchCancel;
   await Promise.all(jobs.map(async ({ job, cardEl }, i) => {
+    // Story generation/media assignment happen entirely outside runJob(),
+    // so they need their own cancel guard — runJob()'s own checkCancelled()
+    // checkpoints only cover its own phases, not this.
+    if (cancelToken.cancelled) {
+      job.status = "cancelled"; job.progressLabel = "Cancelled";
+      renderResultCard(job, grid);
+      return;
+    }
     try {
       await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
       await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
       await generateIdeaAndStoryForJob(job, cardEl);
       job.progressLabel = "Story ready";
       renderResultCard(job, grid);
+      if (cancelToken.cancelled) {
+        job.status = "cancelled"; job.progressLabel = "Cancelled";
+        renderResultCard(job, grid);
+        return;
+      }
       job.status = "queued";
       renderResultCard(job, grid);
       await runJob(job, globalSettings, (j) => {
         renderResultCard(j, resultsGrid);
         renderResultCard(j, grid);
         updateBatchProgressStats();
-      });
+      }, () => cancelToken.cancelled);
     } catch (e) {
       console.error(e);
       job.status = "error";
@@ -5194,7 +5277,9 @@ async function bulkGenerateBatch() {
   }));
 
   const failedCount = jobs.filter(({ job }) => job.status === "error").length;
-  showToast(failedCount ? `Batch done — ${failedCount} of ${jobs.length} failed.` : "Batch complete!");
+  const cancelledCount = jobs.filter(({ job }) => job.status === "cancelled").length;
+  showToast(cancelledCount ? `Batch cancelled — ${cancelledCount} video${cancelledCount === 1 ? "" : "s"} skipped.`
+    : failedCount ? `Batch done — ${failedCount} of ${jobs.length} failed.` : "Batch complete!");
   updateBatchProgressStats();
 
   btn.disabled = false;
@@ -5208,6 +5293,10 @@ async function bulkGenerateBatch() {
 // single progress bar, since a batch run can take a while and the user
 // asked to see resource use / ETA / elapsed time while it's in flight.
 let batchProgressState = null; // { startTime, totalJobs, jobs, tickHandle }
+// A fresh object each batch run (not just a boolean toggle) so a stale
+// closure captured by a just-finished batch's in-flight jobs can't
+// accidentally observe a later batch's cancel click.
+let currentBatchCancel = { cancelled: false };
 
 function formatElapsed(ms) {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
@@ -5222,6 +5311,11 @@ function openBatchProgressPanel(jobs) {
   $("#batchProgressOverlay").classList.add("show");
   $("#batchProgressCloseBtn").textContent = "Minimize";
   $("#batchProgressReopenBtn").style.display = "none";
+  // A previous run's Cancel click leaves this disabled/relabeled — reset it
+  // for the new run (its own visibility is handled per-tick by
+  // updateBatchProgressStats, called right below).
+  const cancelBtn = $("#batchCancelBtn");
+  if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = "Cancel Batch"; }
   const grid = $("#batchProgressGrid");
   grid.innerHTML = "";
   for (const job of jobs) renderResultCard(job, grid);
@@ -5237,7 +5331,7 @@ function updateBatchProgressStats() {
   if (!batchProgressState) return;
   const { startTime, totalJobs, jobs } = batchProgressState;
   const elapsedMs = Date.now() - startTime;
-  const doneCount = jobs.filter(j => j.status === "done" || j.status === "error").length;
+  const doneCount = jobs.filter(j => j.status === "done" || j.status === "error" || j.status === "cancelled").length;
   const activeCount = jobs.filter(j => !["draft", "queued", "done", "error"].includes(j.status)).length;
   const overallPct = totalJobs
     ? Math.round(jobs.reduce((sum, j) => sum + (j.status === "done" ? 100 : (j.progressPct || 0)), 0) / totalJobs)
@@ -5320,6 +5414,10 @@ function updateBatchProgressStats() {
     const hasUnpublished = jobs.some(j => j.status === "done" && j.publish.status === "none");
     publishAllBtn.style.display = (youtubeAvailable && doneCount >= totalJobs && hasUnpublished) ? "" : "none";
   }
+  // Inverse of Publish All's condition — only useful while there's
+  // something left to stop.
+  const cancelBtn = $("#batchCancelBtn");
+  if (cancelBtn) cancelBtn.style.display = doneCount < totalJobs ? "" : "none";
 }
 
 function minimizeBatchProgress() {
@@ -5336,12 +5434,13 @@ function reopenBatchProgress() {
 // gets "N at a time, rest wait" behavior for free from the pool, no extra
 // scheduling logic needed here.
 async function renderAllBatch() {
-  const jobsToRun = batchJobs.filter(j => j.status === "draft" || j.status === "error");
+  const jobsToRun = batchJobs.filter(j => j.status === "draft" || j.status === "error" || j.status === "cancelled");
   if (!jobsToRun.length) { showToast("Nothing to render — add a video or fix a failed one first."); return; }
 
   const btn = $("#renderAllBtn");
   btn.textContent = "Rendering...";
   btn.disabled = true;
+  currentBatchCancel = { cancelled: false };
 
   const parallelism = parseInt($("#batchParallelism").value) || 1;
   const globalSettings = getGlobalSettings();
@@ -5361,13 +5460,16 @@ async function renderAllBatch() {
       renderResultCard(j, grid);
       renderResultCard(j, progressGrid);
     });
+    const cancelToken = currentBatchCancel;
     await Promise.all(jobsToRun.map(job => runJob(job, globalSettings, (j) => {
       renderResultCard(j, grid);
       renderResultCard(j, progressGrid);
       updateBatchProgressStats();
-    })));
+    }, () => cancelToken.cancelled)));
     const failed = jobsToRun.filter(j => j.status === "error").length;
-    showToast(failed ? `Batch done — ${failed} of ${jobsToRun.length} failed.` : "Batch complete!");
+    const cancelled = jobsToRun.filter(j => j.status === "cancelled").length;
+    showToast(cancelled ? `Batch cancelled — ${cancelled} video${cancelled === 1 ? "" : "s"} skipped.`
+      : failed ? `Batch done — ${failed} of ${jobsToRun.length} failed.` : "Batch complete!");
   } catch (e) {
     console.error(e);
     alert("Batch failed to start: " + (e && e.message ? e.message : String(e)));

@@ -1147,6 +1147,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   <div class="batch-progress-header">
     <h2 id="batchProgressTitle">Rendering batch...</h2>
     <button class="primary" id="batchPublishAllBtn" onclick="publishAllBatch()" style="display:none;">Publish All to YouTube</button>
+    <button id="batchCancelBtn" onclick="cancelCurrentBatch()" style="color:var(--danger);">Cancel Batch</button>
     <button class="accent" id="batchProgressCloseBtn" onclick="minimizeBatchProgress()">Minimize</button>
   </div>
   <div class="batch-progress-stats" id="batchProgressStats"></div>
