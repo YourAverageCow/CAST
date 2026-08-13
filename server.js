@@ -31,6 +31,32 @@ const os = require("os");
 const crypto = require("crypto");
 const { execFile, spawn } = require("child_process");
 
+// A GUI-launched macOS app (double-clicked, or `open`ed — as opposed to run
+// from an interactive terminal) does NOT inherit the PATH additions from
+// the user's shell profile (.zshrc/.zprofile) — it gets whatever launchd's
+// own cached session PATH is, which on a freshly-updated or freshly-
+// installed-Homebrew machine can be missing /opt/homebrew/bin (or
+// /usr/local/bin on Intel) entirely until the next full login/reboot.
+// Confirmed live: this exact process's real inherited PATH was just
+// "/usr/bin:/bin:/usr/sbin:/sbin" — no Homebrew — causing every
+// execFile("ffmpeg"/"whisper", ...) call below to fail with ENOENT even
+// though `ffmpeg` and `whisper` were genuinely installed and on PATH for
+// every interactive shell on the same machine. child_process.execFile/spawn
+// inherit process.env by default, so augmenting it once here (rather than
+// passing a custom env to every individual call) fixes every native-backend
+// check/spawn in this file at once.
+function fixChildProcessPath() {
+  const commonBinDirs = [
+    "/opt/homebrew/bin", "/opt/homebrew/sbin", // Homebrew, Apple Silicon
+    "/usr/local/bin", "/usr/local/sbin",        // Homebrew, Intel; also where many manual installs land
+    "/opt/local/bin",                            // MacPorts
+  ];
+  const existing = (process.env.PATH || "").split(path.delimiter);
+  const additions = commonBinDirs.filter(d => !existing.includes(d) && fs.existsSync(d));
+  if (additions.length) process.env.PATH = existing.concat(additions).join(path.delimiter);
+}
+fixChildProcessPath();
+
 // SLOPDADDY_PORT lets a second instance run alongside a live Electron app
 // (which binds the default 8123 the same way `node server.js` does) — handy
 // for testing a server.js change without quitting the real app first.
@@ -153,6 +179,13 @@ function generatePkcePair() {
 }
 
 const YOUTUBE_SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly";
+// Google's "Desktop app" OAuth client type uses the loopback IP redirect
+// flow (RFC 8252) — confirmed live that its automatic redirect-URI matching
+// only recognizes the literal "127.0.0.1", not the "localhost" hostname
+// (Google returned Error 400: redirect_uri_mismatch for an otherwise
+// correctly-formed request using localhost). Same effective address, but
+// Google's matcher is stricter than that.
+const YOUTUBE_REDIRECT_URI = `http://127.0.0.1:${PORT}/youtube-oauth-callback`;
 // Refresh a bit before the real expiry so a request never races a token
 // that's valid when checked but expired by the time it reaches Google.
 const TOKEN_REFRESH_SKEW_MS = 60 * 1000;
@@ -1288,10 +1321,9 @@ function handleRequest(req, res) {
     const state = crypto.randomBytes(16).toString("hex");
     const { verifier, challenge } = generatePkcePair();
     pkceChallenges.set(state, verifier);
-    const redirectUri = `http://localhost:${PORT}/youtube-oauth-callback`;
     const authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
       client_id: store.oauthClient.clientId,
-      redirect_uri: redirectUri,
+      redirect_uri: YOUTUBE_REDIRECT_URI,
       response_type: "code",
       scope: YOUTUBE_SCOPES,
       access_type: "offline",
@@ -1326,8 +1358,7 @@ function handleRequest(req, res) {
         pkceChallenges.delete(state);
         const store = loadYoutubeStore();
         if (!store.oauthClient) throw new Error("OAuth client was cleared before sign-in finished.");
-        const redirectUri = `http://localhost:${PORT}/youtube-oauth-callback`;
-        const tokens = await exchangeYoutubeCode(store.oauthClient, code, verifier, redirectUri);
+        const tokens = await exchangeYoutubeCode(store.oauthClient, code, verifier, YOUTUBE_REDIRECT_URI);
         const channel = await fetchYoutubeChannel(tokens.access_token);
         const existing = store.accounts.find(a => a.channelId === channel.channelId);
         const account = {
