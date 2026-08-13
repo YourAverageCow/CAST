@@ -28,6 +28,10 @@ npm run free-port                    # kill whatever's holding SLOPDADDY_PORT (d
 
 Tests run automatically on push/PR via `.github/workflows/test.yml` (on both `main` and `web` pushes). `.github/workflows/pages.yml` (the GitHub Pages deploy) is gated on `web`'s Tests runs specifically: it triggers via `workflow_run`, not `push` directly, and only proceeds `if` that run succeeded (or on manual `workflow_dispatch`). A red test run on `web` blocks deployment; the `github-pages` environment's deployment-branch policy was updated to allow `web` (previously only `main`).
 
+## Versioning
+
+`main`'s app version is `web/app.js`'s `const VERSION = N` (shown as the `v${VERSION}` badge in the UI, and mirrored in `package.json`'s `"version"` as `"N.0.0"`). **Bump `VERSION` by 1 — and `package.json`'s version to match — with every commit that ships a user-visible change on `main`** (a new feature, a real bug fix, anything that changes what the running app does), the same way `518c6c9`..`519cb8c`'s `v70`-through-`v87` run of commits did. This lapsed for a real stretch (v87 was last bumped at `519cb8c`; roughly a dozen substantive `fix:`/`feat:` commits shipped after it — hang fixes, the Kokoro regression fix, the whole YouTube upload integration — with no bump at all) once commit messages moved from the old `main: <description> (vNN)` convention to Conventional Commits prefixes (`fix:`/`feat:`/`docs:`/`simplify:`) — the prefix switch is fine and worth keeping, but don't let it drop the version bump that used to travel along with the old convention. Before shipping/committing, check `web/app.js`'s current `VERSION` against how many real releases have landed since the last bump and catch it up if it's fallen behind, same as this note itself was added to fix.
+
 ## Architecture
 
 ### Native rendering backend (`server.js`), with automatic WASM fallback
