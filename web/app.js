@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 95;
+const VERSION = 96;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -825,6 +825,15 @@ async function init() {
     buildEngineSelect();
     if (savedEngine) $("#ttsEngine").value = savedEngine;
     if (savedEngineQuick) $("#ttsEngineQuick").value = savedEngineQuick;
+    // #engineNote's "Not available..." text for kokoroNative was computed
+    // once at startup against this same flag while it was still the
+    // stale default (false) — if that's the currently-selected engine,
+    // the note is stuck showing "not available" forever otherwise, even
+    // once this probe confirms it actually works. Only re-run
+    // onEngineChangeUI() for that one case — it also rebuilds #voice via
+    // populateVoices(), which would otherwise reset an unrelated engine's
+    // voice selection for no reason on every page load.
+    if (savedEngine === "kokoroNative" || savedEngineQuick === "kokoroNative") onEngineChangeUI();
   });
   $("#publishTabBtn").style.display = youtubeAvailable ? "" : "none";
   $("#scheduleTabBtn").style.display = youtubeAvailable ? "" : "none";
@@ -1132,8 +1141,11 @@ const storyGenLimiter = makeClientSlotLimiter(DEFAULT_STORY_GEN_CONCURRENCY);
 // function is just the shared fetch + SSE-read loop every provider streams
 // through, regardless of whether its wire format is OpenAI's or Anthropic's.
 // Every call — bulk batch, per-card buttons, single-video sidebar — goes
-// through storyGenLimiter, so the concurrency cap is enforced app-wide
-// rather than only inside the one caller that made the problem obvious.
+// through storyGenLimiter by default, so the concurrency cap is enforced
+// app-wide rather than only inside the one caller that made the problem
+// obvious. The one exception is generateYoutubeMetadata's skipLimiter=true
+// call — a one-off per already-rendered job, not part of a bulk-generate
+// burst, so it shouldn't queue behind unrelated jobs' story generation.
 async function streamChat(messages, onChunk, temperature, skipLimiter) {
   // skipLimiter is for call sites that fire once per already-finished job
   // (e.g. generateYoutubeMetadata, right before an auto-upload) rather than
@@ -2174,6 +2186,14 @@ async function startPreview() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
   if (previewActive) { stopPreview(); return; }
   stopCaptionSampleLoop(); // real playback drives subtitles/previewKaraokeGroups from here — the idle sample loop must not keep overwriting them mid-playback
+  // Set BEFORE the async generateSpeech() call below, not after it resolves —
+  // otherwise showCaptionSample()'s previewActive guard sees stale `false`
+  // during the whole loading window (TTS generation + caption-sync cascade,
+  // which can take several real seconds), so a showCaptionSample() call
+  // during that window still clobbers subtitles/previewKaraokeGroups and
+  // leaves its sample interval running with nothing left to stop it once
+  // real playback starts.
+  previewActive = true;
 
   const btn = $("#previewBtn");
   btn.textContent = "Loading...";
@@ -2191,7 +2211,7 @@ async function startPreview() {
       subtitles = buildSubsFromWords(words);
       previewKaraokeGroups = null;
     }
-    if (!subtitles.length && !(previewKaraokeGroups && previewKaraokeGroups.length)) { alert("No caption timing produced."); btn.textContent = "Preview"; btn.disabled = false; return; }
+    if (!subtitles.length && !(previewKaraokeGroups && previewKaraokeGroups.length)) { alert("No caption timing produced."); previewActive = false; btn.textContent = "Preview"; btn.disabled = false; return; }
 
     updateCaptionStyle();
     const vid = $("#videoPreview");
@@ -2201,11 +2221,11 @@ async function startPreview() {
     ttsAudio.addEventListener("ended", () => stopPreview());
     ttsAudio.addEventListener("pause", () => { vid.pause(); $("#captionOverlay").classList.remove("show"); });
     vid.play(); ttsAudio.play();
-    previewActive = true;
     btn.textContent = "Stop";
     captionsLoop();
     showToast("Previewing...");
   } catch (e) {
+    previewActive = false;
     alert("Preview failed: " + e.message);
     btn.textContent = "Preview";
   }

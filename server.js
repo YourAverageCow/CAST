@@ -224,21 +224,21 @@ const YOUTUBE_QUOTA_SOFT_LIMIT = 6;
 function pickAccountForUpload(store, accountId) {
   const requested = store.accounts.find(a => a.id === accountId);
   if (!requested) return null;
-  const requestedUsage = countYoutubeUploadsToday(store, requested.oauthClientId);
-  if (requestedUsage < YOUTUBE_QUOTA_SOFT_LIMIT) return requested;
-  const alt = store.accounts.find(a =>
-    a.id !== requested.id &&
-    a.channelId === requested.channelId &&
-    // Skip an orphaned connection (its project was deleted — DELETE
-    // /youtube-oauth-clients/:id deliberately leaves these accounts in
-    // place, see that route's comment) — countYoutubeUploadsToday returns
-    // 0 for a missing client, which would otherwise make a dead
-    // connection look like the BEST candidate and redirect a normally-
-    // working upload into a guaranteed "project no longer configured"
-    // failure instead of just using the requested (quota-capped) one.
-    store.oauthClients.some(c => c.id === a.oauthClientId) &&
-    countYoutubeUploadsToday(store, a.oauthClientId) < YOUTUBE_QUOTA_SOFT_LIMIT
-  );
+  // Resolve each account's client once, shared by both the requested-
+  // account check and the alt search below (was two separate lookups
+  // per candidate — a bare existence .some() plus countYoutubeUploadsToday's
+  // own internal find). Also used to detect an orphaned connection (its
+  // project was deleted — DELETE /youtube-oauth-clients/:id deliberately
+  // leaves these accounts in place, see that route's comment):
+  // countYoutubeUploadsToday returns 0 for a missing client, which would
+  // otherwise make a dead connection look like the BEST candidate (or, if
+  // it's the REQUESTED account itself, get returned outright before the
+  // alt search even runs) and redirect a normally-working upload into a
+  // guaranteed "project no longer configured" failure.
+  const clientById = new Map(store.oauthClients.map(c => [c.id, c]));
+  const hasQuota = (a) => clientById.has(a.oauthClientId) && countYoutubeUploadsToday(store, a.oauthClientId) < YOUTUBE_QUOTA_SOFT_LIMIT;
+  if (hasQuota(requested)) return requested;
+  const alt = store.accounts.find(a => a.id !== requested.id && a.channelId === requested.channelId && hasQuota(a));
   return alt || requested;
 }
 function saveYoutubeStore(data) {
@@ -481,6 +481,10 @@ function checkPocketTts(cb) {
 // Checking availability just imports the package — doesn't trigger a model
 // download, which only happens lazily on the first real KPipeline() call.
 let kokoroNativeAvailable = null; // null = not checked yet, else boolean
+// Shared with runNativeKokoro's own spawn args below — one place to update
+// if scripts/kokoro_native.py's real dependencies ever change, instead of
+// two independently-maintained copies drifting apart.
+const KOKORO_NATIVE_WITH_ARGS = ["--with", "kokoro", "--with", "soundfile"];
 function checkKokoroNative(cb) {
   if (kokoroNativeAvailable !== null) { cb(kokoroNativeAvailable); return; }
   // Long timeout — uvx resolves/installs kokoro + its dependencies (torch,
@@ -490,7 +494,7 @@ function checkKokoroNative(cb) {
   // real libsndfile binary dependency on some platforms), so a check that
   // only exercised "import kokoro" could report available:true while a
   // real generation still fails on a missing soundfile install.
-  execFile("uvx", ["--with", "kokoro", "--with", "soundfile", "python3", "-c", "import kokoro, soundfile, numpy"], { timeout: 60000 }, (err) => {
+  execFile("uvx", [...KOKORO_NATIVE_WITH_ARGS, "python3", "-c", "import kokoro, soundfile, numpy"], { timeout: 60000 }, (err) => {
     if (err && err.killed) { cb(false); return; }
     kokoroNativeAvailable = !err;
     cb(kokoroNativeAvailable);
@@ -510,6 +514,24 @@ function checkKokoroNative(cb) {
 // raise or lower it at runtime via POST /performance-settings (Settings ->
 // Performance), so a batch already queued respects a change immediately
 // rather than needing a server restart.
+// Every runNative* function below spawns a subprocess and wires both
+// proc.on("error") and proc.on("close") to send an HTTP response — but a
+// genuine spawn failure (ENOENT, EACCES, EMFILE) fires BOTH events for the
+// same process, and calling respond() twice throws ERR_HTTP_HEADERS_SENT on
+// the second call. Wraps one or more response functions so only the first
+// call across all of them actually fires — pass every response function a
+// given route can call (e.g. runNativeRender's respond AND respondFile,
+// which represent the same "have we replied yet" state and must share one
+// guard) and use the returned wrappers in place of the originals.
+function onceAcrossAll(...fns) {
+  let called = false;
+  return fns.map(fn => (...args) => {
+    if (called) return;
+    called = true;
+    return fn(...args);
+  });
+}
+
 function makeSlotLimiter(max) {
   let active = 0;
   const queue = [];
@@ -909,6 +931,7 @@ function parseProgressBlock(line, tick) {
 }
 
 function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respond, respondFile) {
+  [respond, respondFile] = onceAcrossAll(respond, respondFile);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-render-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   let args, expectedDurationSec, threads;
@@ -998,6 +1021,7 @@ function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respo
 const WHISPER_MODELS = ["tiny.en", "base.en", "small.en"];
 
 function runNativeTranscribe(transcribeId, audio, model, respond) {
+  [respond] = onceAcrossAll(respond);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-transcribe-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   fs.writeFileSync(path.join(dir, "audio.wav"), audio);
@@ -1072,6 +1096,7 @@ function runNativeTranscribe(transcribeId, audio, model, respond) {
 const POCKET_TTS_LANGUAGES = ["english", "french", "german", "italian", "portuguese", "spanish"];
 
 function runNativePocketTts(text, language, respond) {
+  [respond] = onceAcrossAll(respond);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-pockettts-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   const outPath = path.join(dir, "out.wav");
@@ -1123,6 +1148,7 @@ function kokoroLangForVoice(voice) {
 }
 
 function runNativeKokoro(text, voice, speed, respond) {
+  [respond] = onceAcrossAll(respond);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-kokoro-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   const textPath = path.join(dir, "text.txt");
@@ -1130,7 +1156,7 @@ function runNativeKokoro(text, voice, speed, respond) {
   fs.writeFileSync(textPath, text, "utf8");
   const scriptPath = path.join(__dirname, "scripts", "kokoro_native.py");
   const args = [
-    "--with", "kokoro", "--with", "soundfile", "python3", scriptPath,
+    ...KOKORO_NATIVE_WITH_ARGS, "python3", scriptPath,
     "--text-file", textPath, "--voice", voice, "--lang", kokoroLangForVoice(voice),
     "--speed", String(speed || 1), "--out", outPath,
   ];
@@ -1143,28 +1169,18 @@ function runNativeKokoro(text, voice, speed, respond) {
   const killTimer = setTimeout(() => { proc.kill("SIGKILL"); }, 8 * 60 * 1000);
   let stdout = "";
   let stderrTail = "";
-  // A spawn failure (uvx missing from PATH, EACCES, EMFILE) fires BOTH
-  // 'error' and 'close' (with code null) for the same process — without
-  // this guard both handlers would call respond(), and the second call
-  // throws ERR_HTTP_HEADERS_SENT since the response already ended.
-  let responded = false;
-  const respondOnce = (status, data) => {
-    if (responded) return;
-    responded = true;
-    respond(status, data);
-  };
   proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
   proc.stderr.on("data", (chunk) => { stderrTail = (stderrTail + chunk.toString()).slice(-4000); });
   proc.on("error", (err) => {
     clearTimeout(killTimer);
     cleanup();
-    respondOnce(500, { error: "Couldn't run the native Kokoro backend (via uvx): " + err.message });
+    respond(500, { error: "Couldn't run the native Kokoro backend (via uvx): " + err.message });
   });
   proc.on("close", (code) => {
     clearTimeout(killTimer);
     if (code !== 0) {
       cleanup();
-      respondOnce(500, { error: `Native Kokoro exited with code ${code}\n${stderrTail.slice(-1000)}` });
+      respond(500, { error: `Native Kokoro exited with code ${code}\n${stderrTail.slice(-1000)}` });
       return;
     }
     let meta;
@@ -1176,7 +1192,7 @@ function runNativeKokoro(text, voice, speed, respond) {
       meta = JSON.parse(lastLine);
     } catch (e) {
       cleanup();
-      respondOnce(500, { error: "Native Kokoro finished but its output was unparseable: " + e.message });
+      respond(500, { error: "Native Kokoro finished but its output was unparseable: " + e.message });
       return;
     }
     let audioBuf;
@@ -1184,11 +1200,11 @@ function runNativeKokoro(text, voice, speed, respond) {
       audioBuf = fs.readFileSync(outPath);
     } catch (e) {
       cleanup();
-      respondOnce(500, { error: "Native Kokoro finished but the audio file was missing: " + e.message });
+      respond(500, { error: "Native Kokoro finished but the audio file was missing: " + e.message });
       return;
     }
     cleanup();
-    respondOnce(200, {
+    respond(200, {
       audioBase64: audioBuf.toString("base64"),
       durationSec: meta.durationSec,
       wordTimings: (meta.words || []).map(w => ({ text: w.text, start: w.start, end: w.end })),
