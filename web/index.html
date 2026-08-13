@@ -766,11 +766,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
               <div><button onclick="window.open('https://console.cloud.google.com/apis/credentials/consent','_blank')">3. Open: Consent Screen →</button></div>
             </li>
             <li>
-              Create the credentials: <b>Create Credentials → OAuth client ID → Desktop app</b>. A popup shows your Client ID
-              and Client Secret — copy both into the fields below.
+              Create the credentials: <b>Create Credentials → OAuth client ID → Desktop app</b> (application type matters —
+              picking "Web application" instead will cause a <code>redirect_uri_mismatch</code> error when you sign in).
+              A popup shows your Client ID and Client Secret — copy both into the fields below.
               <div><button onclick="window.open('https://console.cloud.google.com/apis/credentials','_blank')">4. Open: Create Credentials →</button></div>
             </li>
           </ol>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:8px;">
+            If sign-in still fails with <code>redirect_uri_mismatch</code> after picking Desktop app: open your client in the
+            Credentials page and confirm its type says "Desktop app", not "Web application" — if it's the latter, add
+            <code>http://127.0.0.1:8123/youtube-oauth-callback</code> under "Authorized redirect URIs" there, or just delete it
+            and recreate it as Desktop app instead.
+          </p>
           <label style="margin-top:14px;">Client ID</label>
           <input type="text" id="youtubeClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
           <label style="margin-top:8px;">Client Secret</label>
@@ -824,6 +831,21 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             Also, while your OAuth consent screen is in "Testing" mode, Google may require you to re-sign-in every ~7 days —
             switch it to "In production" in Cloud Console (no full verification review needed for this scope) to avoid that.
           </p>
+        </div>
+        <div class="settings-section">
+          <h3>Auto-Upload</h3>
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="youtubeAutoUpload" style="width:auto;"> Automatically publish every finished video to YouTube
+          </label>
+          <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px;">
+            Skips the manual "Publish to YouTube" click — as soon as a video finishes rendering, it generates metadata/thumbnail
+            (per your settings above) and uploads it using the account below, with whatever privacy/schedule defaults you've set.
+            You can still edit or cancel from the result card while it's generating, before the upload itself starts.
+          </p>
+          <label>Upload to channel</label>
+          <select id="youtubeAutoUploadAccountId">
+            <option value="">First connected channel</option>
+          </select>
         </div>
       </div>
 
@@ -1113,6 +1135,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <div id="batchProgressOverlay">
   <div class="batch-progress-header">
     <h2 id="batchProgressTitle">Rendering batch...</h2>
+    <button class="primary" id="batchPublishAllBtn" onclick="publishAllBatch()" style="display:none;">Publish All to YouTube</button>
     <button class="accent" id="batchProgressCloseBtn" onclick="minimizeBatchProgress()">Minimize</button>
   </div>
   <div class="batch-progress-stats" id="batchProgressStats"></div>

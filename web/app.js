@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 87;
+const VERSION = 88;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -439,6 +439,7 @@ const SETTINGS_FIELDS = [
   "youtubeClientId", "youtubeClientSecret",
   "youtubeAutoGenerateMetadata", "youtubeTitleTemplate", "youtubeDescriptionTemplate",
   "youtubeDefaultPrivacy", "youtubeDefaultCategoryId",
+  "youtubeAutoUpload", "youtubeAutoUploadAccountId",
 ];
 function saveSettings() {
   try {
@@ -2702,6 +2703,7 @@ function renderResultCard(job, container, opts) {
     div.querySelector('[data-action="download"]').onclick = () => downloadVideo(job.resultUrl, videoFilenameFor(job));
     div.querySelector('[data-action="copy"]').onclick = () => copyVideoLink(job.resultUrl);
     renderPublishSection(job, div.querySelector(".publish-section"));
+    maybeAutoPublish(job, div.querySelector(".publish-section"));
   } else if (job.status === "error") {
     div.innerHTML = title +
       `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>` +
@@ -3120,6 +3122,70 @@ async function uploadJobToYoutube(job, container) {
     if (es) es.close();
     renderPublishSection(job, container);
   }
+}
+
+// Fires once per job, right after its card first renders as "done" — the
+// same generate-then-upload sequence the manual "Publish to YouTube" button
+// kicks off, just started automatically instead of waiting for a click.
+// _autoUploadAttempted guards against renderResultCard() being called again
+// later for the same already-done job (e.g. a stray re-render) re-firing
+// this — pub.status !== "none" alone isn't enough, since a manual click
+// racing this exact render would also have already moved status off
+// "none" by the time a second render happened.
+function maybeAutoPublish(job, container) {
+  const pub = job.publish;
+  if (pub._autoUploadAttempted) return;
+  if (!youtubeAvailable) return;
+  const toggle = $("#youtubeAutoUpload");
+  if (!toggle || !toggle.checked) return;
+  if (!youtubeAccountsCache.length) return;
+  if (pub.status !== "none") return;
+  pub._autoUploadAttempted = true;
+  pub._panelOpen = true; // so renderPublishSection shows generating/upload progress instead of a bare "Publish" button
+  const preferredId = $("#youtubeAutoUploadAccountId") ? $("#youtubeAutoUploadAccountId").value : "";
+  const account = youtubeAccountsCache.find(a => a.id === preferredId) || youtubeAccountsCache[0];
+  pub.accountId = account.id;
+  const defaultPrivacy = $("#youtubeDefaultPrivacy");
+  const defaultCategory = $("#youtubeDefaultCategoryId");
+  if (defaultPrivacy && defaultPrivacy.value) pub.privacyStatus = defaultPrivacy.value;
+  if (defaultCategory && defaultCategory.value) pub.categoryId = defaultCategory.value;
+  (async () => {
+    await generatePublishMetadata(job, container, false);
+    await uploadJobToYoutube(job, container);
+  })();
+}
+
+// "Publish All" on the batch progress panel — same per-job pipeline as
+// maybeAutoPublish/the manual button, just fired for every eligible job in
+// the batch at once instead of one at a time. Runs concurrently (no
+// sequential await-in-loop) since youtubeUploadLimiter on the server side
+// already caps real concurrent uploads to 2 — this just queues all of them
+// rather than needlessly serializing the client-side metadata/thumbnail
+// generation too.
+async function publishAllBatch() {
+  if (!batchProgressState) return;
+  const eligible = batchProgressState.jobs.filter(j => j.status === "done" && j.publish.status === "none");
+  if (!eligible.length) { showToast("Nothing left to publish."); return; }
+  if (!youtubeAccountsCache.length) { showToast("Connect a YouTube channel in Settings → Publish first."); return; }
+  const btn = $("#batchPublishAllBtn");
+  if (btn) { btn.disabled = true; btn.textContent = `Publishing ${eligible.length}...`; }
+  await Promise.all(eligible.map(job => {
+    const container = $("#batchProgressGrid").querySelector(`[data-job-id="${job.id}"] .publish-section`);
+    if (!container) return Promise.resolve();
+    const pub = job.publish;
+    pub._autoUploadAttempted = true;
+    pub._panelOpen = true;
+    const preferredId = $("#youtubeAutoUploadAccountId") ? $("#youtubeAutoUploadAccountId").value : "";
+    const account = youtubeAccountsCache.find(a => a.id === preferredId) || youtubeAccountsCache[0];
+    pub.accountId = account.id;
+    const defaultPrivacy = $("#youtubeDefaultPrivacy");
+    const defaultCategory = $("#youtubeDefaultCategoryId");
+    if (defaultPrivacy && defaultPrivacy.value) pub.privacyStatus = defaultPrivacy.value;
+    if (defaultCategory && defaultCategory.value) pub.categoryId = defaultCategory.value;
+    return generatePublishMetadata(job, container, false).then(() => uploadJobToYoutube(job, container));
+  }));
+  if (btn) { btn.textContent = "Publish All to YouTube"; btn.disabled = false; }
+  updateBatchProgressStats();
 }
 
 // The sidebar's "quick single export" — builds one job from the current
@@ -3756,6 +3822,32 @@ async function refreshYoutubeAccounts() {
     $("#youtubeAccountsList").innerHTML = `<p style="font-size:0.8rem;color:var(--danger);">Couldn't load accounts (no backend server).</p>`;
   }
   refreshYoutubeQuotaText();
+  refreshYoutubeAutoUploadAccountSelect();
+}
+
+// The auto-upload account picker's options depend on youtubeAccountsCache,
+// which only loads once the Publish tab is opened — same "options rebuilt
+// once real data exists" issue as #model/#voice at startup (see
+// loadSettings()'s comment on those two), so this restores the saved
+// selection itself, the same way applyLoadedSettings() does for #voice
+// after populateVoices() rebuilds its options.
+function refreshYoutubeAutoUploadAccountSelect() {
+  const sel = $("#youtubeAutoUploadAccountId");
+  if (!sel) return;
+  // sel.value itself can't be trusted as "the saved choice" — at page load
+  // this select only has the default option, so loadSettings()'s generic
+  // restore loop silently no-ops setting it to a not-yet-existing account
+  // id. Read the real saved value straight from storage instead, same
+  // reasoning as applyLoadedSettings() re-restoring #voice/#model after
+  // their options are rebuilt.
+  let saved = sel.value;
+  try {
+    const stored = JSON.parse(localStorage.getItem("slopdaddy_settings") || "{}");
+    if (stored.youtubeAutoUploadAccountId) saved = stored.youtubeAutoUploadAccountId;
+  } catch (e) { /* keep sel.value fallback */ }
+  sel.innerHTML = `<option value="">First connected channel</option>` +
+    youtubeAccountsCache.map(a => `<option value="${a.id}">${escapeHtml(a.channelTitle)}</option>`).join("");
+  if (youtubeAccountsCache.some(a => a.id === saved)) sel.value = saved;
 }
 
 async function refreshYoutubeQuotaText() {
@@ -5144,6 +5236,15 @@ function updateBatchProgressStats() {
   if (doneCount >= totalJobs) {
     clearInterval(batchProgressState.tickHandle);
     $("#batchProgressCloseBtn").textContent = "Close";
+  }
+  // Shown once every job has actually finished rendering AND there's at
+  // least one that hasn't already been published/auto-published — keeps it
+  // from lingering as a dead button once auto-upload (or a prior manual
+  // click) has already handled everything.
+  const publishAllBtn = $("#batchPublishAllBtn");
+  if (publishAllBtn) {
+    const hasUnpublished = jobs.some(j => j.status === "done" && j.publish.status === "none");
+    publishAllBtn.style.display = (youtubeAvailable && doneCount >= totalJobs && hasUnpublished) ? "" : "none";
   }
 }
 
