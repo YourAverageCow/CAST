@@ -163,6 +163,25 @@ function saveYoutubeStore(data) {
   try { fs.chmodSync(YT_STORE_PATH, 0o600); } catch (e) { /* best-effort — no-op on platforms without POSIX perms (Windows) */ }
 }
 
+// Channel thumbnails are cached locally (not just linked by their remote
+// Google CDN URL) so the client can safely draw one into a <canvas> for the
+// title card — a cross-origin <img> without CORS headers taints the canvas,
+// permanently blocking toDataURL()/toBlob() with a SecurityError. Serving
+// the SAME bytes from this app's own origin (localhost) sidesteps that
+// entirely. Best-effort: a failed download just means no synced picture,
+// same UX as never having uploaded a custom one.
+const YT_THUMB_DIR = path.join(path.dirname(YT_STORE_PATH), "thumbnails");
+async function downloadYoutubeChannelThumbnail(accountId, url) {
+  if (!url) return;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    const buf = Buffer.from(await resp.arrayBuffer());
+    fs.mkdirSync(YT_THUMB_DIR, { recursive: true });
+    fs.writeFileSync(path.join(YT_THUMB_DIR, accountId + ".jpg"), buf);
+  } catch (e) { /* best-effort — cosmetic only */ }
+}
+
 // PKCE (RFC 7636) — generated server-side with Node's own crypto so the
 // code verifier never has to round-trip through the browser. state ->
 // verifier, cleared once the callback consumes it (or left to expire
@@ -257,6 +276,12 @@ async function fetchYoutubeChannel(accessToken) {
 
 function stripTokens(account) {
   const { accessToken, refreshToken, ...rest } = account;
+  // Always report the locally-cached, same-origin copy (see
+  // downloadYoutubeChannelThumbnail) instead of account.channelThumbnail's
+  // raw Google CDN URL — that field is kept on the account only for
+  // reference/debugging, never sent to the client.
+  const cachedPath = path.join(YT_THUMB_DIR, account.id + ".jpg");
+  rest.channelThumbnail = fs.existsSync(cachedPath) ? `/youtube-account-thumbnail/${account.id}` : null;
   return rest;
 }
 
@@ -1376,6 +1401,7 @@ function handleRequest(req, res) {
           addedAt: existing ? existing.addedAt : Date.now(),
         };
         if (!account.refreshToken) throw new Error("Google didn't return a refresh token — revoke Slopdaddy's access at https://myaccount.google.com/permissions and try signing in again.");
+        await downloadYoutubeChannelThumbnail(account.id, channel.channelThumbnail);
         if (existing) Object.assign(existing, account); else store.accounts.push(account);
         saveYoutubeStore(store);
         if (channelKey) sendProgress(channelKey, { status: "success", account: stripTokens(account) });
@@ -1403,6 +1429,20 @@ function handleRequest(req, res) {
     res.end(JSON.stringify({ uploadsToday: countYoutubeUploadsToday(store) }));
     return;
   }
+  if (urlNoQuery.startsWith("/youtube-account-thumbnail/") && req.method === "GET") {
+    // No accountId validation beyond what path.join naturally does — this
+    // only ever reads a file this server itself wrote (see
+    // downloadYoutubeChannelThumbnail), and the id came from crypto.randomUUID(),
+    // never client-supplied at write time.
+    const accountId = urlNoQuery.slice("/youtube-account-thumbnail/".length);
+    const filePath = path.join(YT_THUMB_DIR, accountId + ".jpg");
+    fs.stat(filePath, (err, stat) => {
+      if (err || !stat.isFile()) { res.writeHead(404); res.end("Not found"); return; }
+      res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": stat.size });
+      fs.createReadStream(filePath).pipe(res);
+    });
+    return;
+  }
   if (urlNoQuery.startsWith("/youtube-accounts/") && req.method === "DELETE") {
     const accountId = urlNoQuery.slice("/youtube-accounts/".length);
     const store = loadYoutubeStore();
@@ -1421,6 +1461,7 @@ function handleRequest(req, res) {
     if (removed.refreshToken) {
       fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(removed.refreshToken)}`, { method: "POST" }).catch(() => {});
     }
+    fs.rm(path.join(YT_THUMB_DIR, removed.id + ".jpg"), { force: true }, () => {});
     return;
   }
   if (urlNoQuery.startsWith("/youtube-upload-progress/") && req.method === "GET") {

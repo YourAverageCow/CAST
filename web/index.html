@@ -675,13 +675,24 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         <div class="settings-section">
           <h3>Title Card Identity</h3>
           <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Used when a video has the title card enabled. The title card itself is turned on per-video.</p>
-          <label>Channel Name</label>
+          <label>Source</label>
+          <select id="channelBrandingMode" onchange="onChannelBrandingModeChange()">
+            <option value="sync" selected>Sync with connected YouTube channel</option>
+            <option value="custom">Custom</option>
+          </select>
+          <div id="channelBrandingSyncRow" style="margin-top:8px;">
+            <label>Channel</label>
+            <select id="channelBrandingSyncAccountId" onchange="applyChannelBrandingSync()">
+              <option value="">No channel connected — connect one in Settings → Publish</option>
+            </select>
+          </div>
+          <label style="margin-top:8px;">Channel Name</label>
           <input type="text" id="channelName" placeholder="Anonymous" value="Anonymous">
           <label style="margin-top:8px;">Profile Picture</label>
           <div class="row" style="align-items:center;gap:10px;">
             <img id="channelProfilePicPreview" style="display:none;width:40px;height:40px;border-radius:50%;object-fit:cover;">
-            <button class="accent" onclick="document.getElementById('channelProfilePicInput').click()" style="flex:1;">Upload</button>
-            <button onclick="removeProfilePic()" style="flex:1;">Remove</button>
+            <button class="accent" id="channelProfilePicUploadBtn" onclick="document.getElementById('channelProfilePicInput').click()" style="flex:1;">Upload</button>
+            <button id="channelProfilePicRemoveBtn" onclick="removeProfilePic()" style="flex:1;">Remove</button>
           </div>
           <input type="file" id="channelProfilePicInput" accept="image/*" style="display:none" onchange="handleProfilePicUpload(this)">
         </div>

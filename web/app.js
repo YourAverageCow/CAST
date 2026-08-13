@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 88;
+const VERSION = 89;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -61,6 +61,7 @@ function setSettingsTab(tab) {
   if (tab === "debug") { refreshSystemDiagnostics(); refreshCacheInfo(); }
   if (tab === "video") { updateCaptionPreviewBackground(); showCaptionSample(); }
   if (tab === "publish") { refreshYoutubeAccounts(); }
+  if (tab === "branding" && $("#channelBrandingMode").value === "sync") { refreshYoutubeAccounts(); }
 }
 function openSettings() {
   $("#settingsOverlay").classList.add("show");
@@ -440,6 +441,7 @@ const SETTINGS_FIELDS = [
   "youtubeAutoGenerateMetadata", "youtubeTitleTemplate", "youtubeDescriptionTemplate",
   "youtubeDefaultPrivacy", "youtubeDefaultCategoryId",
   "youtubeAutoUpload", "youtubeAutoUploadAccountId",
+  "channelBrandingMode", "channelBrandingSyncAccountId",
 ];
 function saveSettings() {
   try {
@@ -504,6 +506,7 @@ async function applyLoadedSettings() {
     if (hasOption) { $("#voice").value = savedData.voice; $("#voiceQuick").value = savedData.voice; }
   }
   initPerformanceUI();
+  onChannelBrandingModeChange();
   applyTheme($("#theme").value || "dark");
   syncColorSwatchDisplay("textColor");
   syncColorSwatchDisplay("strokeColor");
@@ -770,6 +773,12 @@ async function init() {
     probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeYoutubeCapability(),
   ]);
   $("#publishTabBtn").style.display = youtubeAvailable ? "" : "none";
+  // Fire-and-forget, not awaited — populates youtubeAccountsCache (and, via
+  // refreshChannelBrandingSyncAccountSelect, applies the default "sync with
+  // connected channel" branding) without the user needing to open the
+  // Publish or Branding tab first. Doesn't block the rest of startup on a
+  // network round trip that isn't required for the app to be usable.
+  if (youtubeAvailable) refreshYoutubeAccounts();
   buildEngineSelect();
   buildProviderSelect();
   buildFontSelect();
@@ -3823,6 +3832,7 @@ async function refreshYoutubeAccounts() {
   }
   refreshYoutubeQuotaText();
   refreshYoutubeAutoUploadAccountSelect();
+  refreshChannelBrandingSyncAccountSelect();
 }
 
 // The auto-upload account picker's options depend on youtubeAccountsCache,
@@ -3848,6 +3858,70 @@ function refreshYoutubeAutoUploadAccountSelect() {
   sel.innerHTML = `<option value="">First connected channel</option>` +
     youtubeAccountsCache.map(a => `<option value="${a.id}">${escapeHtml(a.channelTitle)}</option>`).join("");
   if (youtubeAccountsCache.some(a => a.id === saved)) sel.value = saved;
+}
+
+// Same restore-from-localStorage-directly pattern as
+// refreshYoutubeAutoUploadAccountSelect above — this select's options don't
+// exist yet at page load either. Re-applies the sync (if that's the active
+// mode) once the real account list is in, since the very first automatic
+// sync attempt at init() necessarily runs before any account data exists.
+function refreshChannelBrandingSyncAccountSelect() {
+  const sel = $("#channelBrandingSyncAccountId");
+  if (!sel) return;
+  let saved = sel.value;
+  try {
+    const stored = JSON.parse(localStorage.getItem("slopdaddy_settings") || "{}");
+    if (stored.channelBrandingSyncAccountId) saved = stored.channelBrandingSyncAccountId;
+  } catch (e) { /* keep sel.value fallback */ }
+  sel.innerHTML = youtubeAccountsCache.length
+    ? youtubeAccountsCache.map(a => `<option value="${a.id}">${escapeHtml(a.channelTitle)}</option>`).join("")
+    : `<option value="">No channel connected — connect one in Settings → Publish</option>`;
+  if (youtubeAccountsCache.some(a => a.id === saved)) sel.value = saved;
+  if ($("#channelBrandingMode") && $("#channelBrandingMode").value === "sync") applyChannelBrandingSync();
+}
+
+// Toggles between the two Title Card Identity sources. "sync" makes
+// Channel Name/Profile Picture read-only, driven entirely by
+// applyChannelBrandingSync(); "custom" hands them back to the existing
+// manual-edit/upload behavior untouched (nothing about that path changed).
+function onChannelBrandingModeChange() {
+  const mode = $("#channelBrandingMode").value;
+  const isSync = mode === "sync";
+  $("#channelBrandingSyncRow").style.display = isSync ? "" : "none";
+  $("#channelName").readOnly = isSync;
+  $("#channelProfilePicUploadBtn").disabled = isSync;
+  $("#channelProfilePicRemoveBtn").disabled = isSync;
+  if (isSync) applyChannelBrandingSync();
+}
+
+// Pulls the selected (or first) connected account's name + locally-cached
+// thumbnail (see server.js's downloadYoutubeChannelThumbnail — a same-
+// origin URL, safe to draw into a canvas, unlike Google's raw CDN link)
+// into the exact same channelName/channelProfilePicDataUrl storage
+// saveChannelProfilePic() already uses for a manual upload — so
+// renderTitleCardImage() needs zero changes to support this; from its
+// perspective a synced picture and a manually uploaded one are identical.
+async function applyChannelBrandingSync() {
+  if (!$("#channelBrandingMode") || $("#channelBrandingMode").value !== "sync") return;
+  if (!youtubeAccountsCache.length) return;
+  const selectedId = $("#channelBrandingSyncAccountId") ? $("#channelBrandingSyncAccountId").value : "";
+  const account = youtubeAccountsCache.find(a => a.id === selectedId) || youtubeAccountsCache[0];
+  if (!account) return;
+  $("#channelName").value = account.channelTitle;
+  $("#channelName").dispatchEvent(new Event("input"));
+  if (!account.channelThumbnail) { saveChannelProfilePic(null); return; }
+  try {
+    const resp = await fetch(account.channelThumbnail);
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("couldn't read synced channel picture"));
+      reader.readAsDataURL(blob);
+    });
+    saveChannelProfilePic(dataUrl);
+  } catch (e) { /* best-effort — leaves whatever picture was already set */ }
 }
 
 async function refreshYoutubeQuotaText() {
