@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 102;
+const VERSION = 103;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1259,6 +1259,7 @@ function makeClientSlotLimiter(max) {
       while (active < state.max && queue.length) queue.shift()();
     },
     getMax() { return state.max; },
+    getActive() { return active; },
   };
 }
 const DEFAULT_STORY_GEN_CONCURRENCY = 3;
@@ -1276,7 +1277,7 @@ const storyGenLimiter = makeClientSlotLimiter(DEFAULT_STORY_GEN_CONCURRENCY);
 // obvious. The one exception is generateYoutubeMetadata's skipLimiter=true
 // call — a one-off per already-rendered job, not part of a bulk-generate
 // burst, so it shouldn't queue behind unrelated jobs' story generation.
-async function streamChat(messages, onChunk, temperature, skipLimiter) {
+async function streamChat(messages, onChunk, temperature, skipLimiter, onAcquired) {
   // skipLimiter is for call sites that fire once per already-finished job
   // (e.g. generateYoutubeMetadata, right before an auto-upload) rather than
   // in a bulk-generate burst — storyGenLimiter exists to cap concurrent
@@ -1284,8 +1285,15 @@ async function streamChat(messages, onChunk, temperature, skipLimiter) {
   // through the same queue just means it can get stuck behind unrelated
   // jobs' story generation, stalling an otherwise-ready upload for no
   // rate-limit benefit (that call was never going to be part of a burst).
-  if (skipLimiter) return streamChatInner(messages, onChunk, temperature);
+  if (skipLimiter) { if (onAcquired) onAcquired(); return streamChatInner(messages, onChunk, temperature); }
   await storyGenLimiter.acquire();
+  // onAcquired (optional) fires the instant this call actually starts
+  // running, as opposed to still sitting in storyGenLimiter's queue behind
+  // other jobs — a batch job waiting for its turn looks IDENTICAL to one
+  // actively generating ("Generating story..." either way) with no way to
+  // tell them apart, which reads as "stuck" rather than "queued" once a
+  // slow model/provider makes that wait genuinely long.
+  if (onAcquired) onAcquired();
   try {
     return await streamChatInner(messages, onChunk, temperature);
   } finally {
@@ -5669,22 +5677,39 @@ function applyBulkJobDefaults(job, cardEl, { voice, ttsEngine, captionPreset, ti
 // addBatchCard()), so this streams straight into that card's own textareas
 // instead of taking them as separate live-typing targets — same streamChat
 // calls, same prompts, just orchestrated in a loop rather than by hand.
-async function generateIdeaAndStoryForJob(job, cardEl, category) {
+async function generateIdeaAndStoryForJob(job, cardEl, category, onProgress) {
   const premiseTa = cardEl.querySelector(".bc-premise");
   const storyTa = cardEl.querySelector(".bc-story");
+  // A job waiting behind others for storyGenLimiter's cap looks identical
+  // to one actively generating unless something distinguishes them — mark
+  // it queued up front, then flip to the real label the instant this job's
+  // own streamChat call actually acquires a slot (via onAcquired below).
+  if (storyGenLimiter.getActive() >= storyGenLimiter.getMax()) {
+    job.progressLabel = "Waiting for a story slot...";
+    if (onProgress) onProgress(job);
+  }
 
   let premise = "";
   await streamChat(
     [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
      { role: "user", content: ideasPrompt(category) }],
     (chunk) => { premise += chunk; job.premise = premise; premiseTa.value = premise; autoGrow(premiseTa); },
-    1.05
+    1.05,
+    false,
+    () => { job.progressLabel = "Generating idea..."; if (onProgress) onProgress(job); }
   );
 
+  if (storyGenLimiter.getActive() >= storyGenLimiter.getMax()) {
+    job.progressLabel = "Waiting for a story slot...";
+    if (onProgress) onProgress(job);
+  }
   let story = "";
   await streamChat(
     [{ role: "system", content: storySystemPrompt() }, { role: "user", content: storyUserPrompt(job.premise || "a dramatic family conflict") }],
-    (chunk) => { story += chunk; job.story = story; storyTa.value = story; autoGrow(storyTa); }
+    (chunk) => { story += chunk; job.story = story; storyTa.value = story; autoGrow(storyTa); },
+    undefined,
+    false,
+    () => { job.progressLabel = "Generating story..."; if (onProgress) onProgress(job); }
   );
 }
 
@@ -5834,7 +5859,7 @@ async function bulkGenerateBatch() {
     try {
       await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
       await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
-      await generateIdeaAndStoryForJob(job, cardEl, batchCategories[i % batchCategories.length]);
+      await generateIdeaAndStoryForJob(job, cardEl, batchCategories[i % batchCategories.length], (j) => renderResultCard(j, grid));
       job.progressLabel = "Story ready";
       renderResultCard(job, grid);
       if (cancelToken.cancelled) {
