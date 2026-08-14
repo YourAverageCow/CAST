@@ -173,7 +173,9 @@ For Ollama specifically, `refreshOllamaModelList()` (called from `populateModels
 
 ### Editable story system prompt (Settings → Story)
 
-`storySystemPrompt()` is a `DEFAULT_STORY_SYSTEM_PROMPT` constant plus a function that reads `#storySystemPromptOverride`'s live value (falling back to the constant if empty) and always appends `"Keep it around ${wc} words."` separately — so the editable Settings textarea never contains `${...}`-style syntax a user could break while tweaking the writing-style rules. The textarea starts pre-filled with `DEFAULT_STORY_SYSTEM_PROMPT`; `resetStorySystemPrompt()` restores it.
+`storySystemPrompt()` reads `#storySystemPromptOverride`'s live value (falling back to `DEFAULT_STORY_SYSTEM_PROMPT` if empty) and always appends `"Keep it around ${wc} words."` separately — so the editable Settings textarea never contains `${...}`-style syntax a user could break while tweaking the writing-style rules. The textarea starts pre-filled with `DEFAULT_STORY_SYSTEM_PROMPT`; `resetStorySystemPrompt()` restores it.
+
+`DEFAULT_STORY_SYSTEM_PROMPT` is loaded from `web/story-system-prompt.txt` (a plain text file, editable directly without touching JS) by `loadDefaultStorySystemPrompt()`, fetched once in `init()`'s startup `Promise.all` — before `applyLoadedSettings()` needs it to pre-fill the textarea on a fresh install. The `let` binding in `app.js` only holds a short, deliberately-not-a-duplicate one-sentence fallback string, used solely if that fetch ever fails (kept short on purpose — a single source of truth for the real prompt, not two copies that can drift apart).
 
 ### Piper/Kokoro run in a dedicated Worker, not the main thread
 

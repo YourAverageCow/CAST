@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 110;
+const VERSION = 111;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -927,6 +927,7 @@ async function init() {
   // in place rather than blocking everything else.
   [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, youtubeAvailable] = await Promise.all([
     probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeYoutubeCapability(),
+    loadDefaultStorySystemPrompt(),
   ]);
   probeNativeKokoroBackend().then((available) => {
     nativeKokoroAvailable = available;
@@ -6109,29 +6110,31 @@ async function retryBatchJob(job) {
 }
 
 // ---------- Prompts ----------
-// The word-count rule is deliberately NOT part of this template — it's
-// always appended separately by storySystemPrompt() below, based on the
-// Story Length setting, so the editable Settings -> Story textarea never
-// needs to contain `${wc}`-style syntax a user could break while tweaking
-// the writing-style rules.
-const DEFAULT_STORY_SYSTEM_PROMPT = `You are a master of writing fake-but-believable AITAH (Am I The Asshole Here) Reddit posts.
-Your stories must follow these rules:
-
-1. Casual, slightly dramatic first-person storytelling
-2. NO throwaway-account disclaimer — never start with "Throwaway because..." or anything similar.
-3. Open the story immediately with a hook that sets up the conflict.
-4. Vary your opening every time — never repeat the same first sentence across stories.
-5. Short paragraphs (2-4 sentences) — Reddit style
-6. Family/friend/relationship/financial drama
-7. A clear conflict where the narrator might actually be wrong
-8. End with "So Reddit AITAH" — no question mark, nothing after
-9. Write in a natural slightly messy style — as if typed on a phone at 2am
-10. DO NOT make it obviously AI-generated
-11. CRITICAL: Your very first line MUST be the title in "AITAH for [doing the thing]" format
-12. Use natural punctuation — commas, periods, quotes.
-13. Break the story into short paragraphs separated by blank lines.
-
-IMPORTANT: First line is ALWAYS the AITAH title. Then a blank line, then the story. NEVER use a "Throwaway because" opener. Plain text only.`;
+// The word-count rule is deliberately NOT part of this file — it's always
+// appended separately by storySystemPrompt() below, based on the Story
+// Length setting, so the editable Settings -> Story textarea never needs to
+// contain `${wc}`-style syntax a user could break while tweaking the
+// writing-style rules.
+//
+// The real content lives in story-system-prompt.txt (a plain text file
+// alongside this script, editable directly without touching JS) — fetched
+// once at startup by loadDefaultStorySystemPrompt() below. This short inline
+// string is only a safety net for the rare case that fetch fails (e.g. the
+// file is missing from a build); it's deliberately NOT a full duplicate of
+// the real prompt, since the whole point of moving it to its own file is to
+// have one source of truth, not two that can drift apart.
+let DEFAULT_STORY_SYSTEM_PROMPT = "You are a master of writing fake-but-believable AITAH (Am I The Asshole Here) Reddit posts. Open with a hook, write in first person, and end with \"So Reddit AITAH\".";
+async function loadDefaultStorySystemPrompt() {
+  try {
+    const res = await fetch(BASE + "story-system-prompt.txt");
+    if (!res.ok) return;
+    const text = (await res.text()).trim();
+    if (text) DEFAULT_STORY_SYSTEM_PROMPT = text;
+  } catch (e) {
+    // Keep the short built-in fallback above — a broken story-generation
+    // prompt is a much worse failure than a plainer default one.
+  }
+}
 
 // Settings -> Story's textarea holds the actual live prompt (pre-filled
 // with the default above on first run by applyLoadedSettings(), not an
