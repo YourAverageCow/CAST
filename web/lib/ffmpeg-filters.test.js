@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
-  buildAudioFilterChain, buildTitleCardOverlay, applyPlaybackSpeed, parseWavDurationSec,
+  buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
 } = require("./ffmpeg-filters.js");
 
 function makeWav(durationSec, sampleRate) {
@@ -322,41 +322,40 @@ test("parseWavDurationSec returns null (not a wildly wrong duration) when the da
   assert.equal(parseWavDurationSec(bytes), null);
 });
 
-test("applyPlaybackSpeed is a no-op passthrough when speed is 1 or falsy", () => {
-  const input = { videoFilterComplex: "[0:v]null[vout]", videoOutLabel: "vout", audioFilterChain: "[1:a]anull[narr]", audioOutLabel: "narr" };
-  assert.deepEqual(applyPlaybackSpeed({ ...input, speed: 1 }), input);
-  assert.deepEqual(applyPlaybackSpeed({ ...input, speed: 0 }), input);
-  assert.deepEqual(applyPlaybackSpeed({ ...input, speed: null }), input);
+test("buildAudioFilterChain: speed 1 (or falsy) never emits atempo", () => {
+  const a = buildAudioFilterChain({ narrationInputIndex: 1, musicInputIndex: null, musicVolume: null, delaySec: 0, speed: 1 });
+  assert.doesNotMatch(a.filterChain, /atempo/);
+  const b = buildAudioFilterChain({ narrationInputIndex: 1, musicInputIndex: null, musicVolume: null, delaySec: 0 });
+  assert.doesNotMatch(b.filterChain, /atempo/);
+  assert.equal(a.filterChain, b.filterChain);
 });
 
-test("applyPlaybackSpeed appends setpts to video and atempo to audio as the final step, relabeling both outputs", () => {
-  const result = applyPlaybackSpeed({
-    videoFilterComplex: "[0:v]drawtext=...[capped];[capped][3:v]overlay=0:0[vout]",
-    videoOutLabel: "vout",
-    audioFilterChain: "[1:a]anull[narr];[narr][2:a]amix=inputs=2[aout]",
-    audioOutLabel: "aout",
-    speed: 1.2,
+test("buildAudioFilterChain: speed applies atempo to the raw narration input as the FIRST stage, before adelay", () => {
+  // Regression guard for the exact bug this ordering avoids: a fixed-
+  // duration title card's real-seconds delay must land in already-sped
+  // output time, not get compressed a second time by atempo running after
+  // it — so atempo has to come first, feeding delayMs's own real-seconds
+  // value straight through unchanged.
+  const { filterChain, outLabel } = buildAudioFilterChain({
+    narrationInputIndex: 1, musicInputIndex: null, musicVolume: null, delaySec: 2.5, speed: 1.2,
   });
-  // Original chains are untouched up to their prior output label...
-  assert.match(result.videoFilterComplex, /\[capped\]\[3:v\]overlay=0:0\[prespeed\]/);
-  assert.match(result.audioFilterChain, /\[narr\]\[2:a\]amix=inputs=2\[aout\]/);
-  // ...and speed is the very last stage, off a fresh label.
-  assert.match(result.videoFilterComplex, /;\[prespeed\]setpts=PTS\/1\.2\[speedv\]$/);
-  assert.match(result.audioFilterChain, /;\[aout\]atempo=1\.2\[speeda\]$/);
-  assert.equal(result.videoOutLabel, "speedv");
-  assert.equal(result.audioOutLabel, "speeda");
+  assert.equal(outLabel, "narr");
+  assert.match(filterChain, /^\[1:a\]atempo=1\.2\[spedn\];\[spedn\]adelay=delays=2500:all=1\[narr\]$/);
 });
 
-test("applyPlaybackSpeed only relabels the trailing output pad, not an earlier filter that happens to share the label text", () => {
-  // Regression guard for the $ anchor in the replace regex — a naive global
-  // replace of "[vout]" could also mangle an unrelated intermediate label.
-  const result = applyPlaybackSpeed({
-    videoFilterComplex: "[0:v]drawtext=text=vout[capped];[capped]null[vout]",
-    videoOutLabel: "vout",
-    audioFilterChain: "[1:a]anull[narr]",
-    audioOutLabel: "narr",
-    speed: 1.1,
+test("buildAudioFilterChain: speed with no delay skips straight to anull off the sped label", () => {
+  const { filterChain } = buildAudioFilterChain({
+    narrationInputIndex: 1, musicInputIndex: null, musicVolume: null, delaySec: 0, speed: 1.3,
   });
-  assert.match(result.videoFilterComplex, /drawtext=text=vout\[capped\]/); // untouched
-  assert.match(result.videoFilterComplex, /\[capped\]null\[prespeed\];\[prespeed\]setpts=PTS\/1\.1\[speedv\]$/);
+  assert.match(filterChain, /^\[1:a\]atempo=1\.3\[spedn\];\[spedn\]anull\[narr\]$/);
+});
+
+test("buildAudioFilterChain: speed leaves music untouched — only narration is sped, mixing still keyed off [narr]", () => {
+  const { filterChain, outLabel } = buildAudioFilterChain({
+    narrationInputIndex: 1, musicInputIndex: 2, musicVolume: 0.3, delaySec: 0, speed: 1.2,
+  });
+  assert.equal(outLabel, "aout");
+  assert.match(filterChain, /^\[1:a\]atempo=1\.2\[spedn\];\[spedn\]anull\[narr\]/);
+  assert.match(filterChain, /\[2:a\]volume=0\.3,aloop=loop=-1:size=2e9\[music\]/); // no atempo on music
+  assert.match(filterChain, /\[narr\]\[music\]amix=inputs=2:duration=first:dropout_transition=0\[aout\]$/);
 });

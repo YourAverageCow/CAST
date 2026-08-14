@@ -244,14 +244,33 @@ function parseWavDurationSec(bytes) {
 // filter chain (falls back to a no-op `anull` when there's nothing to do)
 // rather than special-casing "just map narration directly", so callers
 // never need to branch on whether a filter was actually applied.
-function buildAudioFilterChain({ narrationInputIndex, musicInputIndex, musicVolume, delaySec }) {
+//
+// `speed` (pitch-corrected tempo change, via atempo) is applied FIRST, to
+// the raw narration input, before adelay/mixing — deliberately not applied
+// to the whole composite as a last step. This keeps the Playback Speed
+// setting scoped to narration+captions only: the background video is never
+// touched (no setpts anywhere in this codebase's filter graphs), and
+// `delaySec` (a title card's on-screen window, a real-world-seconds value
+// unrelated to narration speed) lands in already-sped/final output time
+// rather than being compressed a second time by a downstream speed change —
+// it would be if speed were applied AFTER this delay instead of before it.
+// The caller is responsible for scaling caption cue timings to match
+// (dividing word start/end by speed before building cues from them), same
+// division of responsibility as the delaySec shifting noted above.
+function buildAudioFilterChain({ narrationInputIndex, musicInputIndex, musicVolume, delaySec, speed }) {
+  const s = speed || 1;
   const delayMs = Math.max(0, Math.round((delaySec || 0) * 1000));
   const stages = [];
   const narrSrc = `${narrationInputIndex}:a`;
+  let preDelaySrc = narrSrc;
+  if (s !== 1) {
+    stages.push(`[${narrSrc}]atempo=${s}[spedn]`);
+    preDelaySrc = "spedn";
+  }
   stages.push(
     delayMs > 0
-      ? `[${narrSrc}]adelay=delays=${delayMs}:all=1[narr]`
-      : `[${narrSrc}]anull[narr]`
+      ? `[${preDelaySrc}]adelay=delays=${delayMs}:all=1[narr]`
+      : `[${preDelaySrc}]anull[narr]`
   );
   if (musicInputIndex == null) {
     return { filterChain: stages.join(";"), outLabel: "narr" };
@@ -259,7 +278,8 @@ function buildAudioFilterChain({ narrationInputIndex, musicInputIndex, musicVolu
   const vol = Math.max(0, Math.min(1, musicVolume == null ? 0.25 : musicVolume));
   // aloop makes a short track repeat for the whole narration length; amix's
   // duration=first stops the mixed output at the narration's length rather
-  // than the (now-infinite) looping music track's.
+  // than the (now-infinite) looping music track's. Music is deliberately
+  // NOT sped up — Playback Speed only affects narration+captions.
   stages.push(`[${musicInputIndex}:a]volume=${vol},aloop=loop=-1:size=2e9[music]`);
   stages.push(`[narr][music]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
   return { filterChain: stages.join(";"), outLabel: "aout" };
@@ -281,30 +301,9 @@ function buildTitleCardOverlay({ videoFilterComplex, videoOutLabel, w, h, titleC
   return { filterComplex: `${relabeled};${scaleCard};${overlay}`, outLabel: "vout" };
 }
 
-// Speeds up (or slows down) the whole composite — video via setpts (PTS
-// divided by speed: smaller/faster-advancing timestamps play back faster),
-// audio via atempo (its own direct tempo-change factor, pitch-corrected,
-// not just a naive resample) — applied as the LAST step of each chain, after
-// captions/title-card overlay and after music mixing. Because it's the very
-// last video/audio step, every upstream `enable='between(t,...)'` caption
-// gate and the title-card's own on-screen window are evaluated against the
-// original (pre-speed) timeline and need no rescaling themselves — the
-// entire already-composited result just gets uniformly compressed in time
-// at the end, video and audio by the same factor, so they stay in sync.
-// speed === 1 (or falsy) is a no-op passthrough, so callers can splice this
-// in unconditionally rather than branching. atempo's single-instance valid
-// range is 0.5–2.0, comfortably covering this app's expected ~1.0–1.5x.
-function applyPlaybackSpeed({ videoFilterComplex, videoOutLabel, audioFilterChain, audioOutLabel, speed }) {
-  if (!speed || speed === 1) return { videoFilterComplex, videoOutLabel, audioFilterChain, audioOutLabel };
-  const video = videoFilterComplex.replace(new RegExp(`\\[${videoOutLabel}\\]$`), "[prespeed]") +
-    `;[prespeed]setpts=PTS/${speed}[speedv]`;
-  const audio = `${audioFilterChain};[${audioOutLabel}]atempo=${speed}[speeda]`;
-  return { videoFilterComplex: video, videoOutLabel: "speedv", audioFilterChain: audio, audioOutLabel: "speeda" };
-}
-
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
-    buildBevelStages, buildAudioFilterChain, buildTitleCardOverlay, applyPlaybackSpeed, parseWavDurationSec,
+    buildBevelStages, buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
   };
 }

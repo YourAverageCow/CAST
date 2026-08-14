@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 111;
+const VERSION = 112;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2936,10 +2936,23 @@ async function runJob(job, globalSettings, onUpdate, isCancelled) {
       }
     });
 
+    // Playback Speed scales narration+captions only, never the background
+    // video (see buildAudioFilterChain's own comment for the render-side
+    // half of this) — the render backends apply atempo to the raw audio at
+    // render time, but caption cue timing is baked in well before that, so
+    // it has to be pre-divided by speed here, right after TTS returns and
+    // before anything downstream (title-card word-slicing, caption
+    // grouping) reads a word's start/end. `words` itself stays untouched;
+    // everything from here on reads the rescaled copy.
+    const speedForCaptions = globalSettings.videoSpeed || 1;
+    const speedScaledWords = speedForCaptions !== 1
+      ? words.map(w => ({ ...w, start: w.start / speedForCaptions, end: w.end / speedForCaptions }))
+      : words;
+
     let titleCardPayload = null;
     let cardDurationSec = 0;
     let narrationDelaySec = 0;
-    let narrationWords = words;
+    let narrationWords = speedScaledWords;
     if (job.titleCardEnabled) {
       // An auto-extracted title is literally the story's first line, already
       // spoken as part of the narration — instead of showing it once on the
@@ -2948,12 +2961,16 @@ async function runJob(job, globalSettings, onUpdate, isCancelled) {
       // those words from the caption list, sizing the card to exactly how
       // long that line takes to say. A user-typed custom title isn't
       // guaranteed to match anything in the story, so that case keeps the
-      // old fixed-duration/fixed-delay behavior.
-      if (isAutoTitle && words.length) {
-        const titleWordCount = Math.min(countFirstParagraphWords(story), words.length);
-        const lastTitleWord = words[titleWordCount - 1];
+      // old fixed-duration/fixed-delay behavior. Reads speedScaledWords (not
+      // the raw words above) so cardDurationSec itself lands in real/final
+      // output time — the narration reading the title is just as sped up as
+      // everything else, so the card should show for proportionally less
+      // real time too.
+      if (isAutoTitle && speedScaledWords.length) {
+        const titleWordCount = Math.min(countFirstParagraphWords(story), speedScaledWords.length);
+        const lastTitleWord = speedScaledWords[titleWordCount - 1];
         cardDurationSec = lastTitleWord ? lastTitleWord.end : TITLE_CARD_DURATION_SEC;
-        narrationWords = words.slice(titleWordCount);
+        narrationWords = speedScaledWords.slice(titleWordCount);
       } else {
         cardDurationSec = TITLE_CARD_DURATION_SEC;
         narrationDelaySec = TITLE_CARD_DURATION_SEC;

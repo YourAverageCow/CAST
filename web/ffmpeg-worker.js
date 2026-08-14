@@ -174,17 +174,16 @@ self.onmessage = async (e) => {
       // cue timings unshifted to match); otherwise it silence-pads narration
       // by adelay so speech starts only once the card's window ends, with
       // caption cues shifted by the same amount before they reach this worker.
-      let audio = buildAudioFilterChain({
-        narrationInputIndex: 1, musicInputIndex, musicVolume: msg.musicVolume, delaySec: narrationDelaySec,
-      });
+      // Playback Speed (msg.speed) only affects narration+captions, never
+      // the background video — buildAudioFilterChain applies atempo to the
+      // narration input itself (see that function's own comment); videoFC
+      // is never touched. Caption cues arrive already scaled to match
+      // (app.js's runJob() divides word start/end by speed right after TTS
+      // returns, before any cue-building).
       const speed = Math.max(1, Math.min(2, numOr(msg.speed, parseFloat, 1)));
-      if (speed !== 1) {
-        const sped = applyPlaybackSpeed({
-          videoFilterComplex: videoFC, videoOutLabel, audioFilterChain: audio.filterChain, audioOutLabel: audio.outLabel, speed,
-        });
-        videoFC = sped.videoFilterComplex; videoOutLabel = sped.videoOutLabel;
-        audio = { filterChain: sped.audioFilterChain, outLabel: sped.audioOutLabel };
-      }
+      const audio = buildAudioFilterChain({
+        narrationInputIndex: 1, musicInputIndex, musicVolume: msg.musicVolume, delaySec: narrationDelaySec, speed,
+      });
       const filterComplex = `${videoFC};${audio.filterChain}`;
 
       const inputArgs = ["-stream_loop", "-1", "-i", "bg.mp4", "-i", "audio.wav"];
@@ -212,10 +211,18 @@ self.onmessage = async (e) => {
       // overlay input was added to the graph — give the encode an explicit
       // hard stop, computed from the narration's actual WAV duration, as a
       // belt-and-suspenders bound rather than trusting -shortest here.
+      // rawAudioDurationSec is the UNSPED uploaded WAV's own duration — atempo
+      // shortens it by `speed` inside the filter graph, so the bound needs
+      // that same division. cardDurationSec does NOT: it's already in real/
+      // final-output terms either way (see server.js's buildRenderArgs for
+      // the full reasoning, mirrored here for the WASM backend).
       const durationArgs = [];
       if (hasTitleCard) {
-        const narrDurationSec = parseWavDurationSec(new Uint8Array(msg.audio));
-        if (narrDurationSec) durationArgs.push("-t", (cardDurationSec + narrDurationSec + 0.5).toFixed(3));
+        const rawAudioDurationSec = parseWavDurationSec(new Uint8Array(msg.audio));
+        if (rawAudioDurationSec) {
+          const realAudioDurationSec = speed !== 1 ? rawAudioDurationSec / speed : rawAudioDurationSec;
+          durationArgs.push("-t", (cardDurationSec + realAudioDurationSec + 0.5).toFixed(3));
+        }
       }
 
       runFFmpeg([

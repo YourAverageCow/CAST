@@ -118,7 +118,7 @@ function writeAssetFile(dir, filename, bytes, hash, cached) {
 
 const {
   safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
-  buildAudioFilterChain, buildTitleCardOverlay, applyPlaybackSpeed, parseWavDurationSec,
+  buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
 } = require(path.join(ROOT, "lib", "ffmpeg-filters.js"));
 const { CAPTION_FONTS } = require(path.join(ROOT, "lib", "caption-presets.js"));
 
@@ -876,17 +876,17 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     videoFC = overlay.filterComplex;
     videoOutLabel = overlay.outLabel;
   }
-  let audioChain = buildAudioFilterChain({
-    narrationInputIndex: 1, musicInputIndex, musicVolume: meta.musicVolume, delaySec: narrationDelaySec,
-  });
+  // Playback Speed only affects narration+captions, never the background
+  // video — buildAudioFilterChain applies atempo to the narration input
+  // itself (see that function's own comment for why it has to happen
+  // before delaySec's adelay, not after); nothing here touches videoFC.
+  // Caption cue timings arrive already scaled to match (runJob() in app.js
+  // divides word start/end by speed right after TTS returns, before any
+  // cue-building), so no video-side rescaling is needed at all.
   const speed = Math.max(1, Math.min(2, numOr(meta.speed, parseFloat, 1)));
-  if (speed !== 1) {
-    const sped = applyPlaybackSpeed({
-      videoFilterComplex: videoFC, videoOutLabel, audioFilterChain: audioChain.filterChain, audioOutLabel: audioChain.outLabel, speed,
-    });
-    videoFC = sped.videoFilterComplex; videoOutLabel = sped.videoOutLabel;
-    audioChain = { filterChain: sped.audioFilterChain, outLabel: sped.audioOutLabel };
-  }
+  const audioChain = buildAudioFilterChain({
+    narrationInputIndex: 1, musicInputIndex, musicVolume: meta.musicVolume, delaySec: narrationDelaySec, speed,
+  });
   const filterComplex = `${videoFC};${audioChain.filterChain}`;
 
   const inputArgs = ["-stream_loop", "-1", "-i", "bg.mp4", "-i", "audio.wav"];
@@ -895,26 +895,23 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     inputArgs.push("-loop", "1", "-framerate", String(meta.fps), "-t", String(cardDurationSec + 1), "-i", "titlecard.png");
   }
 
+  // rawAudioDurationSec is the UNSPED uploaded WAV's own duration — atempo
+  // shortens it by `speed` inside the filter graph, so every real-output-
+  // time calculation below (the -t safety cap, and the progress-pct
+  // denominator) needs that same division. cardDurationSec does NOT need
+  // it: it's already in real/final-output terms either way (the auto-title
+  // case derives it from word timings runJob() already pre-divided by
+  // speed; the fixed-duration custom-title case is a raw real-seconds
+  // constant that was never subject to speed at all).
   const durationArgs = [];
-  let expectedDurationSec = parseWavDurationSec(audio) || 0;
-  if (hasTitleCard) {
-    const narrDurationSec = parseWavDurationSec(audio);
-    if (narrDurationSec) {
-      const bound = cardDurationSec + narrDurationSec + 0.5;
-      // Left in original (pre-speed) terms deliberately — this is only a
-      // safety cap against the infinitely-looped background outrunning
-      // -shortest, not the real stopping point (the sped-up audio stream's
-      // own genuinely-shorter duration is), so being a bit generous here is
-      // harmless; being too tight would risk cutting content short.
-      durationArgs.push("-t", bound.toFixed(3));
-      expectedDurationSec = bound;
-    }
+  const rawAudioDurationSec = parseWavDurationSec(audio) || 0;
+  const realAudioDurationSec = speed !== 1 ? rawAudioDurationSec / speed : rawAudioDurationSec;
+  let expectedDurationSec = realAudioDurationSec;
+  if (hasTitleCard && rawAudioDurationSec) {
+    const bound = cardDurationSec + realAudioDurationSec + 0.5;
+    durationArgs.push("-t", bound.toFixed(3));
+    expectedDurationSec = bound;
   }
-  // Progress pct (below) is measured against the OUTPUT stream's own
-  // out_time_ms, which after atempo/setpts only runs up to the now-shorter
-  // real duration — divide the expectation to match, or progress would
-  // under-report and look stuck for the last stretch of every sped-up render.
-  if (speed !== 1) expectedDurationSec = expectedDurationSec / speed;
 
   // Explicit thread budget (see threadBudget() above) rather than leaving
   // -threads/-filter_complex_threads unset — unset means "auto-detect and
