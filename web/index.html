@@ -1071,6 +1071,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <p id="cacheInfoText" style="font-size:0.8rem;color:var(--text);margin-bottom:8px;">—</p>
           <button onclick="clearAssetCache()" style="color:var(--danger);">Clear Cache</button>
         </div>
+        <div class="settings-section">
+          <h3>Storage Inspector</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">What's actually sitting in localStorage and the IndexedDB media library on this device.</p>
+          <pre id="storageInspectorText" style="font-size:0.72rem;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;white-space:pre-wrap;margin:0 0 8px;">—</pre>
+          <button onclick="refreshStorageInspector()">Refresh</button>
+        </div>
+        <div class="settings-section">
+          <h3>Kokoro Warm Pool Test</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Starts a small warm pool, runs one real generation through it, and tears it down — confirms the batch-scoped warm pool actually works without needing to run a full batch.</p>
+          <button id="kokoroPoolTestBtn" onclick="runKokoroPoolTest()">Test Warm Pool</button>
+          <p id="kokoroPoolTestStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;white-space:pre-wrap;"></p>
+        </div>
       </div>
 
     </div>

@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 119;
+const VERSION = 120;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -44,7 +44,7 @@ function setSettingsTab(tab) {
   document.querySelectorAll(".settings-tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll(".settings-tab-panel").forEach(p => p.classList.toggle("active", p.dataset.tab === tab));
   localStorage.setItem(SETTINGS_TAB_KEY, tab);
-  if (tab === "debug") { refreshSystemDiagnostics(); refreshCacheInfo(); }
+  if (tab === "debug") { refreshSystemDiagnostics(); refreshCacheInfo(); refreshStorageInspector(); }
   if (tab === "video") { updateCaptionPreviewBackground(); showCaptionSample(); }
   if (tab === "publish") { refreshYoutubeAccounts(); }
   if (tab === "branding" && $("#channelBrandingMode").value === "sync") { refreshYoutubeAccounts(); }
@@ -4670,6 +4670,96 @@ async function clearAssetCache() {
     showToast("Cache cleared.");
   } catch (e) {
     alert("Couldn't clear cache: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// ---------- Storage inspector (Debug tab) ----------
+// No existing view showed what's actually sitting in localStorage/IndexedDB —
+// useful in general, and specifically to confirm the Slopdaddy->CAST
+// localStorage-key migration (migrateLegacyLocalStorageKeys(), near init())
+// actually left old keys intact rather than silently losing them.
+async function refreshStorageInspector() {
+  const el = $("#storageInspectorText");
+  if (!el) return;
+  const lsRows = [];
+  let lsTotalBytes = 0;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    const value = localStorage.getItem(key) || "";
+    lsTotalBytes += key.length + value.length;
+    lsRows.push({ key, bytes: value.length });
+  }
+  lsRows.sort((a, b) => b.bytes - a.bytes);
+  const legacyKeys = lsRows.filter(r => r.key.startsWith("slopdaddy_"));
+
+  let mediaLine = "IndexedDB media library: unavailable";
+  try {
+    const [videos, audio] = await Promise.all([listMediaLibraryItems("video"), listMediaLibraryItems("audio")]);
+    mediaLine = `IndexedDB media library: ${videos.length} video${videos.length === 1 ? "" : "s"}, ${audio.length} audio track${audio.length === 1 ? "" : "s"}`;
+  } catch (e) { /* IndexedDB unavailable/blocked — leave the fallback line */ }
+
+  let quotaLine = "";
+  if (navigator.storage && navigator.storage.estimate) {
+    try {
+      const { usage, quota } = await navigator.storage.estimate();
+      quotaLine = `Total browser storage used (all origins-scoped data, not just localStorage): ${formatBytes(usage || 0)} of ${formatBytes(quota || 0)} available.`;
+    } catch (e) { /* not supported in this browser — leave blank */ }
+  }
+
+  const lines = [
+    `localStorage: ${lsRows.length} key${lsRows.length === 1 ? "" : "s"}, ${formatBytes(lsTotalBytes)} total.`,
+    legacyKeys.length
+      ? `⚠ ${legacyKeys.length} legacy "slopdaddy_*" key${legacyKeys.length === 1 ? "" : "s"} still present (harmless — migration copies forward without deleting).`
+      : "No legacy \"slopdaddy_*\" keys remain.",
+    mediaLine,
+    quotaLine,
+    "",
+    "Largest localStorage keys:",
+    ...lsRows.slice(0, 8).map(r => `  ${r.key} — ${formatBytes(r.bytes)}`),
+  ].filter(Boolean);
+  el.textContent = lines.join("\n");
+}
+
+// ---------- Kokoro warm-pool test (Debug tab) ----------
+// The batch-scoped warm pool (maybeWarmKokoroPool()/teardownKokoroPool())
+// only ever gets exercised inside a real >=2-job batch — this gives a direct
+// way to confirm the pool actually starts, serves a generation, and tears
+// down cleanly without needing to run a full batch first.
+async function runKokoroPoolTest() {
+  const el = $("#kokoroPoolTestStatus");
+  const btn = $("#kokoroPoolTestBtn");
+  if (!el || !btn) return;
+  btn.disabled = true;
+  el.textContent = "Starting a 2-worker warm pool...";
+  const t0 = performance.now();
+  try {
+    const startResp = await fetch("/kokoro-native/warm-pool", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ size: 2 }),
+    });
+    const startData = await startResp.json();
+    if (!startResp.ok) throw new Error(startData.error || "Pool failed to start.");
+    const t1 = performance.now();
+    el.textContent = `Pool started (${startData.size} worker${startData.size === 1 ? "" : "s"}) in ${((t1 - t0) / 1000).toFixed(1)}s. Generating a test line...`;
+
+    const genResp = await fetch("/kokoro-native", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "This is a warm pool test.", voice: "af_heart" }),
+    });
+    const genData = await genResp.json();
+    if (!genResp.ok) throw new Error(genData.error || "Generation failed.");
+    const t2 = performance.now();
+    el.textContent = `Pool started (${startData.size} workers) in ${((t1 - t0) / 1000).toFixed(1)}s. `
+      + `Generation completed in ${((t2 - t1) / 1000).toFixed(1)}s (durationSec=${genData.durationSec.toFixed(2)}, `
+      + `${(genData.wordTimings || []).length} words). Tearing down...`;
+
+    await fetch("/kokoro-native/warm-pool", { method: "DELETE" });
+    const t3 = performance.now();
+    el.textContent += ` Done in ${((t3 - t0) / 1000).toFixed(1)}s total.`;
+  } catch (e) {
+    el.textContent = "Test failed: " + (e && e.message ? e.message : String(e));
+    try { await fetch("/kokoro-native/warm-pool", { method: "DELETE" }); } catch (e2) { /* best-effort cleanup */ }
+  } finally {
+    btn.disabled = false;
   }
 }
 
