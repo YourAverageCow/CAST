@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 103;
+const VERSION = 104;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -27,24 +27,10 @@ let lastDebugPreviewUrl = null;
 
 // ---------- TTS & video engine state ----------
 // Piper/Kokoro voice lists and the TTS_ENGINES registry live in
-// web/lib/tts-engines.js — this section just holds the per-engine runtime
-// instances (lazily created, one per engine that needs local init).
-const PIPER_JS = "./vendor/piper-tts-web.js";
-// main branch only: kokoro.web.js, its ONNX-runtime WASM binaries, and the
-// full model+all-10-voices are all vendored locally (web/vendor/kokoro/,
-// web/vendor/kokoro-model/) so a fresh install works fully offline instead
-// of needing this ~90MB+ first-use download — see ensureKokoro() below for
-// how the model/voice fetches (hardcoded to huggingface.co inside
-// kokoro.web.js, with no exposed config knob) get redirected there.
-const KOKORO_JS = BASE + "vendor/kokoro/kokoro.web.js";
-const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
-// kokoro.web.js's voice-file fetch (unlike its model/config/tokenizer fetches,
-// which go through from_pretrained's own model-id parameter) has its OWN
-// independently hardcoded copy of this same URL — re-vendoring a newer
-// kokoro-js build with a different model id/URL shape must update both.
-const KOKORO_HF_PREFIX = `https://huggingface.co/${KOKORO_MODEL_ID}/resolve/main/`;
-let piperEngine = null;
-let kokoroEngine = null;
+// web/lib/tts-engines.js. The engines themselves (including the JS module
+// paths, model id, and vendored-asset fetch redirects) now run entirely
+// inside web/tts-worker.js — see ensureTtsWorker()/generateInWorker() below
+// — so there's no main-thread engine state to hold here anymore.
 
 // ---------- Tiny helpers ----------
 function showToast(msg, duration) {
@@ -1955,140 +1941,95 @@ async function waitForIsolation(timeoutMs = 15000) {
   return true;
 }
 
-// Piper's real speed knob is `length_scale` inside the voice's own config
-// JSON (fed into the ONNX model as part of the "scales" tensor), not a
-// generate()-call argument — and PiperWebEngine.generate() calls
-// voiceProvider.fetch(voice) fresh on every single generate, not just once,
-// so reading the live #piperSpeed value here (rather than needing to thread
-// it through PiperEngine.generate()'s signature) picks up a mid-session
-// change on the very next narration. length_scale is inversely proportional
-// to speed (Piper convention: larger length_scale = longer/slower audio).
-function applyPiperSpeed(json) {
-  const el = $("#piperSpeed");
-  const speed = el ? parseFloat(el.value) || 1 : 1;
-  if (!json || !json.inference || speed === 1) return json;
-  return { ...json, inference: { ...json.inference, length_scale: (json.inference.length_scale || 1) / speed } };
-}
+// Piper/Kokoro's ONNX inference used to run directly on the main thread here
+// (via ensurePiper()/ensureKokoro() constructing the engines in-page) — the
+// vendored kokoro.web.js bundle hardcodes ONNX Runtime Web's `wasm.proxy` to
+// false (confirmed by inspecting the bundle) and only re-exports a narrow
+// env.wasmPaths setter, not the full env object that would let this code
+// flip that flag; Piper's vendored OnnxWebRuntime is equally unreachable.
+// Since neither vendored bundle exposes a way to offload its own inference,
+// the whole engine now runs inside a dedicated Worker (web/tts-worker.js)
+// instead, mirroring how ffmpeg.wasm rendering already runs in
+// web/ffmpeg-worker.js via FFmpegWorkerPool — a real Worker rather than a
+// fragile hand-patch of a minified vendored file that would need to be
+// reapplied on every future re-vendor.
+let ttsWorker = null;
+let ttsWorkerReadyPromise = null;
+let ttsEnginesWarmed = { kokoro: false, piper: false };
 
-async function ensurePiper() {
-  if (piperEngine) return piperEngine;
-  showDownloadToast("Preparing TTS engine...");
-  const isolated = await waitForIsolation();
-  if (!isolated) {
-    hideDownloadToast();
-    throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
-  }
-  try {
-    const mod = await import(PIPER_JS);
-    const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime } = mod;
-    // Every other network fetch in the caption-sync/TTS pipeline (native
-    // transcribe, cloud TTS engines) already bounds itself with an
-    // AbortController timeout — these two HuggingFace fetches (for any
-    // non-vendored Piper voice) were the one place still using bare fetch(),
-    // so a stalled connection here hung indefinitely with no error until
-    // queueTTS's blunt 3-minute overall timeout finally caught it.
-    async function fetchVoiceFile(url, timeoutMs = 30000) {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), timeoutMs);
-      try {
-        const res = await fetch(url, { signal: ctrl.signal });
-        if (!res.ok) throw new Error(`Voice file fetch failed: ${url} (${res.status})`);
-        return res;
-      } catch (e) {
-        if (e.name === "AbortError") throw new Error(`Voice file fetch timed out after ${timeoutMs / 1000}s: ${url}`);
-        throw e;
-      } finally {
-        clearTimeout(t);
-      }
-    }
-    const voiceProvider = {
-      async fetch(voice) {
-        // The default voice is vendored locally (web/vendor/piper-voices/)
-        // so a fresh install works offline without waiting on a first-use
-        // download — every other voice still fetches from HuggingFace on
-        // first use, same as before.
-        if (voice === "en_US-ryan-medium") {
-          const jsonRes = await fetchVoiceFile(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx.json");
-          const onnxRes = await fetchVoiceFile(BASE + "vendor/piper-voices/en_US-ryan-medium.onnx");
-          const json = await jsonRes.json();
-          const onnx = URL.createObjectURL(await onnxRes.blob());
-          return [applyPiperSpeed(json), onnx];
+function ensureTtsWorker() {
+  if (!ttsWorkerReadyPromise) {
+    ttsWorker = new Worker(BASE + "tts-worker.js");
+    ttsWorkerReadyPromise = new Promise((resolve, reject) => {
+      const onMessage = (e) => {
+        if (e.data && e.data.type === "ready") {
+          ttsWorker.removeEventListener("message", onMessage);
+          resolve(ttsWorker);
         }
-        // Correct HuggingFace path for piper voices.
-        const parts = voice.split("-");
-        const lang = parts[0].split("_")[0];
-        const base = `https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang}/${parts[0]}/`;
-        const sub = parts.slice(1).join("/");
-        const stem = parts.join("-");
-        const jsonUrl = `${base}${sub}/${stem}.onnx.json`;
-        const onnxUrl = `${base}${sub}/${stem}.onnx`;
-        const json = await (await fetchVoiceFile(jsonUrl)).json();
-        const onnx = URL.createObjectURL(await (await fetchVoiceFile(onnxUrl)).blob());
-        return [applyPiperSpeed(json), onnx];
-      },
-    };
-    piperEngine = new PiperWebEngine({
-      onnxRuntime: new OnnxWebRuntime({ basePath: BASE + "onnx/", numThreads: 1 }),
-      phonemizeRuntime: new PhonemizeWebRuntime({ basePath: BASE + "piper/" }),
-      voiceProvider,
+      };
+      ttsWorker.addEventListener("message", onMessage);
+      ttsWorker.addEventListener("error", (e) => reject(new Error(e.message || "TTS worker failed to start")), { once: true });
+      ttsWorker.postMessage({ type: "init", base: BASE });
     });
-  } catch (e) {
-    hideDownloadToast();
-    throw e;
   }
-  return piperEngine;
+  return ttsWorkerReadyPromise;
 }
 
-// kokoro.web.js hardcodes its model/config/tokenizer/voice fetches to
-// https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/...
-// with no exposed config knob (confirmed by inspecting the bundled source —
-// it re-exports only a narrow env.wasmPaths setter, not the full
-// transformers.js env object that WOULD support this properly via
-// localModelPath/remoteHost). A permanent, narrowly-scoped fetch patch is
-// the only way to redirect those specific URLs to the vendored local copies
-// in web/vendor/kokoro-model/ — everything else's fetch calls pass through
-// completely untouched. Installed once and left active for the rest of the
-// session, since a new (already-vendored) voice's .bin can be requested by
-// Kokoro at any later .generate() call, not just during from_pretrained.
-let kokoroFetchPatched = false;
-function patchKokoroFetch() {
-  if (kokoroFetchPatched) return;
-  kokoroFetchPatched = true;
-  const origFetch = window.fetch.bind(window);
-  const localPrefix = BASE + "vendor/kokoro-model/";
-  window.fetch = function (input, init) {
-    const url = typeof input === "string" ? input : (input && input.url);
-    if (typeof url === "string" && url.startsWith(KOKORO_HF_PREFIX)) {
-      return origFetch(localPrefix + url.slice(KOKORO_HF_PREFIX.length), init);
-    }
-    if (typeof url === "string" && url.includes("huggingface.co") && url.includes(KOKORO_MODEL_ID)) {
-      console.warn("Kokoro fetch didn't match KOKORO_HF_PREFIX, falling through to network:", url);
-    }
-    return origFetch(input, init);
-  };
+// One request in flight at a time — safe without a request-id/correlation
+// scheme because queueTTS() (below) already guarantees only one TTS call is
+// in flight app-wide at any moment, so a single reassigned onmessage/onerror
+// pair per call is sufficient.
+function generateInWorker(kind, text, voice, config) {
+  return ensureTtsWorker().then((worker) => new Promise((resolve, reject) => {
+    const onMessage = (e) => {
+      const msg = e.data;
+      if (msg.type === "result") {
+        cleanup();
+        resolve(msg);
+      } else if (msg.type === "error") {
+        cleanup();
+        reject(new Error(msg.message));
+      }
+    };
+    const onError = (e) => { cleanup(); reject(new Error(e.message || "TTS worker error")); };
+    const cleanup = () => {
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("error", onError);
+    };
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", onError);
+    worker.postMessage({ type: `${kind}-generate`, text, voice, config: config || {} });
+  }));
 }
 
-// Kokoro (kokoro-js) mirrors Piper's lazy-singleton pattern: one shared
-// engine instance. The model+all 10 voices are vendored locally (see
-// patchKokoroFetch above) so this never actually hits HuggingFace on main —
-// dtype "q8" is the quantized variant (~92MB) vs. ~326MB fp32, no meaningful
-// quality loss per the model's own documentation, and is what the vendored
-// files are.
-async function ensureKokoro() {
-  if (kokoroEngine) return kokoroEngine;
-  showDownloadToast("Preparing Kokoro TTS engine...");
+// Thin wrappers used by web/lib/tts-engines.js's KokoroEngine/PiperEngine —
+// each shows the same one-time "Preparing ... TTS engine" toast the old
+// in-page ensureKokoro()/ensurePiper() showed while the worker lazily
+// imports/loads the model on its first call, then never again for this
+// engine this session.
+async function generateKokoroInWorker(text, voice, config) {
+  const isolated = await waitForIsolation();
+  if (!isolated) throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
+  if (!ttsEnginesWarmed.kokoro) showDownloadToast("Preparing Kokoro TTS engine...");
   try {
-    patchKokoroFetch();
-    const mod = await import(KOKORO_JS);
-    const { KokoroTTS, env } = mod;
-    env.wasmPaths = BASE + "vendor/kokoro/onnx/";
-    kokoroEngine = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, { dtype: "q8" });
-  } catch (e) {
+    const result = await generateInWorker("kokoro", text, voice, config);
+    ttsEnginesWarmed.kokoro = true;
+    return result;
+  } finally {
     hideDownloadToast();
-    throw e;
   }
-  hideDownloadToast();
-  return kokoroEngine;
+}
+async function generatePiperInWorker(text, voice, config) {
+  const isolated = await waitForIsolation();
+  if (!isolated) throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
+  if (!ttsEnginesWarmed.piper) showDownloadToast("Preparing TTS engine...");
+  try {
+    const result = await generateInWorker("piper", text, voice, config);
+    ttsEnginesWarmed.piper = true;
+    return result;
+  } finally {
+    hideDownloadToast();
+  }
 }
 
 // Every engine's ONNX/network session gets funneled through this one-at-a-
@@ -2725,11 +2666,6 @@ function getEngineConfig(engineId) {
       similarityBoost: numOr($("#elevenlabsSimilarity").value, parseFloat, 0.75),
     };
   }
-  // Piper's speed is read directly from #piperSpeed by ensurePiper()'s
-  // voiceProvider closure (see applyPiperSpeed()) rather than through this
-  // config bundle — returned here anyway so every engine's config shape
-  // stays consistent/self-documenting rather than Piper being a silent
-  // special case.
   if (engineId === "piper") return { speed: parseFloat($("#piperSpeed").value) || 1 };
   if (engineId === "kokoro" || engineId === "kokoroNative") return { speed: parseFloat($("#kokoroSpeed").value) || 1 };
   if (engineId === "browserSpeech") {

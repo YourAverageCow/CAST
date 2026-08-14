@@ -17,12 +17,13 @@
 // captions.js's computeWordTimings so it's a drop-in replacement. app.js
 // falls back to computeWordTimings' proportional estimate when absent.
 //
-// Engines that need app.js-level setup (Piper's ensurePiper(), Kokoro's
-// ensureKokoro()) call those as bare globals at CALL time, not parse time —
-// classic <script> tags share one global scope and app.js has fully run
-// (including init()) long before any generate() call happens, so load
-// order here only matters for *this file* being listed before app.js in
-// index.html, not for these cross-references.
+// Piper/Kokoro delegate their actual inference to web/tts-worker.js (a
+// dedicated Worker, so ONNX inference never blocks the main thread) via
+// app.js's generatePiperInWorker()/generateKokoroInWorker() — called as bare
+// globals at CALL time, not parse time — classic <script> tags share one
+// global scope and app.js has fully run (including init()) long before any
+// generate() call happens, so load order here only matters for *this file*
+// being listed before app.js in index.html, not for these cross-references.
 
 // Same <audio>-element metadata-probe pattern already used for background
 // videos (probeVideoDimensions in app.js) — cloud engines and Kokoro's WAV
@@ -85,10 +86,9 @@ const PiperEngine = {
     return PIPER_VOICES.map(id => ({ id, label: PIPER_VOICE_LABELS[id] || id }));
   },
   defaultVoice() { return PIPER_VOICES[0]; },
-  async generate(text, voice) {
-    const engine = await ensurePiper();
-    const response = await engine.generate(text, voice, 0);
-    return { audioBlob: response.file, durationSec: (response.duration || 0) / 1000 };
+  async generate(text, voice, config) {
+    const { audioBuffer, mimeType, durationSec } = await generatePiperInWorker(text, voice, config);
+    return { audioBlob: new Blob([audioBuffer], { type: mimeType }), durationSec };
   },
 };
 
@@ -112,56 +112,11 @@ const KOKORO_VOICES = [
   { id: "bm_daniel", label: "Daniel (UK male)" },
   { id: "bm_george", label: "George (UK male)" },
 ];
-// Encodes mono 32-bit-float PCM samples as a WAV buffer — same byte layout
-// Kokoro's own (unexported) RawAudio.toWav() produces (RIFF/WAVE, fmt chunk
-// audioFormat=3 IEEE-float, 1 channel, 32 bits/sample). Needed because
-// stitching multiple chunks' raw Float32Array audio together (see
-// KokoroEngine.generate below) means there's no single RawAudio instance
-// left to call the library's own toWav() on.
-function encodeMonoFloat32Wav(samples, sampleRate) {
-  const bytesPerSample = 4;
-  const buffer = new ArrayBuffer(44 + bytesPerSample * samples.length);
-  const view = new DataView(buffer);
-  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-  writeStr(0, "RIFF"); view.setUint32(4, 36 + bytesPerSample * samples.length, true); writeStr(8, "WAVE");
-  writeStr(12, "fmt "); view.setUint32(16, 16, true);
-  view.setUint16(20, 3, true); // IEEE float
-  view.setUint16(22, 1, true); // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, bytesPerSample * sampleRate, true);
-  view.setUint16(32, bytesPerSample, true);
-  view.setUint16(34, 32, true);
-  writeStr(36, "data"); view.setUint32(40, bytesPerSample * samples.length, true);
-  let offset = 44;
-  for (let i = 0; i < samples.length; i++, offset += bytesPerSample) view.setFloat32(offset, samples[i], true);
-  return buffer;
-}
-// Kokoro's per-sentence-chunk concatenation (see KokoroEngine.generate below)
-// used to be a raw, unmodified splice of each chunk's audio — no gap
-// insertion, but also no trimming, so each chunk's own leading/trailing
-// silence (which varies chunk-to-chunk — StyleTTS2-family models don't
-// synthesize a consistent amount of silence around punctuation) stacked
-// directly against the next chunk's, producing pauses that felt random in
-// length and placement rather than a clean, consistent inter-sentence beat.
-// Live waveform inspection (energy-threshold scan, same technique
-// detectSilenceGaps() already uses for caption-sync in app.js) confirmed
-// this: individual chunks' silent runs at their own start/end ranged from
-// ~40ms to over 400ms with no correlation to punctuation type. Fix: trim
-// each chunk's own leading/trailing near-silence first, then insert exactly
-// one fixed, deliberate gap between chunks — trading "however much silence
-// the model happened to generate" for a single controlled value.
-const KOKORO_SILENCE_RMS_THRESHOLD = 0.01;
-const KOKORO_MAX_TRIM_SEC = 0.6;
-const KOKORO_INTER_CHUNK_GAP_SEC = 0.12;
-function trimSilenceFloat32(samples, sampleRate, maxTrimSec) {
-  const maxTrimSamples = Math.floor(maxTrimSec * sampleRate);
-  let start = 0;
-  while (start < samples.length && start < maxTrimSamples && Math.abs(samples[start]) < KOKORO_SILENCE_RMS_THRESHOLD) start++;
-  let end = samples.length;
-  const minEnd = Math.max(start, samples.length - maxTrimSamples);
-  while (end > minEnd && Math.abs(samples[end - 1]) < KOKORO_SILENCE_RMS_THRESHOLD) end--;
-  return samples.subarray(start, end);
-}
+// Chunk-splitting (Kokoro's ~510-token per-call limit), per-chunk silence
+// trimming, and WAV encoding all now happen inside web/tts-worker.js, right
+// next to the ONNX inference itself — see that file for the trim/gap
+// rationale (moved here verbatim during the main-thread-freeze fix, not
+// re-derived).
 const KokoroEngine = {
   id: "kokoro",
   label: "Kokoro (local, free, higher quality)",
@@ -171,53 +126,8 @@ const KokoroEngine = {
   listVoices() { return KOKORO_VOICES; },
   defaultVoice() { return KOKORO_VOICES[0].id; },
   async generate(text, voice, config) {
-    const tts = await ensureKokoro();
-    const speed = (config && config.speed) || 1;
-    // Kokoro's model has a hard ~510-token input limit per single generate()
-    // call — text beyond that is silently truncated (no error), which cut
-    // every long story's narration off at the same fixed ~20-30s regardless
-    // of its real length. Splitting on sentence boundaries and generating
-    // each chunk separately keeps every call safely under that limit.
-    //
-    // This used to go through tts.stream() with the same split_pattern
-    // (one library call instead of a manual loop) — reverted after
-    // confirming live that tts.stream() reliably deadlocks partway through
-    // its own internal generation loop (zero console output, zero network
-    // activity, never recovers) even for a single short sentence, on this
-    // exact model/voice/environment, while plain tts.generate() called
-    // per-chunk here does not. Root cause is inside kokoro-js's stream()
-    // implementation, not reachable from here — this works around it by
-    // simply not calling that method, rather than papering over the hang
-    // with a longer timeout.
-    const sentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
-    const chunks = sentences.length ? sentences : [text];
-    const sampleChunks = [];
-    let sampleRate = 24000;
-    for (const chunk of chunks) {
-      const audio = await tts.generate(chunk, { voice, speed });
-      sampleRate = audio.sampling_rate;
-      sampleChunks.push(trimSilenceFloat32(audio.audio, sampleRate, KOKORO_MAX_TRIM_SEC));
-    }
-    const gapSamples = sampleChunks.length > 1 ? Math.floor(KOKORO_INTER_CHUNK_GAP_SEC * sampleRate) : 0;
-    const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0) + gapSamples * Math.max(0, sampleChunks.length - 1);
-    const merged = new Float32Array(totalLen);
-    let offset = 0;
-    sampleChunks.forEach((chunk, i) => {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-      if (i < sampleChunks.length - 1) offset += gapSamples; // stays zero-filled — silence
-    });
-    const wavBuffer = encodeMonoFloat32Wav(merged, sampleRate);
-    const audioBlob = new Blob([wavBuffer], { type: "audio/wav" });
-    // Parse the WAV header directly (same parseWavDurationSec the ffmpeg
-    // worker later uses on these exact bytes for the render's own duration
-    // bound) instead of probing via <audio>.duration — the DOM probe was
-    // observed to resolve a too-short duration for Kokoro's WAV output,
-    // compressing every word timing and (via the title-card's dynamic
-    // duration calc) cutting the final render short before the real audio
-    // finished. Falls back to the DOM probe only if header parsing fails.
-    const durationSec = parseWavDurationSec(new Uint8Array(wavBuffer)) || await probeAudioDuration(audioBlob);
-    return { audioBlob, durationSec };
+    const { audioBuffer, mimeType, durationSec } = await generateKokoroInWorker(text, voice, config);
+    return { audioBlob: new Blob([audioBuffer], { type: mimeType }), durationSec };
   },
 };
 
