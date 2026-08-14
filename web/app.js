@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 115;
+const VERSION = 116;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -2324,7 +2324,14 @@ let ttsQueueTail = Promise.resolve();
 // ttsQueueTail) always settles, so the queue can never get stuck this way
 // again; the hung call itself just becomes an orphaned promise no longer
 // blocking anything.
-const TTS_QUEUE_TIMEOUT_MS = 3 * 60 * 1000;
+// Must stay >= the largest per-engine fetch-abort timeout (currently native
+// Kokoro's own 8.5-minute abort in tts-engines.js, itself just above the
+// server's 8-minute subprocess kill timer) — otherwise this outer race fires
+// first and falsely reports "timed out" while the real request is still
+// legitimately running server-side, invisible, still holding a limiter slot.
+// A future engine with an even longer realistic completion time should raise
+// this constant to match rather than get silently clipped by it.
+const TTS_QUEUE_TIMEOUT_MS = 9 * 60 * 1000;
 function queueTTS(fn) {
   const runOne = () => Promise.race([
     fn(),
@@ -2339,6 +2346,37 @@ function queueTTS(fn) {
   // via `run`, this is only to keep ttsQueueTail chainable.
   ttsQueueTail = run.catch(() => {});
   return run;
+}
+
+// ---------- Kokoro warm pool (batch-scoped) ----------
+// A batch of several kokoroNative jobs can ask server.js to spin up N
+// long-lived Kokoro worker processes (model loaded once, stays resident for
+// the pool's lifetime) instead of every job separately paying a fresh
+// model-reload cost. Deliberately NOT an always-on pool — RAM is only spent
+// while a batch is actually in flight; maybeWarmKokoroPool()/
+// teardownKokoroPool() bracket exactly one batch run each.
+let batchKokoroPoolActive = false;
+
+async function maybeWarmKokoroPool(jobs, defaults) {
+  const kokoroJobCount = jobs.filter(j => (j.ttsEngine || defaults.ttsEngine) === "kokoroNative").length;
+  if (kokoroJobCount < 2) return; // not worth pooling for 0 or 1 job
+  const size = Math.min(kokoroJobCount, navigator.hardwareConcurrency || 4);
+  try {
+    const resp = await fetch("/kokoro-native/warm-pool", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ size }),
+    });
+    batchKokoroPoolActive = resp.ok;
+  } catch (e) {
+    batchKokoroPoolActive = false; // no local server (GH Pages build), etc — silent, non-fatal
+  }
+}
+
+async function teardownKokoroPool() {
+  if (!batchKokoroPoolActive) return;
+  batchKokoroPoolActive = false;
+  try { await fetch("/kokoro-native/warm-pool", { method: "DELETE" }); } catch (e) { /* best-effort cleanup */ }
 }
 
 // Tier 2 of the caption-sync cascade (the always-on default when native
@@ -2516,15 +2554,27 @@ async function generateSpeech(text, voice, engineId, onTranscribeProgress, onGen
   // minor accuracy cost on one word, not a crash or garbled output.
   const speechText = expandAitahForSpeech(text);
   let generated;
+  // kokoroNative during an active batch-scoped warm pool bypasses the
+  // shared queue — it's already just an independent, stateless HTTP call to
+  // server.js (no shared ONNX session/speechSynthesis instance to protect,
+  // unlike every other engine queueTTS() serializes for), and the whole
+  // point of the warm pool is several jobs' generation calls actually
+  // overlapping instead of running one at a time. Every other engine, and
+  // kokoroNative outside a pooled batch, keep going through queueTTS()
+  // exactly as before — this mirrors streamChat()'s existing skipLimiter
+  // precedent, a call-site-decided bypass rather than a change to the
+  // shared queue itself.
+  const skipQueue = engineId === "kokoroNative" && batchKokoroPoolActive;
+  const runEngine = async () => {
+    showDownloadToast(`Generating voice (${engine.label})...`);
+    try {
+      return await engine.generate(speechText, voice, config, onGenerateProgress);
+    } finally {
+      hideDownloadToast();
+    }
+  };
   try {
-    generated = await queueTTS(async () => {
-      showDownloadToast(`Generating voice (${engine.label})...`);
-      try {
-        return await engine.generate(speechText, voice, config, onGenerateProgress);
-      } finally {
-        hideDownloadToast();
-      }
-    });
+    generated = await (skipQueue ? runEngine() : queueTTS(runEngine));
   } catch (e) {
     console.error("generateSpeech failed:", e);
     const detail = (e && e.stack) ? ("\n\n" + e.stack.split("\n").slice(0, 4).join("\n")) : "";
@@ -6139,6 +6189,7 @@ async function bulkGenerateBatch() {
   }
 
   openBatchProgressPanel(jobs.map(j => j.job));
+  await maybeWarmKokoroPool(jobs.map(j => j.job), defaults);
 
   const grid = $("#batchProgressGrid");
   const resultsGrid = $("#resultsGrid");
@@ -6153,72 +6204,80 @@ async function bulkGenerateBatch() {
   // story is ready, which may be well before the batch's slowest story.
   const parallelism = parseInt($("#batchParallelism").value) || 1;
   const globalSettings = getGlobalSettings();
+  // teardownKokoroPool() in `finally` covers every exit from here on —
+  // success, a render-backend-start failure (the early return below), and
+  // cancellation (which doesn't return early; each job's own cancel check
+  // just short-circuits and the outer Promise.all still settles normally).
   try {
-    await ensureRenderBackend(parallelism);
-    await applyRenderConcurrency(parallelism);
-  } catch (e) {
-    console.error(e);
-    alert("Couldn't start the render backend: " + (e && e.message ? e.message : String(e)));
-    // openBatchProgressPanel() above already started its 500ms stats
-    // interval and every job is still sitting at status "story" — without
-    // marking them as failed here, doneCount never reaches totalJobs, so
-    // updateBatchProgressStats() never clears that interval and it ticks
-    // forever showing a bogus "Estimating..." ETA for a batch that never
-    // actually started.
-    for (const { job } of jobs) {
-      job.status = "error"; job.error = "Render backend failed to start.";
-      renderResultCard(job, grid);
-    }
-    updateBatchProgressStats();
-    btn.disabled = false;
-    return;
-  }
-
-  // Per-job try/catch (not one Promise.all-wide try/catch) so one job's
-  // failure — a rate limit, a bad response — doesn't abort every other
-  // job's already-in-flight generation/render.
-  const cancelToken = currentBatchCancel;
-  // Shuffled ONCE, up front — every job's ideas call assigns
-  // batchCategories[i % length] deterministically, so no two jobs in this
-  // batch converge on the same scenario category even though their ideas
-  // calls all start concurrently (there's no way to track "already picked"
-  // across calls that literally begin at the same instant).
-  const batchCategories = shuffledStoryCategories();
-  await Promise.all(jobs.map(async ({ job, cardEl }, i) => {
-    // Story generation/media assignment happen entirely outside runJob(),
-    // so they need their own cancel guard — runJob()'s own checkCancelled()
-    // checkpoints only cover its own phases, not this.
-    if (cancelToken.cancelled) {
-      job.status = "cancelled"; job.progressLabel = "Cancelled";
-      renderResultCard(job, grid);
+    try {
+      await ensureRenderBackend(parallelism);
+      await applyRenderConcurrency(parallelism);
+    } catch (e) {
+      console.error(e);
+      alert("Couldn't start the render backend: " + (e && e.message ? e.message : String(e)));
+      // openBatchProgressPanel() above already started its 500ms stats
+      // interval and every job is still sitting at status "story" — without
+      // marking them as failed here, doneCount never reaches totalJobs, so
+      // updateBatchProgressStats() never clears that interval and it ticks
+      // forever showing a bogus "Estimating..." ETA for a batch that never
+      // actually started.
+      for (const { job } of jobs) {
+        job.status = "error"; job.error = "Render backend failed to start.";
+        renderResultCard(job, grid);
+      }
+      updateBatchProgressStats();
+      btn.disabled = false;
       return;
     }
-    try {
-      await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
-      await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
-      await generateIdeaAndStoryForJob(job, cardEl, batchCategories[i % batchCategories.length], (j) => renderResultCard(j, grid));
-      job.progressLabel = "Story ready";
-      renderResultCard(job, grid);
+
+    // Per-job try/catch (not one Promise.all-wide try/catch) so one job's
+    // failure — a rate limit, a bad response — doesn't abort every other
+    // job's already-in-flight generation/render.
+    const cancelToken = currentBatchCancel;
+    // Shuffled ONCE, up front — every job's ideas call assigns
+    // batchCategories[i % length] deterministically, so no two jobs in this
+    // batch converge on the same scenario category even though their ideas
+    // calls all start concurrently (there's no way to track "already picked"
+    // across calls that literally begin at the same instant).
+    const batchCategories = shuffledStoryCategories();
+    await Promise.all(jobs.map(async ({ job, cardEl }, i) => {
+      // Story generation/media assignment happen entirely outside runJob(),
+      // so they need their own cancel guard — runJob()'s own checkCancelled()
+      // checkpoints only cover its own phases, not this.
       if (cancelToken.cancelled) {
         job.status = "cancelled"; job.progressLabel = "Cancelled";
         renderResultCard(job, grid);
         return;
       }
-      job.status = "queued";
-      renderResultCard(job, grid);
-      await runJob(job, globalSettings, (j) => {
-        renderResultCard(j, resultsGrid);
-        renderResultCard(j, grid);
-        updateBatchProgressStats();
-      }, () => cancelToken.cancelled);
-    } catch (e) {
-      console.error(e);
-      job.status = "error";
-      job.error = (e && e.message) || String(e);
-      job.progressLabel = "Failed";
-      renderResultCard(job, grid);
-    }
-  }));
+      try {
+        await applyBulkVideoAssignment(videoPlan[i], job, cardEl);
+        await applyBulkMusicAssignment(musicPlan[i], job, cardEl);
+        await generateIdeaAndStoryForJob(job, cardEl, batchCategories[i % batchCategories.length], (j) => renderResultCard(j, grid));
+        job.progressLabel = "Story ready";
+        renderResultCard(job, grid);
+        if (cancelToken.cancelled) {
+          job.status = "cancelled"; job.progressLabel = "Cancelled";
+          renderResultCard(job, grid);
+          return;
+        }
+        job.status = "queued";
+        renderResultCard(job, grid);
+        await runJob(job, globalSettings, (j) => {
+          renderResultCard(j, resultsGrid);
+          renderResultCard(j, grid);
+          updateBatchProgressStats();
+        }, () => cancelToken.cancelled);
+      } catch (e) {
+        console.error(e);
+        job.status = "error";
+        job.error = (e && e.message) || String(e);
+        job.progressLabel = "Failed";
+        renderResultCard(job, grid);
+      }
+    }));
+  } finally {
+    await teardownKokoroPool();
+  }
 
   const failedCount = jobs.filter(({ job }) => job.status === "error").length;
   const cancelledCount = jobs.filter(({ job }) => job.status === "cancelled").length;
@@ -6392,42 +6451,51 @@ async function renderAllBatch() {
   const progressGrid = $("#batchProgressGrid");
 
   openBatchProgressPanel(jobsToRun);
+  await maybeWarmKokoroPool(jobsToRun, globalSettings);
 
+  // teardownKokoroPool() in `finally` covers success, a render-backend-start
+  // failure (caught below), and cancellation (which doesn't return early —
+  // each job's own cancel check short-circuits and Promise.all still settles).
   try {
-    await ensureRenderBackend(parallelism);
-    // ensureRenderBackend ignores poolSize on the native path (it's a no-op
-    // there) — apply the batch screen's own "Parallel renders" choice as
-    // the actual native concurrency cap too, so this control isn't cosmetic.
-    await applyRenderConcurrency(parallelism);
-    jobsToRun.forEach(j => {
-      j.status = "queued"; j.progressLabel = "Queued...";
-      renderResultCard(j, grid);
-      renderResultCard(j, progressGrid);
-    });
-    const cancelToken = currentBatchCancel;
-    await Promise.all(jobsToRun.map(job => runJob(job, globalSettings, (j) => {
-      renderResultCard(j, grid);
-      renderResultCard(j, progressGrid);
-      updateBatchProgressStats();
-    }, () => cancelToken.cancelled)));
-    const failed = jobsToRun.filter(j => j.status === "error").length;
-    const cancelled = jobsToRun.filter(j => j.status === "cancelled").length;
-    showToast(cancelled ? `Batch cancelled — ${cancelled} video${cancelled === 1 ? "" : "s"} skipped.`
-      : failed ? `Batch done — ${failed} of ${jobsToRun.length} failed.` : "Batch complete!");
-  } catch (e) {
-    console.error(e);
-    alert("Batch failed to start: " + (e && e.message ? e.message : String(e)));
-    // Same interval-leak risk as bulkGenerateBatch's equivalent catch: any
-    // job still sitting at "draft" here never reaches "done"/"error" on its
-    // own, so openBatchProgressPanel's 500ms stats interval (started above)
-    // would otherwise never see doneCount reach totalJobs and tick forever.
-    for (const j of jobsToRun) {
-      if (j.status !== "done" && j.status !== "error") {
-        j.status = "error"; j.error = "Render backend failed to start.";
+    try {
+      await ensureRenderBackend(parallelism);
+      // ensureRenderBackend ignores poolSize on the native path (it's a
+      // no-op there) — apply the batch screen's own "Parallel renders"
+      // choice as the actual native concurrency cap too, so this control
+      // isn't cosmetic.
+      await applyRenderConcurrency(parallelism);
+      jobsToRun.forEach(j => {
+        j.status = "queued"; j.progressLabel = "Queued...";
         renderResultCard(j, grid);
         renderResultCard(j, progressGrid);
+      });
+      const cancelToken = currentBatchCancel;
+      await Promise.all(jobsToRun.map(job => runJob(job, globalSettings, (j) => {
+        renderResultCard(j, grid);
+        renderResultCard(j, progressGrid);
+        updateBatchProgressStats();
+      }, () => cancelToken.cancelled)));
+      const failed = jobsToRun.filter(j => j.status === "error").length;
+      const cancelled = jobsToRun.filter(j => j.status === "cancelled").length;
+      showToast(cancelled ? `Batch cancelled — ${cancelled} video${cancelled === 1 ? "" : "s"} skipped.`
+        : failed ? `Batch done — ${failed} of ${jobsToRun.length} failed.` : "Batch complete!");
+    } catch (e) {
+      console.error(e);
+      alert("Batch failed to start: " + (e && e.message ? e.message : String(e)));
+      // Same interval-leak risk as bulkGenerateBatch's equivalent catch: any
+      // job still sitting at "draft" here never reaches "done"/"error" on its
+      // own, so openBatchProgressPanel's 500ms stats interval (started above)
+      // would otherwise never see doneCount reach totalJobs and tick forever.
+      for (const j of jobsToRun) {
+        if (j.status !== "done" && j.status !== "error") {
+          j.status = "error"; j.error = "Render backend failed to start.";
+          renderResultCard(j, grid);
+          renderResultCard(j, progressGrid);
+        }
       }
     }
+  } finally {
+    await teardownKokoroPool();
   }
   updateBatchProgressStats();
 

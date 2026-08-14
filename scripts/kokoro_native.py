@@ -27,7 +27,15 @@ def main():
     p.add_argument("--lang", required=True)
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--out", required=True)
+    p.add_argument("--threads", type=int, default=0)
     args = p.parse_args()
+
+    if args.threads > 0:
+        # torch is a transitive dependency of kokoro — set its thread budget
+        # before constructing KPipeline so N concurrent invocations (see
+        # server.js's threadBudget()) don't each try to grab every core.
+        import torch
+        torch.set_num_threads(args.threads)
 
     with open(args.text_file, "r", encoding="utf-8") as f:
         text = f.read()

@@ -1185,6 +1185,7 @@ function runNativeKokoro(text, voice, speed, respond) {
     ...KOKORO_NATIVE_WITH_ARGS, "python3", scriptPath,
     "--text-file", textPath, "--voice", voice, "--lang", kokoroLangForVoice(voice),
     "--speed", String(speed || 1), "--out", outPath,
+    "--threads", String(threadBudget(kokoroNativeLimiter)),
   ];
   if (DEBUG) console.log("[kokoro-native]", args.join(" "));
   const proc = spawn("uvx", args);
@@ -1237,6 +1238,152 @@ function runNativeKokoro(text, voice, speed, respond) {
     });
   });
 }
+
+// ---------- Kokoro warm pool (batch-scoped) ----------
+// Complements runNativeKokoro() above, doesn't replace it — a batch of
+// several kokoroNative jobs can ask for a pool of N long-lived
+// scripts/kokoro_native_daemon.py processes (model loaded once, stays
+// resident for the pool's lifetime) instead of every job separately paying
+// a fresh model load. RAM cost only exists while a pool is actually
+// running: the client starts one right before a batch's voice generation
+// begins and tears it down as soon as the batch ends (see web/app.js's
+// maybeWarmKokoroPool()/teardownKokoroPool()) — never left running idle.
+const KOKORO_POOL_HARD_CAP = 6; // each warm worker holds a full Kokoro-82M copy resident in RAM — unlike CPU_COUNT (which only bounds CPU-bound concurrency), this is real fixed memory per slot, so deliberately more conservative.
+const KOKORO_POOL_WORKER_READY_TIMEOUT_MS = 90 * 1000;
+
+class KokoroWarmWorker {
+  constructor(threads) {
+    this.busy = false;
+    this.dead = false;
+    this._pending = null; // {resolve, reject} for the in-flight request, if any
+    this._readyResolve = null;
+    this._readyReject = null;
+    this._buffer = "";
+    const scriptPath = path.join(__dirname, "scripts", "kokoro_native_daemon.py").replace("app.asar", "app.asar.unpacked");
+    const args = [...KOKORO_NATIVE_WITH_ARGS, "python3", scriptPath, "--threads", String(threads)];
+    if (DEBUG) console.log("[kokoro-pool] spawning worker:", args.join(" "));
+    this.proc = spawn("uvx", args);
+    this.proc.stdout.on("data", (chunk) => this._onStdout(chunk));
+    this.proc.on("error", (err) => this._onExit(err.message));
+    this.proc.on("close", (code) => this._onExit(`exited with code ${code}`));
+  }
+
+  _onStdout(chunk) {
+    this._buffer += chunk.toString();
+    let idx;
+    while ((idx = this._buffer.indexOf("\n")) !== -1) {
+      const line = this._buffer.slice(0, idx).trim();
+      this._buffer = this._buffer.slice(idx + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch (e) { continue; }
+      if (msg.ready) {
+        if (this._readyResolve) this._readyResolve();
+        continue;
+      }
+      if (this._pending) {
+        const { resolve, reject } = this._pending;
+        this._pending = null;
+        this.busy = false;
+        if (msg.error) reject(new Error(msg.error));
+        else resolve(msg);
+      }
+    }
+  }
+
+  // Fires on either a genuine crash or a clean exit (e.g. after destroy()
+  // closes stdin) — idempotent via this.dead, since a real spawn failure can
+  // fire both "error" and "close" for the same process.
+  _onExit(reason) {
+    if (this.dead) return;
+    this.dead = true;
+    if (this._readyReject) this._readyReject(new Error("worker exited before becoming ready: " + reason));
+    if (this._pending) {
+      const { reject } = this._pending;
+      this._pending = null;
+      this.busy = false;
+      reject(new Error("worker died mid-request: " + reason));
+    }
+  }
+
+  waitUntilReady() {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => {
+        this._readyResolve = null;
+        this._readyReject = null;
+        reject(new Error("worker startup timed out"));
+      }, KOKORO_POOL_WORKER_READY_TIMEOUT_MS);
+      this._readyResolve = () => { clearTimeout(t); this._readyResolve = null; this._readyReject = null; resolve(); };
+      this._readyReject = (err) => { clearTimeout(t); this._readyResolve = null; this._readyReject = null; reject(err); };
+    });
+  }
+
+  generate(text, voice, speed, lang) {
+    if (this.dead || this.busy) return Promise.reject(new Error("worker not available"));
+    this.busy = true;
+    return new Promise((resolve, reject) => {
+      this._pending = { resolve, reject };
+      const id = Date.now();
+      this.proc.stdin.write(JSON.stringify({ id, text, voice, speed: speed || 1, lang }) + "\n");
+    });
+  }
+
+  destroy() {
+    if (this.dead) return;
+    this.dead = true;
+    try { this.proc.stdin.end(); } catch (e) {}
+    const t = setTimeout(() => { try { this.proc.kill("SIGKILL"); } catch (e) {} }, 3000);
+    this.proc.once("close", () => clearTimeout(t));
+  }
+}
+
+class KokoroWarmPool {
+  constructor(size) {
+    this.size = size;
+    this.workers = [];
+  }
+
+  // Spawns `size` workers concurrently and waits for each one's "ready"
+  // line — a worker that fails to start (bad env, uvx resolution failure)
+  // is simply dropped rather than failing the whole pool; the caller treats
+  // "at least 1 worker started" as success. Returns the real spawned count.
+  async start() {
+    const threads = Math.max(1, Math.floor(CPU_COUNT / this.size));
+    const attempts = Array.from({ length: this.size }, () => new KokoroWarmWorker(threads));
+    const results = await Promise.allSettled(attempts.map((w) => w.waitUntilReady().then(() => w)));
+    this.workers = [];
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].status === "fulfilled") {
+        this.workers.push(attempts[i]);
+      } else {
+        if (DEBUG) console.log("[kokoro-pool] worker failed to start:", results[i].reason && results[i].reason.message);
+        attempts[i].destroy();
+      }
+    }
+    return this.workers.length;
+  }
+
+  // No internal queueing — returns null immediately if every worker is
+  // busy/dead. The /kokoro-native route treats that exactly like "no pool"
+  // and falls back to the existing fresh-spawn runNativeKokoro() path,
+  // still bounded by kokoroNativeLimiter — the warm pool is an optimization
+  // layered on top of that existing admission-control queue, not a second
+  // parallel queue that could starve against it.
+  acquireIdle() {
+    return this.workers.find((w) => !w.dead && !w.busy) || null;
+  }
+
+  generate(worker, text, voice, speed, lang) {
+    return worker.generate(text, voice, speed, lang);
+  }
+
+  async destroy() {
+    for (const w of this.workers) w.destroy();
+    this.workers = [];
+  }
+}
+
+let activeKokoroPool = null; // null = no batch pool running
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -1596,6 +1743,34 @@ function handleRequest(req, res) {
           res.end(JSON.stringify({ error: "Missing text" }));
           return;
         }
+        // A batch-scoped warm pool worker, if one's active and idle, skips
+        // the fresh-spawn model-reload cost entirely — falls through to the
+        // existing per-call path below on any pool miss (no pool, no idle
+        // worker, or the worker errored/crashed mid-request), so a client
+        // that never starts a pool sees byte-for-byte the same behavior as
+        // before this feature existed.
+        if (activeKokoroPool) {
+          const worker = activeKokoroPool.acquireIdle();
+          if (worker) {
+            try {
+              const result = await activeKokoroPool.generate(worker, text, voice, body.speed, kokoroLangForVoice(voice));
+              // Same response shape as the fresh-spawn path below
+              // (audioBase64/durationSec/wordTimings) — the daemon's own
+              // protocol names this field "words" (plus a request "id" with
+              // no meaning to the client), so it's mapped here rather than
+              // leaking the internal wire protocol to callers.
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                audioBase64: result.audioBase64,
+                durationSec: result.durationSec,
+                wordTimings: (result.words || []).map(w => ({ text: w.text, start: w.start, end: w.end })),
+              }));
+              return;
+            } catch (e) {
+              if (DEBUG) console.log("[kokoro-pool] worker failed, falling back to fresh spawn:", e.message);
+            }
+          }
+        }
         await kokoroNativeLimiter.acquire();
         const respond = (status, data) => {
           kokoroNativeLimiter.release();
@@ -1605,6 +1780,60 @@ function handleRequest(req, res) {
         runNativeKokoro(text, voice, body.speed, respond);
       });
     });
+    return;
+  }
+  if (urlNoQuery === "/kokoro-native/warm-pool" && req.method === "POST") {
+    checkKokoroNative(async (available) => {
+      if (!available) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "The native Kokoro backend isn't available — install uv (https://docs.astral.sh/uv/) so `uvx` can run it, then restart the server." }));
+        return;
+      }
+      readBodyWithLimit(req, res, 1024, async (buf) => {
+        let body;
+        try {
+          body = JSON.parse(buf.toString("utf8") || "{}");
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Malformed JSON body: " + e.message }));
+          return;
+        }
+        // A client that calls warm-pool twice without tearing down the
+        // first (a lifecycle bug on the client side) shouldn't leak the old
+        // pool — tear it down before starting the new one.
+        if (activeKokoroPool) {
+          if (DEBUG) console.log("[kokoro-pool] replacing an already-active pool");
+          await activeKokoroPool.destroy();
+          activeKokoroPool = null;
+        }
+        const size = Math.max(1, Math.min(CPU_COUNT, KOKORO_POOL_HARD_CAP, clampConcurrency(body.size) || 1));
+        const pool = new KokoroWarmPool(size);
+        const started = await pool.start();
+        if (started === 0) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "No warm Kokoro workers could be started." }));
+          return;
+        }
+        activeKokoroPool = pool;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, size: started }));
+      });
+    });
+    return;
+  }
+  if (urlNoQuery === "/kokoro-native/warm-pool" && req.method === "DELETE") {
+    (async () => {
+      if (!activeKokoroPool) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, wasRunning: false }));
+        return;
+      }
+      const pool = activeKokoroPool;
+      activeKokoroPool = null;
+      await pool.destroy();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, wasRunning: true }));
+    })();
     return;
   }
 
