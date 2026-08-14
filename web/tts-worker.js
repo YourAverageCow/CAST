@@ -181,11 +181,19 @@ async function generateKokoro(text, voice, config) {
   const chunks = sentences.length ? sentences : [text];
   const sampleChunks = [];
   let sampleRate = 24000;
+  // Each chunk is a real, separate synthesis call — a genuine progress
+  // signal (not a fake timer), so the main thread can show live
+  // "chunk N/total" feedback instead of a static label for however long
+  // a full story's worth of chunked generation takes.
+  let chunkIndex = 0;
   for (const chunk of chunks) {
+    self.postMessage({ type: "progress", current: chunkIndex, total: chunks.length });
     const audio = await tts.generate(chunk, { voice, speed });
     sampleRate = audio.sampling_rate;
     sampleChunks.push(trimSilenceFloat32(audio.audio, sampleRate, KOKORO_MAX_TRIM_SEC));
+    chunkIndex++;
   }
+  self.postMessage({ type: "progress", current: chunks.length, total: chunks.length });
   const gapSamples = sampleChunks.length > 1 ? Math.floor(KOKORO_INTER_CHUNK_GAP_SEC * sampleRate) : 0;
   const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0) + gapSamples * Math.max(0, sampleChunks.length - 1);
   const merged = new Float32Array(totalLen);

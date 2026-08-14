@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 105;
+const VERSION = 106;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1986,7 +1986,7 @@ function ensureTtsWorker() {
 // scheme because queueTTS() (below) already guarantees only one TTS call is
 // in flight app-wide at any moment, so a single reassigned onmessage/onerror
 // pair per call is sufficient.
-function generateInWorker(kind, text, voice, config) {
+function generateInWorker(kind, text, voice, config, onProgress) {
   return ensureTtsWorker().then((worker) => new Promise((resolve, reject) => {
     const onMessage = (e) => {
       const msg = e.data;
@@ -1996,6 +1996,8 @@ function generateInWorker(kind, text, voice, config) {
       } else if (msg.type === "error") {
         cleanup();
         reject(new Error(msg.message));
+      } else if (msg.type === "progress" && onProgress) {
+        onProgress(msg.current, msg.total);
       }
     };
     const onError = (e) => { cleanup(); reject(new Error(e.message || "TTS worker error")); };
@@ -2013,25 +2015,27 @@ function generateInWorker(kind, text, voice, config) {
 // each shows the same one-time "Preparing ... TTS engine" toast the old
 // in-page ensureKokoro()/ensurePiper() showed while the worker lazily
 // imports/loads the model on its first call, then never again for this
-// engine this session.
-async function generateKokoroInWorker(text, voice, config) {
+// engine this session. `onProgress(current, total)` is optional — only
+// Kokoro's worker-side chunk loop actually emits progress messages today;
+// Piper never calls it since it has no sub-call chunking of its own.
+async function generateKokoroInWorker(text, voice, config, onProgress) {
   const isolated = await waitForIsolation();
   if (!isolated) throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
   if (!ttsEnginesWarmed.kokoro) showDownloadToast("Preparing Kokoro TTS engine...");
   try {
-    const result = await generateInWorker("kokoro", text, voice, config);
+    const result = await generateInWorker("kokoro", text, voice, config, onProgress);
     ttsEnginesWarmed.kokoro = true;
     return result;
   } finally {
     hideDownloadToast();
   }
 }
-async function generatePiperInWorker(text, voice, config) {
+async function generatePiperInWorker(text, voice, config, onProgress) {
   const isolated = await waitForIsolation();
   if (!isolated) throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
   if (!ttsEnginesWarmed.piper) showDownloadToast("Preparing TTS engine...");
   try {
-    const result = await generateInWorker("piper", text, voice, config);
+    const result = await generateInWorker("piper", text, voice, config, onProgress);
     ttsEnginesWarmed.piper = true;
     return result;
   } finally {
@@ -2220,7 +2224,7 @@ async function resolveWordTimings(text, audioBlob, durationSec, engineWordTiming
   return words;
 }
 
-async function generateSpeech(text, voice, engineId, onTranscribeProgress) {
+async function generateSpeech(text, voice, engineId, onTranscribeProgress, onGenerateProgress) {
   engineId = engineId || getEngine();
   const engine = TTS_ENGINES[engineId];
   if (!engine) throw new Error("Unknown TTS engine: " + engineId);
@@ -2255,7 +2259,7 @@ async function generateSpeech(text, voice, engineId, onTranscribeProgress) {
     generated = await queueTTS(async () => {
       showDownloadToast(`Generating voice (${engine.label})...`);
       try {
-        return await engine.generate(speechText, voice, config);
+        return await engine.generate(speechText, voice, config, onGenerateProgress);
       } finally {
         hideDownloadToast();
       }
@@ -2831,8 +2835,9 @@ class JobCancelledError extends Error {}
 
 // isCancelled (optional): a `() => boolean` a batch run passes in so this
 // job can bail out at the next checkpoint once the user hits Cancel. Only
-// checked between phases (start, before transcode, before voice/title-card,
-// before the actual render call) — a job already inside the WASM/native
+// checked between phases (start, before transcode, before the title-card
+// step, before voice generation, before the actual render call) — a job
+// already inside the WASM/native
 // render pool (submitted and either waiting for a slot or actively
 // encoding) finishes normally rather than being interrupted mid-render;
 // threading real abort support into the worker pool / native fetch is a
@@ -2874,37 +2879,50 @@ async function runJob(job, globalSettings, onUpdate, isCancelled) {
     const fps = parseInt(settings.fps) || 30;
 
     checkCancelled();
-    // Title-card image generation has zero data dependency on TTS output —
-    // it only needs title/channelName/w/h, all already available — so it
-    // runs concurrently with generateSpeech() instead of waiting for it.
-    // Only the post-processing below (slicing narrationWords by how long
-    // the title takes to say) actually needs `words`, once TTS resolves.
     const isAutoTitle = job.titleCardEnabled && !job.titleCardText;
     const titleText = job.titleCardEnabled
       ? (job.titleCardText || extractTitleFromStory(story) || "Untitled").trim()
       : null;
 
-    update({ status: "voice", progressPct: 0, progressLabel: job.titleCardEnabled ? "Generating voice & title card..." : "Generating voice..." });
-    const [{ audioUrl, words }, cardBlob] = await Promise.all([
-      generateSpeech(story, settings.voice, settings.ttsEngine, (tick) => {
-        // Native Whisper transcription (when it's the tier that ends up
-        // running) can genuinely take minutes for a long story — without
-        // this, "Generating voice & title card..." sat completely frozen
-        // the whole time, indistinguishable from an actual hang.
-        const pct = typeof tick === "number" ? tick : (tick && typeof tick.pct === "number" ? tick.pct : null);
-        if (pct != null) update({ progressPct: pct, progressLabel: `Transcribing narration for captions... ${pct}%` });
-      }),
-      job.titleCardEnabled
-        ? renderTitleCardImage({ title: titleText, channelName: globalSettings.channelName, w, h })
-        : Promise.resolve(null),
-    ]);
+    // Its own step (not lumped into "voice" or "render") — this is pure
+    // synchronous canvas work with zero data dependency on the narration
+    // itself, so running it first costs a fraction of a second and gives
+    // the card a real, visible progress line of its own instead of being
+    // silently folded into whichever step happened to be running when it
+    // used to execute (concurrently with TTS, then again as a "Building
+    // title card..." sub-label at the very start of "render").
+    let cardBlob = null;
+    if (job.titleCardEnabled) {
+      update({ status: "titlecard", progressPct: 0, progressLabel: "Building title card..." });
+      cardBlob = await renderTitleCardImage({ title: titleText, channelName: globalSettings.channelName, w, h });
+    }
+
+    checkCancelled();
+    update({ status: "voice", progressPct: 0, progressLabel: "Generating voice..." });
+    const { audioUrl, words } = await generateSpeech(story, settings.voice, settings.ttsEngine, (tick) => {
+      // Native Whisper transcription (when it's the tier that ends up
+      // running) can genuinely take minutes for a long story — without
+      // this, "Generating voice..." sat completely frozen the whole time,
+      // indistinguishable from an actual hang.
+      const pct = typeof tick === "number" ? tick : (tick && typeof tick.pct === "number" ? tick.pct : null);
+      if (pct != null) update({ progressPct: pct, progressLabel: `Transcribing narration for captions... ${pct}%` });
+    }, (current, total) => {
+      // Kokoro (the only engine that calls this today — see
+      // web/tts-worker.js's generateKokoro) synthesizes one sentence chunk
+      // at a time, a real sequential progress signal rather than a fake
+      // timer. Piper/cloud engines never call this, so their jobs just
+      // keep the static "Generating voice..." label from above.
+      if (total > 0) {
+        const pct = Math.round((current / total) * 100);
+        update({ progressPct: pct, progressLabel: `Generating voice... (chunk ${current}/${total})` });
+      }
+    });
 
     let titleCardPayload = null;
     let cardDurationSec = 0;
     let narrationDelaySec = 0;
     let narrationWords = words;
     if (job.titleCardEnabled) {
-      update({ status: "render", progressPct: 5, progressLabel: "Building title card..." });
       // An auto-extracted title is literally the story's first line, already
       // spoken as part of the narration — instead of showing it once on the
       // card and then again as a caption after a fixed delay, let its own

@@ -86,8 +86,8 @@ const PiperEngine = {
     return PIPER_VOICES.map(id => ({ id, label: PIPER_VOICE_LABELS[id] || id }));
   },
   defaultVoice() { return PIPER_VOICES[0]; },
-  async generate(text, voice, config) {
-    const { audioBuffer, mimeType, durationSec } = await generatePiperInWorker(text, voice, config);
+  async generate(text, voice, config, onProgress) {
+    const { audioBuffer, mimeType, durationSec } = await generatePiperInWorker(text, voice, config, onProgress);
     return { audioBlob: new Blob([audioBuffer], { type: mimeType }), durationSec };
   },
 };
@@ -125,8 +125,8 @@ const KokoroEngine = {
   requiresOncePerSessionPermission: false,
   listVoices() { return KOKORO_VOICES; },
   defaultVoice() { return KOKORO_VOICES[0].id; },
-  async generate(text, voice, config) {
-    const { audioBuffer, mimeType, durationSec } = await generateKokoroInWorker(text, voice, config);
+  async generate(text, voice, config, onProgress) {
+    const { audioBuffer, mimeType, durationSec } = await generateKokoroInWorker(text, voice, config, onProgress);
     return { audioBlob: new Blob([audioBuffer], { type: mimeType }), durationSec };
   },
 };
