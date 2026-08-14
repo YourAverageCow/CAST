@@ -432,6 +432,25 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .cp-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .cp-actions button { width: auto; padding: 7px 14px; }
 
+/* Date/time wheel picker trigger + shared popup */
+.dt-hidden-input { display: none; }
+.dt-trigger-btn { display: flex; align-items: center; width: 100%; padding: 7px 9px; text-align: left; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.8rem; font-family: inherit; cursor: pointer; }
+.dt-trigger-btn:hover { background: var(--hover-bg); border-color: var(--hover-border); }
+.dt-picker-popup { display: none; position: fixed; z-index: 130; width: 300px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 12px 40px rgba(var(--shadow-color),0.5); }
+.dt-picker-popup.show { display: block; }
+.dt-wheels { position: relative; display: flex; height: 180px; }
+.dt-wheel-col { position: relative; z-index: 1; flex: 1 1 auto; min-width: 0; height: 100%; overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; -ms-overflow-style: none; }
+.dt-wheel-col::-webkit-scrollbar { display: none; }
+.dt-wheel-hour, .dt-wheel-minute, .dt-wheel-ampm { flex: 0 0 56px; }
+.dt-wheel-date { flex: 1 1 auto; }
+.dt-wheel-sep { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; color: var(--muted); font-weight: 600; padding: 0 2px; }
+.dt-wheel-item { height: 36px; line-height: 36px; text-align: center; font-size: 0.85rem; color: var(--muted); scroll-snap-align: center; user-select: none; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
+.dt-wheel-item.selected { color: var(--text); font-weight: 600; }
+.dt-wheel-spacer { height: 72px; flex: none; }
+.dt-wheel-highlight { position: absolute; left: 0; right: 0; top: 72px; height: 36px; background: var(--hover-bg); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); border-radius: 6px; pointer-events: none; z-index: 0; }
+.dt-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.dt-actions button { width: auto; padding: 7px 14px; }
+
 /* Player panel (right side) */
 #playerOverlay { display: none; position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 500; box-shadow: -8px 0 30px rgba(var(--shadow-color),0.5); }
 #playerOverlay.show { display: block; }
@@ -974,7 +993,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             Spaces out each auto-uploaded video's YouTube release time instead of publishing them all at once. Turning this on also enables "Automatically publish every finished video" in Settings → Publish if it isn't already — scheduling only changes *when* an auto-uploaded video goes live, not whether it gets uploaded.
           </p>
           <div class="caption-grid">
-            <div><label>Start date &amp; time</label><input type="datetime-local" id="scheduleStartAt"></div>
+            <div>
+              <label>Start date &amp; time</label>
+              <button type="button" class="dt-trigger-btn" id="scheduleStartAtBtn" onclick="openDateTimePicker('scheduleStartAt', this)">
+                <span id="scheduleStartAtLabel">Right now</span>
+              </button>
+              <input type="datetime-local" id="scheduleStartAt" class="dt-hidden-input" tabindex="-1">
+            </div>
             <div>
               <label>Spacing</label>
               <div style="display:flex;gap:6px;">
@@ -986,6 +1011,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
               </div>
             </div>
           </div>
+          <p id="schedulePreview" style="font-size:0.72rem;color:var(--muted);margin-top:8px;"></p>
         </div>
         <div class="settings-section">
           <h3>Scheduled Uploads</h3>
@@ -1057,6 +1083,22 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   <div class="cp-actions">
     <button type="button" onclick="cancelColorPicker()">Cancel</button>
     <button type="button" class="primary" onclick="applyColorPicker()">Apply</button>
+  </div>
+</div>
+
+<!-- Date/time wheel picker popup (shared singleton, like colorPickerPopup) -->
+<div id="dtPickerPopup" class="dt-picker-popup">
+  <div class="dt-wheels">
+    <div class="dt-wheel-col dt-wheel-date" id="dtWheelDate"></div>
+    <div class="dt-wheel-col dt-wheel-hour" id="dtWheelHour"></div>
+    <div class="dt-wheel-sep">:</div>
+    <div class="dt-wheel-col dt-wheel-minute" id="dtWheelMinute"></div>
+    <div class="dt-wheel-col dt-wheel-ampm" id="dtWheelAmPm"></div>
+    <div class="dt-wheel-highlight" aria-hidden="true"></div>
+  </div>
+  <div class="dt-actions">
+    <button type="button" onclick="cancelDateTimePicker()">Cancel</button>
+    <button type="button" class="primary" onclick="applyDateTimePicker()">Done</button>
   </div>
 </div>
 

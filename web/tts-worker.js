@@ -5,6 +5,7 @@
 // already does in app.js's classic <script>), one persistent instance,
 // message-in/message-out protocol.
 importScripts("./lib/ffmpeg-filters.js"); // for parseWavDurationSec
+importScripts("./lib/audio-utils.js"); // for trimSilenceFloat32/encodeMonoFloat32Wav
 
 let base = null;
 let piperEnginePromise = null;
@@ -50,6 +51,14 @@ function patchKokoroFetch() {
     if (typeof url === "string" && url.startsWith(KOKORO_HF_PREFIX)) {
       return origFetch(localPrefix + url.slice(KOKORO_HF_PREFIX.length), init);
     }
+    // Anything else hitting huggingface.co for a Kokoro-model-shaped path
+    // means KOKORO_MODEL_ID/KOKORO_HF_PREFIX above has drifted from whatever
+    // kokoro.web.js's vendored build actually requests — worth a console
+    // trace since a silent miss here means the local vendor/ copy goes
+    // unused and every load falls through to a live network fetch instead.
+    if (typeof url === "string" && url.includes("huggingface.co") && url.includes("Kokoro")) {
+      console.warn("[tts-worker] Kokoro fetch bypassed local vendor cache (URL prefix mismatch):", url);
+    }
     return origFetch(input, init);
   };
 }
@@ -57,27 +66,37 @@ function patchKokoroFetch() {
 async function ensureKokoroEngine() {
   if (!kokoroEnginePromise) {
     kokoroEnginePromise = (async () => {
-      patchKokoroFetch();
-      const mod = await import(base + KOKORO_JS);
-      const { KokoroTTS, env } = mod;
-      env.wasmPaths = base + "vendor/kokoro/onnx/";
-      // Confirmed live: ORT-web's threaded WASM build (the only variant
-      // vendored) never finishes instantiating when loaded from a nested
-      // Worker (this worker) — it spawns its own pthread-emulation
-      // sub-workers internally, and that bootstrap hangs indefinitely with
-      // zero further fetches/progress once nested one level deep, even
-      // though the same threaded build works fine when ffmpeg-worker.js (a
-      // top-level worker) loads it directly. Forcing numThreads to 1 skips
-      // that pthread pool entirely and runs the module single-threaded
-      // instead — env.numThreads is a small, narrowly-scoped addition to
-      // the vendored bundle's own env export, mirroring its existing
-      // wasmPaths forwarding setter exactly (see kokoro.web.js's `Mf`).
-      env.numThreads = 1;
-      // device: "wasm" pins execution providers to plain wasm, skipping
-      // kokoro-js's default "auto" device-detection step entirely (which
-      // otherwise probes navigator.gpu — unnecessary since this app only
-      // ever exercises the wasm path in practice).
-      return await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, { dtype: "q8", device: "wasm" });
+      try {
+        patchKokoroFetch();
+        const mod = await import(base + KOKORO_JS);
+        const { KokoroTTS, env } = mod;
+        env.wasmPaths = base + "vendor/kokoro/onnx/";
+        // Confirmed live: ORT-web's threaded WASM build (the only variant
+        // vendored) never finishes instantiating when loaded from a nested
+        // Worker (this worker) — it spawns its own pthread-emulation
+        // sub-workers internally, and that bootstrap hangs indefinitely with
+        // zero further fetches/progress once nested one level deep, even
+        // though the same threaded build works fine when ffmpeg-worker.js (a
+        // top-level worker) loads it directly. Forcing numThreads to 1 skips
+        // that pthread pool entirely and runs the module single-threaded
+        // instead — env.numThreads is a small, narrowly-scoped addition to
+        // the vendored bundle's own env export, mirroring its existing
+        // wasmPaths forwarding setter exactly (see kokoro.web.js's `Mf`).
+        env.numThreads = 1;
+        // device: "wasm" pins execution providers to plain wasm, skipping
+        // kokoro-js's default "auto" device-detection step entirely (which
+        // otherwise probes navigator.gpu — unnecessary since this app only
+        // ever exercises the wasm path in practice).
+        return await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, { dtype: "q8", device: "wasm" });
+      } catch (e) {
+        // A failed load (transient fetch blip, isolation not yet settled)
+        // used to leave every future generate() call replaying this exact
+        // cached rejection forever — clear it so the next call gets a real
+        // retry instead of a permanently wedged engine for the rest of the
+        // session.
+        kokoroEnginePromise = null;
+        throw e;
+      }
     })();
   }
   return kokoroEnginePromise;
@@ -86,6 +105,7 @@ async function ensureKokoroEngine() {
 async function ensurePiperEngine() {
   if (!piperEnginePromise) {
     piperEnginePromise = (async () => {
+      try {
       const mod = await import(base + PIPER_JS);
       const { PiperWebEngine, OnnxWebRuntime, PhonemizeWebRuntime } = mod;
       const voiceProvider = {
@@ -126,6 +146,13 @@ async function ensurePiperEngine() {
         // through generate() below via a module-scoped var) reaches it.
         voiceProvider: { fetch: (voice) => voiceProvider.fetch(voice, pendingPiperSpeed) },
       });
+      } catch (e) {
+        // Same reasoning as ensureKokoroEngine()'s catch — don't let a
+        // transient failure permanently wedge Piper for the rest of the
+        // session.
+        piperEnginePromise = null;
+        throw e;
+      }
     })();
   }
   return piperEnginePromise;
@@ -136,39 +163,12 @@ async function ensurePiperEngine() {
 // the fetch closure above picks up the current request's speed.
 let pendingPiperSpeed = 1;
 
-// ---------- Kokoro chunk/trim/WAV-encode (moved from tts-engines.js — see
-// that file's history for the trimSilenceFloat32/encodeMonoFloat32Wav
-// rationale, unchanged here, just relocated off main thread) ----------
-const KOKORO_SILENCE_RMS_THRESHOLD = 0.01;
+// Kokoro chunk gap tuning — call-site configuration for the pure
+// trimSilenceFloat32()/encodeMonoFloat32Wav() helpers imported from
+// web/lib/audio-utils.js above (see that file for the trim/encode
+// rationale — this is just how generateKokoro() below calls them).
 const KOKORO_MAX_TRIM_SEC = 0.6;
 const KOKORO_INTER_CHUNK_GAP_SEC = 0.12;
-function trimSilenceFloat32(samples, sampleRate, maxTrimSec) {
-  const maxTrimSamples = Math.floor(maxTrimSec * sampleRate);
-  let start = 0;
-  while (start < samples.length && start < maxTrimSamples && Math.abs(samples[start]) < KOKORO_SILENCE_RMS_THRESHOLD) start++;
-  let end = samples.length;
-  const minEnd = Math.max(start, samples.length - maxTrimSamples);
-  while (end > minEnd && Math.abs(samples[end - 1]) < KOKORO_SILENCE_RMS_THRESHOLD) end--;
-  return samples.subarray(start, end);
-}
-function encodeMonoFloat32Wav(samples, sampleRate) {
-  const bytesPerSample = 4;
-  const buffer = new ArrayBuffer(44 + bytesPerSample * samples.length);
-  const view = new DataView(buffer);
-  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-  writeStr(0, "RIFF"); view.setUint32(4, 36 + bytesPerSample * samples.length, true); writeStr(8, "WAVE");
-  writeStr(12, "fmt "); view.setUint32(16, 16, true);
-  view.setUint16(20, 3, true); // IEEE float
-  view.setUint16(22, 1, true); // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, bytesPerSample * sampleRate, true);
-  view.setUint16(32, bytesPerSample, true);
-  view.setUint16(34, 32, true);
-  writeStr(36, "data"); view.setUint32(40, bytesPerSample * samples.length, true);
-  let offset = 44;
-  for (let i = 0; i < samples.length; i++, offset += bytesPerSample) view.setFloat32(offset, samples[i], true);
-  return buffer;
-}
 
 async function generateKokoro(text, voice, config) {
   const tts = await ensureKokoroEngine();
@@ -185,15 +185,17 @@ async function generateKokoro(text, voice, config) {
   // signal (not a fake timer), so the main thread can show live
   // "chunk N/total" feedback instead of a static label for however long
   // a full story's worth of chunked generation takes.
+  // 1-indexed ("chunk 1/3" while the first chunk is in flight, not "0/3")
+  // so the counter reads naturally instead of starting at 0 and jumping
+  // straight to N only once everything's already done.
   let chunkIndex = 0;
   for (const chunk of chunks) {
-    self.postMessage({ type: "progress", current: chunkIndex, total: chunks.length });
+    self.postMessage({ type: "progress", current: chunkIndex + 1, total: chunks.length });
     const audio = await tts.generate(chunk, { voice, speed });
     sampleRate = audio.sampling_rate;
     sampleChunks.push(trimSilenceFloat32(audio.audio, sampleRate, KOKORO_MAX_TRIM_SEC));
     chunkIndex++;
   }
-  self.postMessage({ type: "progress", current: chunks.length, total: chunks.length });
   const gapSamples = sampleChunks.length > 1 ? Math.floor(KOKORO_INTER_CHUNK_GAP_SEC * sampleRate) : 0;
   const totalLen = sampleChunks.reduce((sum, c) => sum + c.length, 0) + gapSamples * Math.max(0, sampleChunks.length - 1);
   const merged = new Float32Array(totalLen);

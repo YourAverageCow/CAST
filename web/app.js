@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 113;
+const VERSION = 114;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -48,7 +48,7 @@ function setSettingsTab(tab) {
   if (tab === "video") { updateCaptionPreviewBackground(); showCaptionSample(); }
   if (tab === "publish") { refreshYoutubeAccounts(); }
   if (tab === "branding" && $("#channelBrandingMode").value === "sync") { refreshYoutubeAccounts(); }
-  if (tab === "schedule") { refreshScheduleDashboard(); }
+  if (tab === "schedule") { refreshScheduleDashboard(); updateSchedulePreview(); }
 }
 function openSettings() {
   $("#settingsOverlay").classList.add("show");
@@ -321,6 +321,214 @@ function cancelColorPicker() {
   input.dispatchEvent(new Event("input", { bubbles: true }));
   syncColorSwatchDisplay(targetId);
   closeColorPickerPopup();
+}
+
+// ---------- Date/time wheel picker (iOS-style, shared singleton popup) ----------
+// Same shell pattern as the color picker above: a hidden real <input> stays
+// the single source of truth (SETTINGS_FIELDS/saveSettings/loadSettings and
+// computeScheduleSlot() all keep reading/writing its .value exactly as
+// before, in the native "YYYY-MM-DDTHH:mm" datetime-local string format),
+// and this popup is just a richer way to set it than typing digits by hand.
+// Every column scroll-settles live-commit into that input (dispatching a
+// real "input" event), matching commitColorPickerState()'s philosophy —
+// Cancel is what makes this reversible, not withholding the write.
+const DT_ROW_H = 36;
+let dtPickerState = null; // { targetId, originalValue, year, month, day, hour12, minute, ampm }
+
+function dtPad(n) { return String(n).padStart(2, "0"); }
+
+function dtColumnItems(key) {
+  if (key === "hour") return Array.from({ length: 12 }, (_, i) => String(i + 1));
+  if (key === "minute") return Array.from({ length: 60 }, (_, i) => dtPad(i));
+  if (key === "ampm") return ["AM", "PM"];
+  return null; // "date" is generated dynamically against "today" — see buildDtWheelColumns
+}
+
+// 365 rows is trivial for any modern browser to render once per popup-open
+// (not per frame/keystroke) — no virtualization needed at this scale.
+const DT_DATE_DAYS = 365;
+const DT_DATE_FMT = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" });
+function dtDateLabel(dayOffset) {
+  if (dayOffset === 0) return "Today";
+  if (dayOffset === 1) return "Tomorrow";
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + dayOffset);
+  return DT_DATE_FMT.format(d);
+}
+
+function buildDtWheelColumns() {
+  const cols = { date: $("#dtWheelDate"), hour: $("#dtWheelHour"), minute: $("#dtWheelMinute"), ampm: $("#dtWheelAmPm") };
+  for (const key of Object.keys(cols)) {
+    const items = key === "date" ? Array.from({ length: DT_DATE_DAYS }, (_, i) => dtDateLabel(i)) : dtColumnItems(key);
+    const rows = items.map((label, i) => `<div class="dt-wheel-item" data-index="${i}">${label}</div>`).join("");
+    cols[key].innerHTML = `<div class="dt-wheel-spacer"></div>${rows}<div class="dt-wheel-spacer"></div>`;
+  }
+}
+
+function dtSelectedIndex(key) {
+  const { year, month, day, hour12, minute, ampm } = dtPickerState;
+  if (key === "hour") return hour12 - 1;
+  if (key === "minute") return minute;
+  if (key === "ampm") return ampm === "AM" ? 0 : 1;
+  // date: day-difference between the selected date and today
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const sel = new Date(year, month, day); sel.setHours(0, 0, 0, 0);
+  return Math.round((sel - today) / 86400000);
+}
+
+function scrollDtWheelsToState() {
+  $("#dtWheelDate").scrollTop = dtSelectedIndex("date") * DT_ROW_H;
+  $("#dtWheelHour").scrollTop = dtSelectedIndex("hour") * DT_ROW_H;
+  $("#dtWheelMinute").scrollTop = dtSelectedIndex("minute") * DT_ROW_H;
+  $("#dtWheelAmPm").scrollTop = dtSelectedIndex("ampm") * DT_ROW_H;
+}
+
+function renderDtWheelFadesFor(colEl) {
+  const centerY = colEl.scrollTop + colEl.clientHeight / 2;
+  const items = colEl.querySelectorAll(".dt-wheel-item");
+  items.forEach((item) => {
+    const itemCenter = item.offsetTop + DT_ROW_H / 2;
+    const distanceRows = Math.abs(itemCenter - centerY) / DT_ROW_H;
+    item.style.opacity = String(Math.max(0.22, 1 - distanceRows * 0.35));
+    item.classList.toggle("selected", distanceRows < 0.5);
+  });
+}
+
+function renderAllDtWheelFades() {
+  for (const el of [$("#dtWheelDate"), $("#dtWheelHour"), $("#dtWheelMinute"), $("#dtWheelAmPm")]) {
+    renderDtWheelFadesFor(el);
+  }
+}
+
+// Mirrors commitColorPickerState(): live-writes the real backing input in
+// the exact "YYYY-MM-DDTHH:mm" format datetime-local already used, and
+// dispatches a real bubbling "input" event so updateSchedulePreview() and
+// the generic SETTINGS_FIELDS autosave wiring react with zero special-casing.
+function syncDtPickerTriggerAndInput() {
+  if (!dtPickerState) return;
+  const { targetId, year, month, day, hour12, minute, ampm } = dtPickerState;
+  let hour24 = hour12 % 12;
+  if (ampm === "PM") hour24 += 12;
+  const value = `${year}-${dtPad(month + 1)}-${dtPad(day)}T${dtPad(hour24)}:${dtPad(minute)}`;
+  const input = $("#" + targetId);
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  syncDtTriggerLabelFromInput(targetId);
+}
+
+function syncDtTriggerLabelFromInput(targetId) {
+  const label = $("#" + targetId + "Label");
+  if (!label) return;
+  const input = $("#" + targetId);
+  if (!input.value) { label.textContent = "Right now"; return; }
+  const d = new Date(input.value);
+  label.textContent = Number.isFinite(d.getTime())
+    ? new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(d)
+    : "Right now";
+}
+
+function commitDtWheelSelection(colKey, index) {
+  if (!dtPickerState) return;
+  if (colKey === "date") {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() + index);
+    Object.assign(dtPickerState, { year: d.getFullYear(), month: d.getMonth(), day: d.getDate() });
+  } else if (colKey === "hour") {
+    dtPickerState.hour12 = index + 1;
+  } else if (colKey === "minute") {
+    dtPickerState.minute = index;
+  } else if (colKey === "ampm") {
+    dtPickerState.ampm = index === 0 ? "AM" : "PM";
+  }
+  syncDtPickerTriggerAndInput();
+}
+
+const DT_COLUMN_ELS = { date: "dtWheelDate", hour: "dtWheelHour", minute: "dtWheelMinute", ampm: "dtWheelAmPm" };
+
+function onDtColumnScroll(colKey, colEl) {
+  renderDtWheelFadesFor(colEl); // live, on every raw scroll event — must feel responsive while dragging
+  clearTimeout(colEl._dtSnapTimer);
+  colEl._dtSnapTimer = setTimeout(() => {
+    const index = Math.round(colEl.scrollTop / DT_ROW_H);
+    commitDtWheelSelection(colKey, index);
+  }, 150); // fires once scrolling has actually settled, mirroring native scroll-snap's own settle time
+}
+
+function positionDtPickerPopup(anchorEl) {
+  const popup = $("#dtPickerPopup");
+  const rect = anchorEl.getBoundingClientRect();
+  const popupRect = { w: 300 + 28, h: 260 }; // approx incl. padding, before layout
+  let left = rect.left;
+  let top = rect.bottom + 8;
+  if (left + popupRect.w > window.innerWidth) left = Math.max(8, window.innerWidth - popupRect.w);
+  if (top + popupRect.h > window.innerHeight) top = Math.max(8, rect.top - popupRect.h - 8);
+  popup.style.left = left + "px";
+  popup.style.top = top + "px";
+}
+
+function openDateTimePicker(targetId, anchorEl) {
+  const input = $("#" + targetId);
+  const base = input.value ? new Date(input.value) : new Date();
+  const d = Number.isFinite(base.getTime()) ? base : new Date(); // defaults to "right now" when empty/unset
+  const hour24 = d.getHours();
+  dtPickerState = {
+    targetId, originalValue: input.value,
+    year: d.getFullYear(), month: d.getMonth(), day: d.getDate(),
+    hour12: ((hour24 + 11) % 12) + 1, minute: d.getMinutes(), ampm: hour24 < 12 ? "AM" : "PM",
+  };
+  buildDtWheelColumns();
+  $("#dtPickerPopup").classList.add("show");
+  positionDtPickerPopup(anchorEl);
+  scrollDtWheelsToState();
+  renderAllDtWheelFades();
+  document.addEventListener("pointerdown", onDtPickerOutsideClick, true);
+}
+
+function closeDateTimePickerPopup() {
+  $("#dtPickerPopup").classList.remove("show");
+  document.removeEventListener("pointerdown", onDtPickerOutsideClick, true);
+  dtPickerState = null;
+}
+
+function onDtPickerOutsideClick(e) {
+  const popup = $("#dtPickerPopup");
+  if (!dtPickerState) return;
+  const btn = $("#" + dtPickerState.targetId + "Btn");
+  if (popup.contains(e.target) || (btn && btn.contains(e.target))) return;
+  applyDateTimePicker();
+}
+
+function applyDateTimePicker() {
+  closeDateTimePickerPopup();
+}
+function cancelDateTimePicker() {
+  if (!dtPickerState) return;
+  const { targetId, originalValue } = dtPickerState;
+  const input = $("#" + targetId);
+  input.value = originalValue;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  syncDtTriggerLabelFromInput(targetId);
+  closeDateTimePickerPopup();
+}
+
+function dtWheelItemClick(colKey, colEl, index) {
+  colEl.scrollTo({ top: index * DT_ROW_H, behavior: "smooth" });
+  // The scroll listener's own debounce commits the selection once the
+  // smooth-scroll settles — no separate commit path needed here.
+}
+
+function initDateTimePickerEvents() {
+  for (const [key, elId] of Object.entries(DT_COLUMN_ELS)) {
+    const el = $("#" + elId);
+    el.addEventListener("scroll", () => onDtColumnScroll(key, el));
+    el.addEventListener("click", (e) => {
+      const item = e.target.closest(".dt-wheel-item");
+      if (!item) return;
+      dtWheelItemClick(key, el, Number(item.dataset.index));
+    });
+  }
 }
 
 // index.html's own inline <script> (in <head>) already applied the saved
@@ -598,7 +806,7 @@ async function applyLoadedSettings() {
   // engine after this restore. The quick-select's blank value already
   // means "use settings engine", which now resolves through the corrected
   // #ttsEngine below, so it just needs clearing, not a literal engine id.
-  if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngine").value)) $("#ttsEngine").value = "kokoroNative";
+  if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngine").value)) $("#ttsEngine").value = DEFAULT_TTS_ENGINE;
   if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngineQuick").value)) $("#ttsEngineQuick").value = "";
   // loadSettings() above already ran populateModels() and restored `model`
   // once its options existed — do NOT call populateModels()/populateVoices()
@@ -1007,7 +1215,7 @@ async function init() {
   $("#uiFontScale").addEventListener("input", applyUiFontScale);
   $("#captionBox").addEventListener("change", updateCaptionBoxShadowRows);
   $("#videoSpeed").addEventListener("input", () => {
-    $("#videoSpeedValue").textContent = parseFloat($("#videoSpeed").value).toFixed(2) + "x";
+    $("#videoSpeedValue").textContent = (numOr($("#videoSpeed").value, parseFloat, 1)).toFixed(2) + "x";
   });
   $("#captionShadow").addEventListener("change", updateCaptionBoxShadowRows);
   // Scheduling is a MODE of auto-upload, not an independent trigger — turning
@@ -1021,7 +1229,12 @@ async function init() {
       $("#youtubeAutoUpload").checked = true;
       $("#youtubeAutoUpload").dispatchEvent(new Event("change", { bubbles: true }));
     }
+    updateSchedulePreview();
   });
+  for (const id of ["scheduleStartAt", "scheduleIntervalValue", "scheduleIntervalUnit"]) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", updateSchedulePreview);
+  }
   // Per-engine TTS sliders (Settings -> Voice) — same "live value label next
   // to the slider" pattern as renderConcurrency/transcribeConcurrency above.
   for (const id of [
@@ -1049,6 +1262,8 @@ async function init() {
   $("#videoPreview").addEventListener("loadeddata", updateCaptionPreviewBackground);
   initCaptionDrag();
   initColorPickerEvents();
+  initDateTimePickerEvents();
+  syncDtTriggerLabelFromInput("scheduleStartAt");
   initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
   initSidebarToggle();
   // The sidebar (and with it the preview box) can be resized by dragging its
@@ -1059,6 +1274,19 @@ async function init() {
   initBatchUI();
   loadChannelProfilePic();
   initAppUpdates();
+  // Escape closes whichever overlay/modal is currently topmost. Checked in
+  // stacking order (color picker popup opens on top of Settings, media
+  // library opens independently) so a single keypress closes just the one
+  // thing the user is actually looking at, not everything at once.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if ($("#dtPickerPopup") && $("#dtPickerPopup").classList.contains("show")) { closeDateTimePickerPopup(); return; }
+    if ($("#colorPickerPopup") && $("#colorPickerPopup").classList.contains("show")) { closeColorPickerPopup(); return; }
+    if ($("#mediaLibraryOverlay") && $("#mediaLibraryOverlay").classList.contains("show")) { closeMediaLibrary(); return; }
+    if ($("#debugImageOverlay") && $("#debugImageOverlay").classList.contains("show")) { closeDebugImagePreview(); return; }
+    if ($("#playerOverlay") && $("#playerOverlay").classList.contains("show")) { closePlayer(); return; }
+    if ($("#settingsPanel") && $("#settingsPanel").classList.contains("open")) { closeSettings(); return; }
+  });
 }
 
 // ---------- Standalone app updates (Electron only) ----------
@@ -2005,7 +2233,16 @@ function ensureTtsWorker() {
         }
       };
       ttsWorker.addEventListener("message", onMessage);
-      ttsWorker.addEventListener("error", (e) => reject(new Error(e.message || "TTS worker failed to start")), { once: true });
+      ttsWorker.addEventListener("error", (e) => {
+        // Clear the cache on failure — a transient hiccup (isolation not yet
+        // settled, a one-off script-load blip) shouldn't wedge TTS for the
+        // rest of the session with no recovery short of a full reload. The
+        // NEXT call to ensureTtsWorker() gets a fresh Worker instead of
+        // replaying this same rejection forever.
+        ttsWorkerReadyPromise = null;
+        ttsWorker = null;
+        reject(new Error(e.message || "TTS worker failed to start"));
+      }, { once: true });
       ttsWorker.postMessage({ type: "init", base: BASE });
     });
   }
@@ -2048,29 +2285,23 @@ function generateInWorker(kind, text, voice, config, onProgress) {
 // engine this session. `onProgress(current, total)` is optional — only
 // Kokoro's worker-side chunk loop actually emits progress messages today;
 // Piper never calls it since it has no sub-call chunking of its own.
-async function generateKokoroInWorker(text, voice, config, onProgress) {
+async function generateEngineInWorker(kind, warmLabel, text, voice, config, onProgress) {
   const isolated = await waitForIsolation();
   if (!isolated) throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
-  if (!ttsEnginesWarmed.kokoro) showDownloadToast("Preparing Kokoro TTS engine...");
+  if (!ttsEnginesWarmed[kind]) showDownloadToast(warmLabel);
   try {
-    const result = await generateInWorker("kokoro", text, voice, config, onProgress);
-    ttsEnginesWarmed.kokoro = true;
+    const result = await generateInWorker(kind, text, voice, config, onProgress);
+    ttsEnginesWarmed[kind] = true;
     return result;
   } finally {
     hideDownloadToast();
   }
 }
-async function generatePiperInWorker(text, voice, config, onProgress) {
-  const isolated = await waitForIsolation();
-  if (!isolated) throw new Error("TTS engine needs cross-origin isolation (the page will reload once — try again after it loads).");
-  if (!ttsEnginesWarmed.piper) showDownloadToast("Preparing TTS engine...");
-  try {
-    const result = await generateInWorker("piper", text, voice, config, onProgress);
-    ttsEnginesWarmed.piper = true;
-    return result;
-  } finally {
-    hideDownloadToast();
-  }
+function generateKokoroInWorker(text, voice, config, onProgress) {
+  return generateEngineInWorker("kokoro", "Preparing Kokoro TTS engine...", text, voice, config, onProgress);
+}
+function generatePiperInWorker(text, voice, config, onProgress) {
+  return generateEngineInWorker("piper", "Preparing TTS engine...", text, voice, config, onProgress);
 }
 
 // Every engine's ONNX/network session gets funneled through this one-at-a-
@@ -3590,19 +3821,58 @@ async function uploadJobToYoutube(job, container) {
 // than restarting at the configured start time and colliding with
 // still-pending earlier slots.
 let scheduleSlotCounter = 0;
-function nextScheduledSlot() {
+// Pure slot math, shared by nextScheduledSlot() (real assignment, advances
+// the counter) and the Schedule tab's live preview (peeks ahead without
+// touching it) — takes an explicit counter value instead of reading/bumping
+// the module-level one so the preview can compute several slots in a row
+// with no side effects.
+function computeScheduleSlot(counterValue) {
   const startInput = $("#scheduleStartAt") ? $("#scheduleStartAt").value : "";
-  const configuredStart = startInput ? new Date(startInput).getTime() : (Date.now() + 60 * 60 * 1000);
+  const parsedStart = startInput ? new Date(startInput).getTime() : NaN;
+  // A malformed/unparseable start value (a stray manual edit, an odd
+  // datetime-local serialization quirk, a value restored from an older
+  // settings export) falls back to "1 hour from now" instead of letting
+  // NaN silently propagate through the Math.max/sum below — new Date(NaN)
+  // throws a RangeError on .toISOString(), which would otherwise crash
+  // maybeAutoPublish()/publishAllBatch()/updateSchedulePreview() outright.
+  const configuredStart = Number.isFinite(parsedStart) ? parsedStart : (Date.now() + 60 * 60 * 1000);
   // Never schedule in the past (an empty/already-elapsed start time) —
   // YouTube would reject a publishAt behind "now" — clamp with a small
   // safety buffer instead of letting the very next upload fail outright.
   const baseStart = Math.max(configuredStart, Date.now() + 5 * 60 * 1000);
-  const intervalValue = parseFloat($("#scheduleIntervalValue").value) || 24;
+  // `|| 24` alone would also silently override a deliberately-typed 0 —
+  // guard for "not a usable positive number" instead of "falsy".
+  const parsedInterval = parseFloat($("#scheduleIntervalValue").value);
+  const intervalValue = Number.isFinite(parsedInterval) && parsedInterval > 0 ? parsedInterval : 24;
   const intervalUnit = $("#scheduleIntervalUnit") ? $("#scheduleIntervalUnit").value : "hours";
   const intervalMs = (intervalUnit === "days" ? 86400000 : 3600000) * intervalValue;
-  const slotMs = baseStart + scheduleSlotCounter * intervalMs;
+  return new Date(baseStart + counterValue * intervalMs).toISOString();
+}
+function nextScheduledSlot() {
+  const iso = computeScheduleSlot(scheduleSlotCounter);
   scheduleSlotCounter++;
-  return new Date(slotMs).toISOString();
+  return iso;
+}
+// Shared by maybeAutoPublish() and publishAllBatch() — never overwrites a
+// schedule already set manually via the per-job publish panel, only fills
+// in a slot when nothing was chosen at all.
+function applyAutoScheduleSlot(pub) {
+  if ($("#scheduleAutoEnabled") && $("#scheduleAutoEnabled").checked && !pub.scheduledAt) {
+    pub.scheduledAt = nextScheduledSlot();
+  }
+}
+
+// Shows what the NEXT few real slots would be (starting from the current
+// scheduleSlotCounter, so it reflects any batch already in flight rather
+// than always starting over from slot 0) without assigning anything — pure
+// preview, called on tab open and on any input change.
+function updateSchedulePreview() {
+  const el = $("#schedulePreview");
+  if (!el) return;
+  if (!$("#scheduleAutoEnabled").checked) { el.textContent = ""; return; }
+  const fmt = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const lines = [0, 1, 2].map(i => `#${scheduleSlotCounter + i + 1}: ${fmt.format(new Date(computeScheduleSlot(scheduleSlotCounter + i)))}`);
+  el.textContent = "Next up — " + lines.join(" · ");
 }
 
 // Fires once per job, right after its card first renders as "done" — the
@@ -3630,11 +3900,7 @@ function maybeAutoPublish(job, container) {
   const defaultCategory = $("#youtubeDefaultCategoryId");
   if (defaultPrivacy && defaultPrivacy.value) pub.privacyStatus = defaultPrivacy.value;
   if (defaultCategory && defaultCategory.value) pub.categoryId = defaultCategory.value;
-  // Never overwrites a schedule already set manually via the per-job publish
-  // panel — this only fills in a slot when nothing was chosen at all.
-  if ($("#scheduleAutoEnabled") && $("#scheduleAutoEnabled").checked && !pub.scheduledAt) {
-    pub.scheduledAt = nextScheduledSlot();
-  }
+  applyAutoScheduleSlot(pub);
   (async () => {
     await generatePublishMetadata(job, container, false);
     await uploadJobToYoutube(job, container);
@@ -3670,11 +3936,8 @@ async function publishAllBatch() {
     if (defaultCategory && defaultCategory.value) pub.categoryId = defaultCategory.value;
     // Assigned synchronously here (before any await below), so slots land
     // in `eligible`'s stable array order even though the uploads themselves
-    // then run concurrently — never overwrites an already-manually-set
-    // per-job schedule.
-    if ($("#scheduleAutoEnabled") && $("#scheduleAutoEnabled").checked && !pub.scheduledAt) {
-      pub.scheduledAt = nextScheduledSlot();
-    }
+    // then run concurrently.
+    applyAutoScheduleSlot(pub);
     return generatePublishMetadata(job, container, false).then(() => uploadJobToYoutube(job, container));
   }));
   if (btn) { btn.textContent = "Publish All to YouTube"; btn.disabled = false; }
