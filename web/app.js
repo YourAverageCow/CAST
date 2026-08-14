@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 118;
+const VERSION = 119;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -3596,6 +3596,11 @@ function renderPublishSection(job, container) {
       </div>
       <label style="margin-top:6px;">Schedule (optional — leave blank to publish at the privacy status above immediately)</label>
       <input type="datetime-local" data-field="scheduledAt" value="${pub.scheduledAt ? toLocalDatetimeInputValue(pub.scheduledAt) : ""}">
+      <p style="font-size:0.68rem;color:var(--muted);margin-top:8px;">
+        By clicking "Upload," you certify that the content you are uploading complies with the
+        <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener">YouTube Terms of Service</a>
+        (including the YouTube Community Guidelines). Please be sure not to violate others' copyright or privacy rights.
+      </p>
       <div class="row" style="margin-top:8px;">
         <button data-action="publish-regenerate">Regenerate Metadata</button>
         <button data-action="publish-cancel">Cancel</button>
