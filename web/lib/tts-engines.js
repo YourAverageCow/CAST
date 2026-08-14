@@ -485,8 +485,13 @@ const TTS_ENGINES = {
   browserSpeech: BrowserSpeechEngine,
   pocketTts: PocketTtsEngine,
 };
-const DEFAULT_TTS_ENGINE = "piper";
+// Temporary — every engine but Kokoro is greyed out app-wide (see app.js's
+// ttsEngineOptionHtml()) while Kokoro's speed is the active focus. Nothing
+// about the engines themselves changed; re-enabling one later is just
+// removing its id here (or deleting this array entirely).
+const TTS_ENGINES_TEMP_DISABLED = ["piper", "openaiTts", "elevenlabs", "browserSpeech", "pocketTts", "kokoroNative"];
+const DEFAULT_TTS_ENGINE = "kokoro";
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { TTS_ENGINES, DEFAULT_TTS_ENGINE, probeAudioDuration };
+  module.exports = { TTS_ENGINES, TTS_ENGINES_TEMP_DISABLED, DEFAULT_TTS_ENGINE, probeAudioDuration };
 }

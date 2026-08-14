@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 106;
+const VERSION = 107;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -590,6 +590,15 @@ async function applyLoadedSettings() {
   if (!$("#storySystemPromptOverride").value.trim()) {
     $("#storySystemPromptOverride").value = DEFAULT_STORY_SYSTEM_PROMPT;
   }
+  // A disabled <option> still accepts a direct .value assignment (disabled
+  // only blocks picking it via the UI) — so an existing user with e.g.
+  // "piper" already saved from before TTS_ENGINES_TEMP_DISABLED existed
+  // would otherwise stay on a now-greyed-out engine after this restore.
+  // The quick-select's blank value already means "use settings engine",
+  // which now resolves through the corrected #ttsEngine below, so it just
+  // needs clearing, not a literal "kokoro".
+  if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngine").value)) $("#ttsEngine").value = "kokoro";
+  if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngineQuick").value)) $("#ttsEngineQuick").value = "";
   // loadSettings() above already ran populateModels() and restored `model`
   // once its options existed — do NOT call populateModels()/populateVoices()
   // again after this point without re-applying the saved value afterward;
@@ -685,17 +694,21 @@ function resetSettingsToDefaults() {
 }
 
 // ---------- Init ----------
+// Shared by every engine <select> this app builds (Settings/sidebar quick-
+// pick, bulk-batch-setup, per-card batch override) — pocketTts/kokoroNative
+// grey out with "— not installed" when their native backend probe fails
+// (a real runtime capability check), and everything in
+// TTS_ENGINES_TEMP_DISABLED greys out with "— disabled for now" (a
+// hand-maintained temporary list, see tts-engines.js) rather than letting
+// either be picked and only failing on generate.
+function ttsEngineOptionHtml(e) {
+  const tempDisabled = TTS_ENGINES_TEMP_DISABLED.includes(e.id);
+  const unavailable = tempDisabled || (e.id === "pocketTts" && !nativePocketTtsAvailable) || (e.id === "kokoroNative" && !nativeKokoroAvailable);
+  const reason = tempDisabled ? " — disabled for now" : (unavailable ? " — not installed" : "");
+  return `<option value="${e.id}"${unavailable ? " disabled" : ""}>${escapeHtml(e.label + reason)}</option>`;
+}
 function buildEngineSelect() {
-  const opts = Object.values(TTS_ENGINES).map(e => {
-    // pocketTts is the one engine with a real "not installed" failure mode
-    // most users will hit by default (a native `uvx pocket-tts` process,
-    // unlike Piper/Kokoro's bundled/CDN-fetched browser models or the cloud
-    // engines' API-key gating) — grey it out with a clear reason instead of
-    // letting it be picked and only failing on generate.
-    const unavailable = (e.id === "pocketTts" && !nativePocketTtsAvailable) || (e.id === "kokoroNative" && !nativeKokoroAvailable);
-    const label = unavailable ? `${e.label} — not installed` : e.label;
-    return `<option value="${e.id}"${unavailable ? " disabled" : ""}>${escapeHtml(label)}</option>`;
-  }).join("");
+  const opts = Object.values(TTS_ENGINES).map(ttsEngineOptionHtml).join("");
   $("#ttsEngine").innerHTML = opts;
   $("#ttsEngineQuick").innerHTML = '<option value="">Use settings engine</option>' + opts;
 }
@@ -5288,7 +5301,7 @@ function initBatchUI() {
   countSelect.innerHTML = countOpts.join("");
   countSelect.value = "5";
 
-  const engineOpts = Object.values(TTS_ENGINES).map(e => `<option value="${e.id}">${escapeHtml(e.label)}</option>`).join("");
+  const engineOpts = Object.values(TTS_ENGINES).map(ttsEngineOptionHtml).join("");
   $("#bulkTtsEngine").innerHTML = '<option value="">Use settings engine</option>' + engineOpts;
   populateBatchCardVoices(DEFAULT_TTS_ENGINE, $("#bulkVoice"));
   $("#bulkTtsEngine").addEventListener("change", () => {
@@ -5349,9 +5362,7 @@ async function populateBatchCardVoices(engineId, selectEl) {
 }
 
 function buildBatchCardElement(job) {
-  const engineOpts = Object.values(TTS_ENGINES).map(e =>
-    `<option value="${e.id}">${escapeHtml(e.label)}</option>`
-  ).join("");
+  const engineOpts = Object.values(TTS_ENGINES).map(ttsEngineOptionHtml).join("");
   const presetVideoOpts = PRESET_VIDEOS.map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
   const presetMusicOpts = PRESET_MUSIC.map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
 
