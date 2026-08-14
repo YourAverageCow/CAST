@@ -10,10 +10,10 @@
 // preview renders the exact same face instead of approximating with a
 // system font of a similar name.
 const CAPTION_FONTS = [
-  { id: "dejavu", file: "DejaVuSans.ttf", cssFamily: "SlopdaddyDejaVu", label: "DejaVu Sans (clean)" },
-  { id: "anton", file: "Anton-Regular.ttf", cssFamily: "SlopdaddyAnton", label: "Anton (bold condensed)" },
-  { id: "bebas", file: "BebasNeue-Regular.ttf", cssFamily: "SlopdaddyBebas", label: "Bebas Neue (condensed)" },
-  { id: "archivoBlack", file: "ArchivoBlack-Regular.ttf", cssFamily: "SlopdaddyArchivoBlack", label: "Archivo Black (heavy)" },
+  { id: "dejavu", file: "DejaVuSans.ttf", cssFamily: "CastDejaVu", label: "DejaVu Sans (clean)" },
+  { id: "anton", file: "Anton-Regular.ttf", cssFamily: "CastAnton", label: "Anton (bold condensed)" },
+  { id: "bebas", file: "BebasNeue-Regular.ttf", cssFamily: "CastBebas", label: "Bebas Neue (condensed)" },
+  { id: "archivoBlack", file: "ArchivoBlack-Regular.ttf", cssFamily: "CastArchivoBlack", label: "Archivo Black (heavy)" },
 ];
 const DEFAULT_FONT_ID = "dejavu";
 

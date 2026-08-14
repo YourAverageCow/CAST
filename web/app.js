@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 116;
+const VERSION = 117;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -39,7 +39,7 @@ function showToast(msg, duration) {
   t.classList.add("show");
   setTimeout(() => t.classList.remove("show"), duration || 2500);
 }
-const SETTINGS_TAB_KEY = "slopdaddy_settingsTab";
+const SETTINGS_TAB_KEY = "cast_settingsTab";
 function setSettingsTab(tab) {
   document.querySelectorAll(".settings-tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll(".settings-tab-panel").forEach(p => p.classList.toggle("active", p.dataset.tab === tab));
@@ -757,7 +757,7 @@ function saveSettings() {
       const el = document.getElementById(id);
       if (el) data[id] = el.type === "checkbox" ? el.checked : el.value;
     }
-    localStorage.setItem("slopdaddy_settings", JSON.stringify(data));
+    localStorage.setItem("cast_settings", JSON.stringify(data));
   } catch (e) {}
 }
 
@@ -766,7 +766,7 @@ function saveSettings() {
 // can't set a <select>'s value to an option that doesn't exist yet.
 function loadSettings() {
   try {
-    const raw = localStorage.getItem("slopdaddy_settings");
+    const raw = localStorage.getItem("cast_settings");
     if (!raw) return null;
     const data = JSON.parse(raw);
     // Restore everything except model (rebuilt per-provider) and voice
@@ -785,7 +785,7 @@ function loadSettings() {
   } catch (e) { return null; }
 }
 
-// Applies whatever's in localStorage's "slopdaddy_settings" blob to the live
+// Applies whatever's in localStorage's "cast_settings" blob to the live
 // DOM — the same sequence init() runs once at startup, factored out so
 // "Import Settings" and "Reset to Defaults" (which both rewrite that blob
 // and then need the UI to reflect it, exactly like a fresh page load would)
@@ -858,13 +858,13 @@ async function applyLoadedSettings() {
 }
 
 function exportSettings() {
-  const raw = localStorage.getItem("slopdaddy_settings");
+  const raw = localStorage.getItem("cast_settings");
   const data = raw ? JSON.parse(raw) : {};
   data._exportedFromVersion = VERSION;
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = `slopdaddy-settings-${new Date().toISOString().slice(0, 10)}.json`;
+  a.href = url; a.download = `cast-settings-${new Date().toISOString().slice(0, 10)}.json`;
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
@@ -878,7 +878,7 @@ function importSettingsFile(input) {
     try {
       const data = JSON.parse(reader.result);
       delete data._exportedFromVersion;
-      localStorage.setItem("slopdaddy_settings", JSON.stringify(data));
+      localStorage.setItem("cast_settings", JSON.stringify(data));
       await applyLoadedSettings();
       showToast("Settings imported.");
     } catch (e) {
@@ -898,7 +898,7 @@ function importSettingsFile(input) {
 // HTML-attribute default — a fresh load is what actually applies defaults.
 function resetSettingsToDefaults() {
   if (!confirm("Reset all settings to their defaults? This can't be undone.")) return;
-  localStorage.removeItem("slopdaddy_settings");
+  localStorage.removeItem("cast_settings");
   location.reload();
 }
 
@@ -1125,7 +1125,29 @@ async function probeYoutubeCapability() {
   }
 }
 
+// One-time migration from the old "Slopdaddy" localStorage key prefix to
+// "cast_" — copies forward without deleting the old key, so a botched
+// migration (or running an old build again) can never actually lose data,
+// it just leaves an unused old copy sitting there. Must run before
+// loadSettings()/applyLoadedSettings() below so a returning user's saved
+// settings are found under the new key on their very first post-rebrand load.
+function migrateLegacyLocalStorageKeys() {
+  const migrations = [
+    ["slopdaddy_settings", "cast_settings"],
+    ["slopdaddy_settingsTab", "cast_settingsTab"],
+    ["slopdaddy_sidebarWidth", "cast_sidebarWidth"],
+    ["slopdaddy_sidebarCollapsed", "cast_sidebarCollapsed"],
+    ["slopdaddy_channelProfilePic", "cast_channelProfilePic"],
+  ];
+  for (const [oldKey, newKey] of migrations) {
+    if (localStorage.getItem(newKey) === null && localStorage.getItem(oldKey) !== null) {
+      localStorage.setItem(newKey, localStorage.getItem(oldKey));
+    }
+  }
+}
+
 async function init() {
+  migrateLegacyLocalStorageKeys();
   $("#versionBadge").textContent = `v${VERSION}`;
   // probeNativeKokoroBackend is deliberately NOT in this Promise.all — its
   // first-ever check can take up to ~60s (uvx resolving/installing kokoro's
@@ -1264,7 +1286,7 @@ async function init() {
   initColorPickerEvents();
   initDateTimePickerEvents();
   syncDtTriggerLabelFromInput("scheduleStartAt");
-  initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
+  initPanelResize("sidebar", "sidebarResizeHandle", 1, "cast_sidebarWidth");
   initSidebarToggle();
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
@@ -1423,7 +1445,7 @@ function initPanelResize(panelId, handleId, sign, storageKey) {
   handle.addEventListener("pointercancel", stop);
 }
 
-const SIDEBAR_COLLAPSED_KEY = "slopdaddy_sidebarCollapsed";
+const SIDEBAR_COLLAPSED_KEY = "cast_sidebarCollapsed";
 function setSidebarCollapsed(collapsed) {
   $("#sidebar").classList.toggle("collapsed", collapsed);
   const btn = $("#sidebarToggleBtn");
@@ -1924,7 +1946,7 @@ function updateCaptionStyle() {
   const scale = getPreviewScale();
   const fontId = $("#font").value;
   const fontDef = getCaptionFont(fontId);
-  el.style.fontFamily = (fontDef ? fontDef.cssFamily : "SlopdaddyDejaVu") + ", sans-serif";
+  el.style.fontFamily = (fontDef ? fontDef.cssFamily : "CastDejaVu") + ", sans-serif";
   const fontSize = (parseInt($("#fontSize").value) || 68) * scale;
   el.style.fontSize = fontSize + "px";
   el.style.color = $("#textColor").value;
@@ -4162,7 +4184,7 @@ function copyVideoLink(url) {
 // `overlay`, so none of that complexity has to live in the filter graph.
 // Not unit-tested — like autoTranscodeToH264's canvas work, this is DOM-
 // coupled glue code with no meaningful logic to test outside a real canvas.
-const CHANNEL_PROFILE_PIC_KEY = "slopdaddy_channelProfilePic";
+const CHANNEL_PROFILE_PIC_KEY = "cast_channelProfilePic";
 let channelProfilePicDataUrl = null;
 
 function loadChannelProfilePic() {
@@ -4583,7 +4605,7 @@ async function refreshSystemDiagnostics() {
 }
 function copyDiagnostics() {
   const lines = [
-    `Slopdaddy v${VERSION}`,
+    `CAST v${VERSION}`,
     `User agent: ${navigator.userAgent}`,
     `Native render backend: ${nativeRenderAvailable} (cpuCount=${nativeCpuCount})`,
     `Native whisper backend: ${nativeWhisperAvailable}`,
@@ -4845,7 +4867,7 @@ function refreshYoutubeAutoUploadAccountSelect() {
   // their options are rebuilt.
   let saved = sel.value;
   try {
-    const stored = JSON.parse(localStorage.getItem("slopdaddy_settings") || "{}");
+    const stored = JSON.parse(localStorage.getItem("cast_settings") || "{}");
     if (stored.youtubeAutoUploadAccountId) saved = stored.youtubeAutoUploadAccountId;
   } catch (e) { /* keep sel.value fallback */ }
   sel.innerHTML = `<option value="">First connected channel</option>` +
@@ -4863,7 +4885,7 @@ function refreshChannelBrandingSyncAccountSelect() {
   if (!sel) return;
   let saved = sel.value;
   try {
-    const stored = JSON.parse(localStorage.getItem("slopdaddy_settings") || "{}");
+    const stored = JSON.parse(localStorage.getItem("cast_settings") || "{}");
     if (stored.channelBrandingSyncAccountId) saved = stored.channelBrandingSyncAccountId;
   } catch (e) { /* keep sel.value fallback */ }
   sel.innerHTML = youtubeAccountsCache.length
@@ -5172,6 +5194,11 @@ async function runDebugTestRender() {
 // upload, bulk-generate's random assignment) gets a real File back from
 // getMediaLibraryFile() and hands it to the exact same setBackground()/
 // setBatchCardBackground() entry points a manual upload already uses.
+// Deliberately NOT renamed in the Slopdaddy->CAST rebrand — this string is
+// never shown to the user anywhere, and IndexedDB has no cheap rename
+// operation (only copy-then-delete), so renaming it would risk orphaning
+// every uploaded background video/music track in someone's media library for
+// zero visible benefit. Leave it as-is.
 const MEDIA_LIBRARY_DB_NAME = "slopdaddy-media-library";
 const MEDIA_LIBRARY_STORE = "items";
 let mediaLibraryDB = null;

@@ -11,7 +11,7 @@ const path = require("path");
 const fs = require("fs");
 
 const PORT = 8123;
-const RELEASES_URL = "https://github.com/YourAverageCow/Slopdaddy/releases";
+const RELEASES_URL = "https://github.com/YourAverageCow/CAST/releases";
 
 // Manual, explicit flow rather than the auto-download shortcut — an
 // unsigned build (no code-signing cert set up yet) makes the actual
@@ -144,7 +144,7 @@ async function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    title: "Slopdaddy",
+    title: "CAST",
     icon: ICON_PATH,
     webPreferences: {
       contextIsolation: true,
@@ -204,7 +204,7 @@ app.whenReady().then(async () => {
     startBackend();
     await createWindow();
   } catch (e) {
-    dialog.showErrorBox("Slopdaddy failed to start", (e && e.stack) || String(e));
+    dialog.showErrorBox("CAST failed to start", (e && e.stack) || String(e));
     app.quit();
     return;
   }

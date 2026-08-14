@@ -1,17 +1,17 @@
 {
-  "name": "slopdaddy",
-  "version": "116.0.0",
+  "name": "cast",
+  "version": "117.0.0",
   "private": true,
-  "description": "AITAH story video generator — standalone app (Electron wrapper around the same web/ UI + server.js backend used by the local/web versions).",
+  "description": "CAST (Content Automation & Story Tool) — turns Reddit/AITAH-style stories into narrated short-form video, standalone app (Electron wrapper around the same web/ UI + server.js backend used by the local/web versions).",
   "author": "YourAverageCow",
-  "repository": "https://github.com/YourAverageCow/Slopdaddy",
+  "repository": "https://github.com/YourAverageCow/CAST",
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
     "dev": "node server.js",
     "test": "node --test web/lib/*.test.js",
     "smoke": "node scripts/smoke-test.js",
-    "free-port": "lsof -ti:${SLOPDADDY_PORT:-8123} | xargs kill -9 2>/dev/null || true",
+    "free-port": "lsof -ti:${CAST_PORT:-8123} | xargs kill -9 2>/dev/null || true",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
@@ -25,12 +25,12 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.slopdaddy.app",
-    "productName": "Slopdaddy",
+    "appId": "com.cast.app",
+    "productName": "CAST",
     "publish": {
       "provider": "github",
       "owner": "YourAverageCow",
-      "repo": "Slopdaddy"
+      "repo": "CAST"
     },
     "directories": {
       "output": "dist",

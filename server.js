@@ -57,13 +57,13 @@ function fixChildProcessPath() {
 }
 fixChildProcessPath();
 
-// SLOPDADDY_PORT lets a second instance run alongside a live Electron app
+// CAST_PORT lets a second instance run alongside a live Electron app
 // (which binds the default 8123 the same way `node server.js` does) — handy
 // for testing a server.js change without quitting the real app first.
-const PORT = parseInt(process.env.SLOPDADDY_PORT, 10) || 8123;
-// SLOPDADDY_DEBUG logs the real ffmpeg/whisper spawn args and per-request
+const PORT = parseInt(process.env.CAST_PORT, 10) || 8123;
+// CAST_DEBUG logs the real ffmpeg/whisper spawn args and per-request
 // status/timing — off by default so normal runs stay quiet.
-const DEBUG = !!process.env.SLOPDADDY_DEBUG;
+const DEBUG = !!process.env.CAST_DEBUG;
 const ROOT = path.join(__dirname, "web");
 const FONTS_DIR = path.join(ROOT, "vendor", "fonts");
 
@@ -79,7 +79,7 @@ const FONTS_DIR = path.join(ROOT, "vendor", "fonts");
 // Wiped on every server start so it can never grow unbounded across app
 // launches — within one running session (including across multiple batches)
 // it persists and keeps paying off.
-const BG_CACHE_DIR = path.join(os.tmpdir(), "slopdaddy-bg-cache");
+const BG_CACHE_DIR = path.join(os.tmpdir(), "cast-bg-cache");
 fs.rmSync(BG_CACHE_DIR, { recursive: true, force: true });
 fs.mkdirSync(BG_CACHE_DIR, { recursive: true });
 
@@ -131,7 +131,22 @@ const { CAPTION_FONTS } = require(path.join(ROOT, "lib", "caption-presets.js"));
 // First piece of secret material this app stores outside the browser's own
 // localStorage (where every API key already lives, unencrypted, today) —
 //0600 perms are a best-effort improvement on that, not OS-keychain-grade.
-const YT_STORE_PATH = path.join(os.homedir(), ".slopdaddy", "youtube-accounts.json");
+// One-time migration from the old "~/.slopdaddy" app-data directory to
+// "~/.cast" (Slopdaddy->CAST rebrand) — a single atomic directory rename
+// carries every file inside forward (youtube-accounts.json and anything
+// else ever stored here), so a returning user's connected YouTube accounts
+// survive the rebrand instead of silently requiring re-auth. Runs once, at
+// module load, before YT_STORE_PATH is ever read.
+(function migrateLegacyAppDataDir() {
+  const oldDir = path.join(os.homedir(), ".slopdaddy");
+  const newDir = path.join(os.homedir(), ".cast");
+  try {
+    if (!fs.existsSync(newDir) && fs.existsSync(oldDir)) {
+      fs.renameSync(oldDir, newDir);
+    }
+  } catch (e) { /* best-effort — a failed migration just means a fresh ~/.cast/ gets created below */ }
+})();
+const YT_STORE_PATH = path.join(os.homedir(), ".cast", "youtube-accounts.json");
 function loadYoutubeStore() {
   try {
     const raw = fs.readFileSync(YT_STORE_PATH, "utf8");
@@ -379,7 +394,7 @@ function stripTokens(account, store) {
   rest.channelThumbnail = fs.existsSync(cachedPath) ? `/youtube-account-thumbnail/${account.id}` : null;
   // Lets the client tell apart two connections to the same channel under
   // different projects (see pickAccountForUpload) in the account picker —
-  // "Slop Daddy Stories (Project 2)" instead of two identical-looking rows.
+  // "My Channel (Project 2)" instead of two identical-looking rows.
   if (store) {
     const client = store.oauthClients.find(c => c.id === account.oauthClientId);
     rest.oauthClientLabel = client ? client.label : null;
@@ -388,10 +403,10 @@ function stripTokens(account, store) {
 }
 
 function oauthCallbackPage(message, ok) {
-  return `<!doctype html><html><head><title>Slopdaddy</title></head><body style="font-family:sans-serif;text-align:center;padding-top:80px;">
+  return `<!doctype html><html><head><title>CAST</title></head><body style="font-family:sans-serif;text-align:center;padding-top:80px;">
   <h2>${ok ? "✓ Signed in" : "✗ Sign-in failed"}</h2>
   <p>${message}</p>
-  <p style="color:#888;">You can close this tab and go back to Slopdaddy.</p>
+  <p style="color:#888;">You can close this tab and go back to CAST.</p>
   </body></html>`;
 }
 
@@ -948,7 +963,7 @@ function parseProgressBlock(line, tick) {
 
 function runNativeRender(renderId, meta, bg, audio, music, titleCardImage, respond, respondFile) {
   [respond, respondFile] = onceAcrossAll(respond, respondFile);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-render-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cast-render-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   let args, expectedDurationSec, threads;
   try {
@@ -1038,7 +1053,7 @@ const WHISPER_MODELS = ["tiny.en", "base.en", "small.en"];
 
 function runNativeTranscribe(transcribeId, audio, model, respond) {
   [respond] = onceAcrossAll(respond);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-transcribe-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cast-transcribe-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   fs.writeFileSync(path.join(dir, "audio.wav"), audio);
 
@@ -1113,7 +1128,7 @@ const POCKET_TTS_LANGUAGES = ["english", "french", "german", "italian", "portugu
 
 function runNativePocketTts(text, language, respond) {
   [respond] = onceAcrossAll(respond);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-pockettts-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cast-pockettts-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   const outPath = path.join(dir, "out.wav");
   const args = ["pocket-tts", "generate", "--text", text, "--output-path", outPath, "--quiet"];
@@ -1165,7 +1180,7 @@ function kokoroLangForVoice(voice) {
 
 function runNativeKokoro(text, voice, speed, respond) {
   [respond] = onceAcrossAll(respond);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-kokoro-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cast-kokoro-"));
   const cleanup = () => { fs.rm(dir, { recursive: true, force: true }, () => {}); };
   const textPath = path.join(dir, "text.txt");
   const outPath = path.join(dir, "out.wav");
@@ -1981,7 +1996,7 @@ function handleRequest(req, res) {
           refreshToken: tokens.refresh_token || (existing && existing.refreshToken) || null,
           addedAt: existing ? existing.addedAt : Date.now(),
         };
-        if (!account.refreshToken) throw new Error("Google didn't return a refresh token — revoke Slopdaddy's access at https://myaccount.google.com/permissions and try signing in again.");
+        if (!account.refreshToken) throw new Error("Google didn't return a refresh token — revoke CAST's access at https://myaccount.google.com/permissions and try signing in again.");
         await downloadYoutubeChannelThumbnail(account.id, channel.channelThumbnail);
         if (existing) Object.assign(existing, account); else store.accounts.push(account);
         saveYoutubeStore(store);

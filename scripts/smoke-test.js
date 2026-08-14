@@ -5,7 +5,7 @@
 //
 // Usage:
 //   node scripts/smoke-test.js [--port 8123]
-//   SLOPDADDY_PORT=8199 node scripts/smoke-test.js
+//   CAST_PORT=8199 node scripts/smoke-test.js
 //
 // Exits 0 if every check passes (or gracefully skips when a backend isn't
 // available), non-zero if anything actually fails — usable as a quick
@@ -21,7 +21,7 @@ const { execFileSync } = require("child_process");
 const portArgIdx = process.argv.indexOf("--port");
 const PORT = portArgIdx !== -1
   ? parseInt(process.argv[portArgIdx + 1], 10)
-  : (parseInt(process.env.SLOPDADDY_PORT, 10) || 8123);
+  : (parseInt(process.env.CAST_PORT, 10) || 8123);
 const BASE = `http://localhost:${PORT}`;
 
 let passCount = 0;
@@ -134,7 +134,7 @@ async function main() {
     fail("GET /cache-info", e.message);
   }
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "slopdaddy-smoke-"));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cast-smoke-"));
   try {
     let mp4Bytes = null;
     try {

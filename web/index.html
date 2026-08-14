@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <script src="coi-serviceworker.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Slopdaddy</title>
+<title>CAST</title>
 <script>
 // Applied synchronously here (before <style> even paints) rather than from
 // app.js's init() — waiting until then would show a flash of the wrong
@@ -12,7 +12,11 @@
 // theme + "system" selected.
 (function () {
   try {
-    var raw = localStorage.getItem("slopdaddy_settings");
+    // Checks the old "slopdaddy_settings" key too — app.js's init() migrates
+    // it forward to "cast_settings" on first load post-rebrand, but this
+    // script runs before that migration, so a returning user's first load
+    // needs to find their theme under the OLD key one time.
+    var raw = localStorage.getItem("cast_settings") || localStorage.getItem("slopdaddy_settings");
     var theme = raw ? (JSON.parse(raw).theme || "dark") : "dark";
     if (theme === "system") {
       theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
@@ -72,10 +76,10 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
    render, not a generic system-font approximation of "Anton"/"Bebas Neue"
    (browsers don't ship those). Family names match CAPTION_FONTS'
    cssFamily in web/lib/caption-presets.js. */
-@font-face { font-family: "SlopdaddyDejaVu"; src: url("vendor/fonts/DejaVuSans.ttf") format("truetype"); }
-@font-face { font-family: "SlopdaddyAnton"; src: url("vendor/fonts/Anton-Regular.ttf") format("truetype"); }
-@font-face { font-family: "SlopdaddyBebas"; src: url("vendor/fonts/BebasNeue-Regular.ttf") format("truetype"); }
-@font-face { font-family: "SlopdaddyArchivoBlack"; src: url("vendor/fonts/ArchivoBlack-Regular.ttf") format("truetype"); }
+@font-face { font-family: "CastDejaVu"; src: url("vendor/fonts/DejaVuSans.ttf") format("truetype"); }
+@font-face { font-family: "CastAnton"; src: url("vendor/fonts/Anton-Regular.ttf") format("truetype"); }
+@font-face { font-family: "CastBebas"; src: url("vendor/fonts/BebasNeue-Regular.ttf") format("truetype"); }
+@font-face { font-family: "CastArchivoBlack"; src: url("vendor/fonts/ArchivoBlack-Regular.ttf") format("truetype"); }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -866,7 +870,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           <h3>YouTube — One-Time Setup</h3>
           <p style="font-size:0.72rem;color:var(--muted);margin-bottom:10px;">
             Google requires every app to register its own OAuth client before anyone can "Sign in with Google" through it —
-            there's no way around this step, and Slopdaddy can't do it on your behalf (a shared key baked into a public app
+            there's no way around this step, and CAST can't do it on your behalf (a shared key baked into a public app
             would mean everyone who uses it fights over the same tiny daily quota). It's four clicks, about 3 minutes total.
             Each step below opens the exact right page — you don't need to find anything yourself.
           </p>
