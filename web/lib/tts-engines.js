@@ -485,12 +485,18 @@ const TTS_ENGINES = {
   browserSpeech: BrowserSpeechEngine,
   pocketTts: PocketTtsEngine,
 };
-// Temporary — every engine but Kokoro is greyed out app-wide (see app.js's
-// ttsEngineOptionHtml()) while Kokoro's speed is the active focus. Nothing
-// about the engines themselves changed; re-enabling one later is just
-// removing its id here (or deleting this array entirely).
-const TTS_ENGINES_TEMP_DISABLED = ["piper", "openaiTts", "elevenlabs", "browserSpeech", "pocketTts", "kokoroNative"];
-const DEFAULT_TTS_ENGINE = "kokoro";
+// Temporary — every engine but Kokoro-native is greyed out app-wide (see
+// app.js's ttsEngineOptionHtml()). Browser Kokoro is parked here (not
+// deleted, not fixed) behind a real, confirmed bug: ORT-web's threaded
+// WASM build deadlocks when nested inside web/tts-worker.js (see
+// KokoroEngine's own comments in this file), forcing it to run single-
+// threaded and slow — native Kokoro (a Python subprocess via server.js,
+// unaffected by that browser-only bug) is the focus while that gets
+// sorted out. Nothing about any engine's implementation changed;
+// re-enabling one later is just removing its id here (or deleting this
+// array entirely).
+const TTS_ENGINES_TEMP_DISABLED = ["piper", "openaiTts", "elevenlabs", "browserSpeech", "pocketTts", "kokoro"];
+const DEFAULT_TTS_ENGINE = "kokoroNative";
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = { TTS_ENGINES, TTS_ENGINES_TEMP_DISABLED, DEFAULT_TTS_ENGINE, probeAudioDuration };

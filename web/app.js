@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 107;
+const VERSION = 108;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -591,13 +591,13 @@ async function applyLoadedSettings() {
     $("#storySystemPromptOverride").value = DEFAULT_STORY_SYSTEM_PROMPT;
   }
   // A disabled <option> still accepts a direct .value assignment (disabled
-  // only blocks picking it via the UI) — so an existing user with e.g.
-  // "piper" already saved from before TTS_ENGINES_TEMP_DISABLED existed
-  // would otherwise stay on a now-greyed-out engine after this restore.
-  // The quick-select's blank value already means "use settings engine",
-  // which now resolves through the corrected #ttsEngine below, so it just
-  // needs clearing, not a literal "kokoro".
-  if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngine").value)) $("#ttsEngine").value = "kokoro";
+  // only blocks picking it via the UI) — so an existing user with a
+  // previously-saved engine that's since been added to
+  // TTS_ENGINES_TEMP_DISABLED would otherwise stay on a now-greyed-out
+  // engine after this restore. The quick-select's blank value already
+  // means "use settings engine", which now resolves through the corrected
+  // #ttsEngine below, so it just needs clearing, not a literal engine id.
+  if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngine").value)) $("#ttsEngine").value = "kokoroNative";
   if (TTS_ENGINES_TEMP_DISABLED.includes($("#ttsEngineQuick").value)) $("#ttsEngineQuick").value = "";
   // loadSettings() above already ran populateModels() and restored `model`
   // once its options existed — do NOT call populateModels()/populateVoices()
