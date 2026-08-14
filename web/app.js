@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 114;
+const VERSION = 115;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -3400,6 +3400,24 @@ function renderResultCard(job, container, opts) {
 // all when the feature isn't usable (no server, or a server but no
 // connected channel yet) — a browser-only/GitHub-Pages build and a fresh
 // install both look exactly like they did before this feature existed.
+// A "done" job's card gets rendered into more than one container at once —
+// e.g. a batch run's onUpdate callback calls renderResultCard(j, grid) AND
+// renderResultCard(j, progressGrid) for the same job — each producing its
+// OWN separate .publish-section element (renderResultCard replaces
+// div.innerHTML per-container, keyed by data-job-id). maybeAutoPublish()
+// only fires once per job (guarded by pub._autoUploadAttempted) against
+// whichever container happened to trigger it first, so an async pipeline
+// (generate metadata -> generate thumbnail -> upload) that only ever
+// re-renders that ONE captured container leaves every other live container
+// for the same job stuck showing whatever it displayed at the moment the
+// pipeline started (typically "Generating title/description/thumbnail from
+// the story..." forever) even though the upload is actually proceeding
+// normally. Re-rendering every live container for the job on each state
+// change, instead of just the one closed-over reference, fixes that.
+function renderPublishSectionEverywhere(job) {
+  document.querySelectorAll(`.publish-section[data-job-id="${job.id}"]`).forEach((el) => renderPublishSection(job, el));
+}
+
 function renderPublishSection(job, container) {
   if (!container) return;
   if (!youtubeAvailable) { container.innerHTML = ""; return; }
@@ -3537,7 +3555,7 @@ async function generatePublishMetadata(job, container, forceRegenerate) {
   const pub = job.publish;
   const autoGenerate = $("#youtubeAutoGenerateMetadata") && $("#youtubeAutoGenerateMetadata").checked;
   pub._generating = true;
-  renderPublishSection(job, container);
+  renderPublishSectionEverywhere(job);
   if (!autoGenerate) {
     if (pub.title == null || forceRegenerate) pub.title = extractTitleFromStory(job.story) || "Untitled";
     if (pub.description == null || forceRegenerate) pub.description = "";
@@ -3555,7 +3573,7 @@ async function generatePublishMetadata(job, container, forceRegenerate) {
   }
   await generatePublishThumbnail(job, forceRegenerate);
   pub._generating = false;
-  renderPublishSection(job, container);
+  renderPublishSectionEverywhere(job);
 }
 
 // Only (re)renders a thumbnail when asked to — either there's none yet, or
@@ -3575,10 +3593,10 @@ async function generatePublishThumbnail(job, force) {
 async function regeneratePublishThumbnail(job, container) {
   const pub = job.publish;
   pub._generating = true;
-  renderPublishSection(job, container);
+  renderPublishSectionEverywhere(job);
   await generatePublishThumbnail(job, true);
   pub._generating = false;
-  renderPublishSection(job, container);
+  renderPublishSectionEverywhere(job);
 }
 
 function setPublishCustomThumbnail(job, container, file) {
@@ -3586,7 +3604,7 @@ function setPublishCustomThumbnail(job, container, file) {
   if (pub.thumbnailUrl) URL.revokeObjectURL(pub.thumbnailUrl);
   pub.thumbnailBlob = file;
   pub.thumbnailUrl = URL.createObjectURL(file);
-  renderPublishSection(job, container);
+  renderPublishSectionEverywhere(job);
 }
 
 // {{placeholder}} substitution for the Settings → Publish title/description
@@ -3749,7 +3767,7 @@ async function uploadJobToYoutube(job, container) {
   if (!pub.title || !pub.title.trim()) { alert("Enter a title first."); return; }
   pub.status = "uploading";
   pub.uploadProgressPct = 0;
-  renderPublishSection(job, container);
+  renderPublishSectionEverywhere(job);
 
   const id = crypto.randomUUID();
   let es = null;
@@ -3759,7 +3777,7 @@ async function uploadJobToYoutube(job, container) {
       try {
         const tick = JSON.parse(e.data);
         if (typeof tick.pct === "number") pub.uploadProgressPct = tick.pct;
-        renderPublishSection(job, container);
+        renderPublishSectionEverywhere(job);
       } catch (err) { /* ignore malformed tick */ }
     };
 
@@ -3809,7 +3827,7 @@ async function uploadJobToYoutube(job, container) {
     pub.error = e && e.message ? e.message : String(e);
   } finally {
     if (es) es.close();
-    renderPublishSection(job, container);
+    renderPublishSectionEverywhere(job);
   }
 }
 
