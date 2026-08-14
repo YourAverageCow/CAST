@@ -165,6 +165,40 @@ test("buildDrawtextFilterChain: no box option emitted when box is falsy", () => 
   assert.doesNotMatch(filterComplex, /box=/);
 });
 
+test("buildDrawtextFilterChain: boxBevel adds two offset box-only drawtext layers before the real box", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({
+    w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues,
+    box: true, boxColor: "#000000", boxAlpha: 0.5, boxBorderW: 16, boxBevel: 4,
+  });
+  // Dark (shadow) layer offset +4, light (highlight) layer offset -4, both
+  // ahead of the real (unoffset) box in the filter chain.
+  const darkIdx = filterComplex.indexOf("boxcolor=black@0.4");
+  const lightIdx = filterComplex.indexOf("boxcolor=white@0.35");
+  const realIdx = filterComplex.indexOf("boxcolor=#000000@0.5");
+  assert.ok(darkIdx >= 0 && lightIdx >= 0 && realIdx >= 0);
+  assert.ok(darkIdx < realIdx && lightIdx < realIdx);
+  assert.match(filterComplex, /x=\(\(w-text_w\)\/2\)\+4/);
+  assert.match(filterComplex, /x=\(\(w-text_w\)\/2\)-4/);
+});
+
+test("buildDrawtextFilterChain: no bevel layers when boxBevel is 0/falsy, even with box on", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({
+    w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues,
+    box: true, boxColor: "#000000", boxAlpha: 0.5, boxBorderW: 16,
+  });
+  assert.doesNotMatch(filterComplex, /boxcolor=black@0\.4|boxcolor=white@0\.35/);
+});
+
+test("buildDrawtextFilterChain: boxBevel is a no-op when box is off", () => {
+  const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
+  const { filterComplex } = buildDrawtextFilterChain({
+    w: 1080, h: 1920, bgW: 1080, bgH: 1920, ...BASE_STYLE, cues, boxBevel: 4,
+  });
+  assert.doesNotMatch(filterComplex, /boxcolor=black@0\.4|boxcolor=white@0\.35/);
+});
+
 test("buildDrawtextFilterChain: shadow adds shadowx/shadowy/shadowcolor", () => {
   const cues = buildCaptionCues([{ start: 0, end: 1, text: "hi" }]);
   const { filterComplex } = buildDrawtextFilterChain({

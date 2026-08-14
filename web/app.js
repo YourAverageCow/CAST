@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 104;
+const VERSION = 105;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -524,7 +524,7 @@ const SETTINGS_FIELDS = [
   "resW", "resH", "fps", "encodingQuality",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset", "captionUppercase", "highlightColor",
-  "captionBox", "boxColor", "boxAlpha", "boxBorderW",
+  "captionBox", "boxColor", "boxAlpha", "boxBorderW", "boxBevel",
   "captionShadow", "shadowColor", "shadowX", "shadowY",
   "captionEntrance",
   "channelName",
@@ -1008,7 +1008,7 @@ async function init() {
   // Keep the caption preview live when style fields are edited by hand
   for (const id of [
     "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth", "resW",
-    "captionUppercase", "highlightColor", "captionBox", "boxColor", "boxAlpha", "boxBorderW",
+    "captionUppercase", "highlightColor", "captionBox", "boxColor", "boxAlpha", "boxBorderW", "boxBevel",
     "captionShadow", "shadowColor", "shadowX", "shadowY", "captionEntrance",
   ]) {
     const el = document.getElementById(id);
@@ -1692,10 +1692,17 @@ function updateCaptionStyle() {
     el.style.backgroundColor = `rgba(${rgb.r},${rgb.g},${rgb.b},${isFinite(alpha) ? alpha : 0.5})`;
     el.style.padding = Math.max(2, ((parseInt($("#boxBorderW").value) || 16) * scale) / 2) + "px " + (fontSize * 0.3) + "px";
     el.style.borderRadius = "2px";
+    // Approximates the render's two-offset-box bevel trick with CSS inset
+    // shadows — light top-left, dark bottom-right, same raised-edge read.
+    const bevel = (parseInt($("#boxBevel").value) || 0) * scale;
+    el.style.boxShadow = bevel
+      ? `inset ${bevel}px ${bevel}px 0 rgba(255,255,255,0.35), inset -${bevel}px -${bevel}px 0 rgba(0,0,0,0.4)`
+      : "none";
   } else {
     el.style.backgroundColor = "transparent";
     el.style.padding = "8px 12px";
     el.style.borderRadius = "6px";
+    el.style.boxShadow = "none";
   }
   if ($("#captionShadow").checked) {
     const shC = $("#shadowColor").value;
@@ -2604,6 +2611,7 @@ function buildCaptionStyle(settings, captionFont, grouping) {
     boxColor: settings.boxColor || "black",
     boxAlpha: numOr(settings.boxAlpha, parseFloat, 0.5),
     boxBorderW: numOr(settings.boxBorderW, parseInt, 16),
+    boxBevel: numOr(settings.boxBevel, parseInt, 0),
     shadow: !!settings.captionShadow,
     shadowColor: settings.shadowColor || "black",
     shadowX: numOr(settings.shadowX, parseInt, 2),
@@ -2634,6 +2642,7 @@ function getGlobalSettings() {
     boxColor: $("#boxColor").value || "black",
     boxAlpha: numOr($("#boxAlpha").value, parseFloat, 0.5),
     boxBorderW: numOr($("#boxBorderW").value, parseInt, 16),
+    boxBevel: numOr($("#boxBevel").value, parseInt, 0),
     captionShadow: $("#captionShadow").checked,
     shadowColor: $("#shadowColor").value || "black",
     shadowX: numOr($("#shadowX").value, parseInt, 2),
@@ -3137,7 +3146,7 @@ function renderPublishSection(job, container) {
     <div class="publish-form" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:6px;">
       <label>Channel</label>
       <select data-field="accountId">
-        ${youtubeAccountsCache.map(a => `<option value="${a.id}" ${a.id === pub.accountId ? "selected" : ""}>${escapeHtml(a.channelTitle)}</option>`).join("")}
+        ${youtubeAccountsCache.map(a => `<option value="${a.id}" ${a.id === pub.accountId ? "selected" : ""}>${escapeHtml(youtubeAccountLabel(a))}</option>`).join("")}
       </select>
       <label style="margin-top:6px;">Thumbnail</label>
       <div style="display:flex;gap:8px;align-items:flex-start;">
@@ -4300,6 +4309,17 @@ async function removeYoutubeOauthClient(id) {
   }
 }
 
+// The same real channel connected under multiple Google Cloud projects (for
+// the multi-project quota auto-switch, see pickAccountForUpload in
+// server.js) produces multiple separate account records with an IDENTICAL
+// channelTitle — every picker that lists accounts needs this label, not just
+// channelTitle alone, or those connections are visually indistinguishable
+// and a user has no way to tell there even ARE multiple, let alone pick
+// among them.
+function youtubeAccountLabel(a) {
+  return a.channelTitle + (a.oauthClientLabel ? ` (${a.oauthClientLabel})` : "");
+}
+
 function renderYoutubeAccountsList(accounts) {
   const list = $("#youtubeAccountsList");
   if (!accounts.length) {
@@ -4396,7 +4416,7 @@ function refreshYoutubeAutoUploadAccountSelect() {
     if (stored.youtubeAutoUploadAccountId) saved = stored.youtubeAutoUploadAccountId;
   } catch (e) { /* keep sel.value fallback */ }
   sel.innerHTML = `<option value="">First connected channel</option>` +
-    youtubeAccountsCache.map(a => `<option value="${a.id}">${escapeHtml(a.channelTitle)}</option>`).join("");
+    youtubeAccountsCache.map(a => `<option value="${a.id}">${escapeHtml(youtubeAccountLabel(a))}</option>`).join("");
   if (youtubeAccountsCache.some(a => a.id === saved)) sel.value = saved;
 }
 
@@ -4414,7 +4434,7 @@ function refreshChannelBrandingSyncAccountSelect() {
     if (stored.channelBrandingSyncAccountId) saved = stored.channelBrandingSyncAccountId;
   } catch (e) { /* keep sel.value fallback */ }
   sel.innerHTML = youtubeAccountsCache.length
-    ? youtubeAccountsCache.map(a => `<option value="${a.id}">${escapeHtml(a.channelTitle)}</option>`).join("")
+    ? youtubeAccountsCache.map(a => `<option value="${a.id}">${escapeHtml(youtubeAccountLabel(a))}</option>`).join("")
     : `<option value="">No channel connected — connect one in Settings → Publish</option>`;
   if (youtubeAccountsCache.some(a => a.id === saved)) sel.value = saved;
   if ($("#channelBrandingMode") && $("#channelBrandingMode").value === "sync") applyChannelBrandingSync();

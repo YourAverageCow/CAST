@@ -19,7 +19,7 @@ const JOB_OVERRIDE_FIELDS = [
   "voice", "resW", "resH", "fps",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "captionPreset", "captionUppercase", "highlightColor",
-  "captionBox", "boxColor", "boxAlpha", "boxBorderW",
+  "captionBox", "boxColor", "boxAlpha", "boxBorderW", "boxBevel",
   "captionShadow", "shadowColor", "shadowX", "shadowY",
   "captionEntrance",
   "ttsEngine",

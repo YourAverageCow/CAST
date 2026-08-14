@@ -854,6 +854,7 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     boxColor: safeColor(style.boxColor, "black"),
     boxAlpha: numOr(style.boxAlpha, parseFloat, 0.5),
     boxBorderW: numOr(style.boxBorderW, parseInt, 16),
+    boxBevel: Math.max(0, Math.min(20, numOr(style.boxBevel, parseInt, 0))),
     shadow: !!style.shadow,
     shadowColor: safeColor(style.shadowColor, "black"),
     shadowX: numOr(style.shadowX, parseInt, 2),

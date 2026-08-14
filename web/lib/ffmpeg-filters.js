@@ -93,6 +93,27 @@ function boxShadowOptions({ box, boxColor, boxAlpha, boxBorderW, shadow, shadowC
   return opts;
 }
 
+// Fakes a raised/embossed edge on the background box — drawtext's own `box`
+// option is a flat rectangle with no bevel support, so this draws two extra
+// boxes (same textfile, so they auto-size to match the real box exactly;
+// fully transparent text) behind the real one: a dark copy offset toward
+// the bottom-right and a light copy offset toward the top-left. Since the
+// real (unoffset) box is drawn on top and fully covers the overlap, only a
+// `bevelPx`-wide sliver of each survives along two opposite edges — the
+// classic raised-button illusion. Returns [] when bevelPx is falsy/0 so
+// callers can unconditionally splice this into their stage list.
+// `xExpr`/`yExpr` must be the exact same position expressions the real
+// box's drawtext instance uses, so the offset boxes track it (including
+// karaoke's per-word xOffset).
+function buildBevelStages({ fontFile, fontSize, boxBorderW, bevelPx, textfile, xExpr, yExpr, enable }) {
+  if (!bevelPx) return [];
+  const common = `fontfile=fonts/${fontFile}:textfile=${textfile}:fontsize=${fontSize}:box=1:boxborderw=${boxBorderW}:enable='${enable}'`;
+  return [
+    `drawtext=${common}:fontcolor=black@0:boxcolor=black@0.4:x=(${xExpr})+${bevelPx}:y=(${yExpr})+${bevelPx}`,
+    `drawtext=${common}:fontcolor=white@0:boxcolor=white@0.35:x=(${xExpr})-${bevelPx}:y=(${yExpr})-${bevelPx}`,
+  ];
+}
+
 // One drawtext filter per cue (two per word in karaoke mode — see below),
 // gated by enable='between(t,start,end)' so it only draws while the
 // playhead is inside that window — outside it, drawtext no-ops and passes
@@ -111,7 +132,7 @@ function boxShadowOptions({ box, boxColor, boxAlpha, boxBorderW, shadow, shadowC
 // of bug.
 function buildDrawtextFilterChain({
   w, h, bgW, bgH, fontFile, fontSize, textColor, strokeColor, strokeWidth, positionY,
-  highlightColor, box, boxColor, boxAlpha, boxBorderW,
+  highlightColor, box, boxColor, boxAlpha, boxBorderW, boxBevel,
   shadow, shadowColor, shadowX, shadowY, entrance,
   grouping, cues,
 }) {
@@ -120,6 +141,7 @@ function buildDrawtextFilterChain({
   const stages = [];
   if (needsScale) stages.push(`scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`);
   const boxShadow = boxShadowOptions({ box, boxColor, boxAlpha, boxBorderW, shadow, shadowColor, shadowX, shadowY });
+  const bevelPx = box ? (boxBevel || 0) : 0;
 
   if (grouping === "karaoke") {
     for (const cue of cues) {
@@ -133,6 +155,13 @@ function buildDrawtextFilterChain({
       const y = `h*${positionY}-text_h/2`;
       const fontSizeExpr = entranceFontSizeExpr(entrance, cue.groupStart, fontSize);
       const alphaExpr = entranceAlphaExpr(entrance, cue.groupStart);
+      // Bevel edges sit behind the base layer only — it's the one visible
+      // for the group's whole on-screen window, so that's where the box
+      // (and its beveled edge) reads as "always there" rather than
+      // flickering in and out per word.
+      stages.push(...buildBevelStages({
+        fontFile, fontSize, boxBorderW, bevelPx, textfile: cue.file, xExpr: x, yExpr: y, enable: groupBetween,
+      }));
       // Base layer: visible for the whole group's on-screen window, in the
       // regular text color.
       stages.push(
@@ -154,10 +183,15 @@ function buildDrawtextFilterChain({
       const between = `between(t\\,${cue.start.toFixed(3)}\\,${cue.end.toFixed(3)})`;
       const fontSizeExpr = entranceFontSizeExpr(entrance, cue.start, fontSize);
       const alphaExpr = entranceAlphaExpr(entrance, cue.start);
+      const x = `(w-text_w)/2`;
+      const y = `h*${positionY}-text_h/2`;
+      stages.push(...buildBevelStages({
+        fontFile, fontSize, boxBorderW, bevelPx, textfile: cue.file, xExpr: x, yExpr: y, enable: between,
+      }));
       stages.push(
         `drawtext=fontfile=fonts/${fontFile}:textfile=${cue.file}:fontsize='${fontSizeExpr}':alpha='${alphaExpr}'` +
         `:fontcolor=${textColor}:borderw=${strokeWidth}:bordercolor=${strokeColor}${boxShadow}` +
-        `:x=(w-text_w)/2:y=h*${positionY}-text_h/2:enable='${between}'`
+        `:x=${x}:y=${y}:enable='${between}'`
       );
     }
   }
@@ -250,6 +284,6 @@ function buildTitleCardOverlay({ videoFilterComplex, videoOutLabel, w, h, titleC
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
-    buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
+    buildBevelStages, buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
   };
 }

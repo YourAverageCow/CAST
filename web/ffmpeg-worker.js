@@ -122,6 +122,7 @@ function buildCaptionFilter(subs, karaokeGroups, style, w, h, bgW, bgH) {
     box: !!style.box, boxColor: safeColor(style.boxColor, "black"),
     boxAlpha: numOr(style.boxAlpha, parseFloat, 0.5),
     boxBorderW: numOr(style.boxBorderW, parseInt, 16),
+    boxBevel: Math.max(0, Math.min(20, numOr(style.boxBevel, parseInt, 0))),
     shadow: !!style.shadow, shadowColor: safeColor(style.shadowColor, "black"),
     shadowX: numOr(style.shadowX, parseInt, 2), shadowY: numOr(style.shadowY, parseInt, 2),
     entrance: ["none", "fade", "pop"].includes(style.entrance) ? style.entrance : "none",

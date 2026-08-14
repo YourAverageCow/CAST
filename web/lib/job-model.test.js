@@ -6,7 +6,7 @@ const GLOBAL_SETTINGS = {
   voice: "en_US-ryan-medium", resW: 1080, resH: 1920, fps: 30, font: "dejavu",
   fontSize: 68, positionY: 0.55, textColor: "white", strokeColor: "black",
   strokeWidth: 3, captionPreset: "word", captionUppercase: false, highlightColor: "yellow",
-  captionBox: false, boxColor: "black", boxAlpha: 0.5, boxBorderW: 16,
+  captionBox: false, boxColor: "black", boxAlpha: 0.5, boxBorderW: 16, boxBevel: 0,
   captionShadow: false, shadowColor: "black", shadowX: 2, shadowY: 2,
   captionEntrance: "none",
   ttsEngine: "piper",

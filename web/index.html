@@ -697,6 +697,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             </div>
             <div><label>Box Opacity</label><input type="range" id="boxAlpha" min="0" max="1" step="0.05" value="0.5"></div>
             <div><label>Box Padding</label><input type="number" id="boxBorderW" value="16" min="0" max="60"></div>
+            <div><label>Box Bevel</label><input type="range" id="boxBevel" min="0" max="20" step="1" value="0"></div>
           </div>
 
           <label style="display:flex;align-items:center;gap:6px;margin-top:12px;">
@@ -1150,8 +1151,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <option value="same">Same video for all</option>
           </select>
           <div class="pill-group">
-            <label class="pill-option"><input type="radio" name="bulkVideoSource" value="none" checked><span>Leave blank</span></label>
-            <label class="pill-option"><input type="radio" name="bulkVideoSource" value="random"><span>Random</span></label>
+            <label class="pill-option"><input type="radio" name="bulkVideoSource" value="none"><span>Leave blank</span></label>
+            <label class="pill-option"><input type="radio" name="bulkVideoSource" value="random" checked><span>Random</span></label>
             <label class="pill-option"><input type="radio" name="bulkVideoSource" value="manual"><span>Choose each</span></label>
           </div>
           <button class="accent bulk-choose-btn" id="bulkVideoChooseBtn" style="display:none;" onclick="openBulkVideoPicker()">Choose Videos</button>
@@ -1179,8 +1180,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         <div class="bulk-card">
           <h3><span class="step-num">4</span> Background music</h3>
           <div class="pill-group">
-            <label class="pill-option"><input type="radio" name="bulkMusicSource" value="none" checked><span>No music</span></label>
-            <label class="pill-option"><input type="radio" name="bulkMusicSource" value="random"><span>Random</span></label>
+            <label class="pill-option"><input type="radio" name="bulkMusicSource" value="none"><span>No music</span></label>
+            <label class="pill-option"><input type="radio" name="bulkMusicSource" value="random" checked><span>Random</span></label>
             <label class="pill-option"><input type="radio" name="bulkMusicSource" value="manual"><span>Choose each</span></label>
           </div>
           <button class="accent bulk-choose-btn" id="bulkMusicChooseBtn" style="display:none;" onclick="openBulkMusicPicker()">Choose Music</button>
