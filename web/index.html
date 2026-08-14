@@ -966,6 +966,28 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
       <div class="settings-tab-panel" data-tab="schedule">
         <div class="settings-section">
+          <h3>Automatic Scheduling</h3>
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="scheduleAutoEnabled" style="width:auto;"> Automatically schedule uploads
+          </label>
+          <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px;">
+            Spaces out each auto-uploaded video's YouTube release time instead of publishing them all at once. Turning this on also enables "Automatically publish every finished video" in Settings → Publish if it isn't already — scheduling only changes *when* an auto-uploaded video goes live, not whether it gets uploaded.
+          </p>
+          <div class="caption-grid">
+            <div><label>Start date &amp; time</label><input type="datetime-local" id="scheduleStartAt"></div>
+            <div>
+              <label>Spacing</label>
+              <div style="display:flex;gap:6px;">
+                <input type="number" id="scheduleIntervalValue" value="24" min="1" style="flex:1;">
+                <select id="scheduleIntervalUnit" style="flex:1;">
+                  <option value="hours">Hours apart</option>
+                  <option value="days">Days apart</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="settings-section">
           <h3>Scheduled Uploads</h3>
           <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">
             Every video from this session with a YouTube publish time set, in one place — from single exports and every batch.

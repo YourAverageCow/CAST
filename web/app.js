@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 112;
+const VERSION = 113;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -539,6 +539,7 @@ const SETTINGS_FIELDS = [
   "youtubeAutoGenerateMetadata", "youtubeTitleTemplate", "youtubeDescriptionTemplate",
   "youtubeDefaultPrivacy", "youtubeDefaultCategoryId",
   "youtubeAutoUpload", "youtubeAutoUploadAccountId",
+  "scheduleAutoEnabled", "scheduleStartAt", "scheduleIntervalValue", "scheduleIntervalUnit",
   "channelBrandingMode", "channelBrandingSyncAccountId",
 ];
 function saveSettings() {
@@ -1009,6 +1010,18 @@ async function init() {
     $("#videoSpeedValue").textContent = parseFloat($("#videoSpeed").value).toFixed(2) + "x";
   });
   $("#captionShadow").addEventListener("change", updateCaptionBoxShadowRows);
+  // Scheduling is a MODE of auto-upload, not an independent trigger — turning
+  // it on with auto-upload still off would silently do nothing (nothing
+  // would ever call uploadJobToYoutube), so this keeps #youtubeAutoUpload as
+  // the single source of truth for "is anything being auto-uploaded at all"
+  // by flipping it on too, dispatching "change" so it saves and any of its
+  // own listeners still fire.
+  $("#scheduleAutoEnabled").addEventListener("change", () => {
+    if ($("#scheduleAutoEnabled").checked && $("#youtubeAutoUpload") && !$("#youtubeAutoUpload").checked) {
+      $("#youtubeAutoUpload").checked = true;
+      $("#youtubeAutoUpload").dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
   // Per-engine TTS sliders (Settings -> Voice) — same "live value label next
   // to the slider" pattern as renderConcurrency/transcribeConcurrency above.
   for (const id of [
@@ -3569,6 +3582,29 @@ async function uploadJobToYoutube(job, container) {
   }
 }
 
+// Assigns increasing release-time slots (Settings -> Schedule's "Automatic
+// Scheduling") to auto-uploaded videos instead of leaving pub.scheduledAt
+// null (immediate publish). scheduleSlotCounter persists for the whole
+// session — not reset per batch — so a later "Generate All" run keeps
+// extending forward from wherever the last batch's slots left off, rather
+// than restarting at the configured start time and colliding with
+// still-pending earlier slots.
+let scheduleSlotCounter = 0;
+function nextScheduledSlot() {
+  const startInput = $("#scheduleStartAt") ? $("#scheduleStartAt").value : "";
+  const configuredStart = startInput ? new Date(startInput).getTime() : (Date.now() + 60 * 60 * 1000);
+  // Never schedule in the past (an empty/already-elapsed start time) —
+  // YouTube would reject a publishAt behind "now" — clamp with a small
+  // safety buffer instead of letting the very next upload fail outright.
+  const baseStart = Math.max(configuredStart, Date.now() + 5 * 60 * 1000);
+  const intervalValue = parseFloat($("#scheduleIntervalValue").value) || 24;
+  const intervalUnit = $("#scheduleIntervalUnit") ? $("#scheduleIntervalUnit").value : "hours";
+  const intervalMs = (intervalUnit === "days" ? 86400000 : 3600000) * intervalValue;
+  const slotMs = baseStart + scheduleSlotCounter * intervalMs;
+  scheduleSlotCounter++;
+  return new Date(slotMs).toISOString();
+}
+
 // Fires once per job, right after its card first renders as "done" — the
 // same generate-then-upload sequence the manual "Publish to YouTube" button
 // kicks off, just started automatically instead of waiting for a click.
@@ -3594,6 +3630,11 @@ function maybeAutoPublish(job, container) {
   const defaultCategory = $("#youtubeDefaultCategoryId");
   if (defaultPrivacy && defaultPrivacy.value) pub.privacyStatus = defaultPrivacy.value;
   if (defaultCategory && defaultCategory.value) pub.categoryId = defaultCategory.value;
+  // Never overwrites a schedule already set manually via the per-job publish
+  // panel — this only fills in a slot when nothing was chosen at all.
+  if ($("#scheduleAutoEnabled") && $("#scheduleAutoEnabled").checked && !pub.scheduledAt) {
+    pub.scheduledAt = nextScheduledSlot();
+  }
   (async () => {
     await generatePublishMetadata(job, container, false);
     await uploadJobToYoutube(job, container);
@@ -3627,6 +3668,13 @@ async function publishAllBatch() {
     const defaultCategory = $("#youtubeDefaultCategoryId");
     if (defaultPrivacy && defaultPrivacy.value) pub.privacyStatus = defaultPrivacy.value;
     if (defaultCategory && defaultCategory.value) pub.categoryId = defaultCategory.value;
+    // Assigned synchronously here (before any await below), so slots land
+    // in `eligible`'s stable array order even though the uploads themselves
+    // then run concurrently — never overwrites an already-manually-set
+    // per-job schedule.
+    if ($("#scheduleAutoEnabled") && $("#scheduleAutoEnabled").checked && !pub.scheduledAt) {
+      pub.scheduledAt = nextScheduledSlot();
+    }
     return generatePublishMetadata(job, container, false).then(() => uploadJobToYoutube(job, container));
   }));
   if (btn) { btn.textContent = "Publish All to YouTube"; btn.disabled = false; }
