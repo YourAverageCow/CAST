@@ -1155,7 +1155,17 @@ function runNativeKokoro(text, voice, speed, respond) {
   const textPath = path.join(dir, "text.txt");
   const outPath = path.join(dir, "out.wav");
   fs.writeFileSync(textPath, text, "utf8");
-  const scriptPath = path.join(__dirname, "scripts", "kokoro_native.py");
+  // In a packaged Electron build, __dirname resolves inside app.asar — a
+  // virtual archive Node's own fs can read transparently, but external
+  // processes (uvx/python3, spawned below) can't; the OS just sees
+  // app.asar as a regular file and "can't open" a path pretending to be a
+  // directory inside it (confirmed live: "python: can't open file
+  // '.../app.asar/scripts/kokoro_native.py': [Errno 20] Not a directory").
+  // electron-builder's asarUnpack (see package.json) physically extracts
+  // scripts/*.py next to the archive under app.asar.unpacked/ — this
+  // redirect is a no-op in dev mode, where __dirname never contains
+  // "app.asar" at all.
+  const scriptPath = path.join(__dirname, "scripts", "kokoro_native.py").replace("app.asar", "app.asar.unpacked");
   const args = [
     ...KOKORO_NATIVE_WITH_ARGS, "python3", scriptPath,
     "--text-file", textPath, "--voice", voice, "--lang", kokoroLangForVoice(voice),
