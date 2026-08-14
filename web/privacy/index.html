@@ -48,10 +48,10 @@
   <p>If you configure a cloud story-generation provider (OpenAI, Anthropic, DeepSeek, Groq, OpenRouter, Mistral, Google Gemini) or a cloud voice provider (OpenAI TTS, ElevenLabs), your story text and/or generated audio is sent directly from your own browser to that provider, using the API key you supplied. This happens under that provider's own privacy policy and terms — CAST does not see, log, or proxy this traffic. Using a local model (Ollama) or the built-in in-browser TTS engines avoids sending any content to a third party at all.</p>
 
   <h2>YouTube API access</h2>
-  <p>CAST requests the following Google OAuth scopes, only when you explicitly choose to connect a YouTube channel:</p>
+  <p>CAST requests the following Google OAuth scopes, only when you explicitly choose to connect a YouTube channel, and calls only these three YouTube Data API methods — nothing else:</p>
   <ul>
-    <li><code>youtube.upload</code> — to publish videos you generate to your own connected channel, only when you click "Upload" or enable auto-publish.</li>
-    <li><code>youtube.readonly</code> — to display your connected channel's name and existing videos in the app.</li>
+    <li><code>youtube.upload</code> — used for <code>videos.insert</code> (publishing a video you generate to your own connected channel, only when you click "Upload" or enable auto-publish) and <code>thumbnails.set</code> (setting a generated or custom thumbnail on that upload).</li>
+    <li><code>youtube.readonly</code> — used for <code>channels.list</code> (reading your connected channel's own name, so the app can show which channel you're uploading to).</li>
   </ul>
   <p>CAST's use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements. Your YouTube data is used solely to provide CAST's publishing feature to you and is never sold, shared with third parties, or used for advertising. Google's own handling of your account data is governed separately by the <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google Privacy Policy</a>.</p>
 
