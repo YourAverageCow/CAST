@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 117;
+const VERSION = 118;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -749,6 +749,7 @@ const SETTINGS_FIELDS = [
   "youtubeAutoUpload", "youtubeAutoUploadAccountId",
   "scheduleAutoEnabled", "scheduleStartAt", "scheduleIntervalValue", "scheduleIntervalUnit",
   "channelBrandingMode", "channelBrandingSyncAccountId",
+  "analyticsEnabled",
 ];
 function saveSettings() {
   try {
@@ -1125,6 +1126,30 @@ async function probeYoutubeCapability() {
   }
 }
 
+// ---------- Anonymous usage counters (opt-out) ----------
+// Reports one of three known event names to a small Cloudflare Worker that
+// does nothing but increment a global counter per event — no per-user ID,
+// no IP logging, no request body beyond the event name itself, so there is
+// no way to attribute an event to a specific person, install, or session.
+// See /telemetry/worker.js in the repo for the exact (short) server-side
+// code. Gated by #analyticsEnabled (Settings → Advanced, on by default —
+// see the privacy policy for the disclosure) and fails completely silently:
+// a network error, an ad-blocker, or an unset endpoint must never surface
+// to the user or affect app behavior in any way.
+const TELEMETRY_ENDPOINT = ""; // set once telemetry/worker.js is deployed — see telemetry/README.md
+function reportEvent(eventName) {
+  if (!TELEMETRY_ENDPOINT) return;
+  if ($("#analyticsEnabled") && !$("#analyticsEnabled").checked) return;
+  try {
+    fetch(TELEMETRY_ENDPOINT + "/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event: eventName }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (e) { /* never let a reporting failure affect the app */ }
+}
+
 // One-time migration from the old "Slopdaddy" localStorage key prefix to
 // "cast_" — copies forward without deleting the old key, so a botched
 // migration (or running an old build again) can never actually lose data,
@@ -1196,6 +1221,7 @@ async function init() {
   buildFontSelect();
   buildCaptionPresetButtons();
   const savedData = await applyLoadedSettings();
+  reportEvent("app_open"); // after settings load, so #analyticsEnabled's real saved value gates this correctly
   buildPresetSelects();
   // Save on any settings change. A <select> reliably fires "change" (and,
   // in every browser this app targets, "input" too) — registering both
@@ -3395,6 +3421,7 @@ async function runJob(job, globalSettings, onUpdate, isCancelled) {
     if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
     job.resultBlob = blob;
     update({ status: "done", progressPct: 100, progressLabel: "Done", resultUrl: URL.createObjectURL(blob) });
+    reportEvent("video_generated");
   } catch (e) {
     if (e instanceof JobCancelledError) {
       update({ status: "cancelled", error: null, progressLabel: "Cancelled" });
@@ -3883,6 +3910,7 @@ async function uploadJobToYoutube(job, container) {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || "Upload failed.");
     pub.status = data.status === "scheduled" ? "scheduled" : "uploaded";
+    reportEvent("video_published");
     pub.videoId = data.videoId;
     pub.uploadProgressPct = 100;
     // The server may have silently switched to a different Google Cloud

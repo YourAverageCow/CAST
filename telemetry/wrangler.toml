@@ -1,0 +1,10 @@
+name = "cast-telemetry"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+kv_namespaces = [
+  { binding = "COUNTERS", id = "REPLACE_WITH_KV_NAMESPACE_ID" }
+]
+
+# After first deploy, set the /stats read key:
+#   wrangler secret put STATS_KEY
