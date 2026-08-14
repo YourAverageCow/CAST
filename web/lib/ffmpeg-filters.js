@@ -281,9 +281,30 @@ function buildTitleCardOverlay({ videoFilterComplex, videoOutLabel, w, h, titleC
   return { filterComplex: `${relabeled};${scaleCard};${overlay}`, outLabel: "vout" };
 }
 
+// Speeds up (or slows down) the whole composite — video via setpts (PTS
+// divided by speed: smaller/faster-advancing timestamps play back faster),
+// audio via atempo (its own direct tempo-change factor, pitch-corrected,
+// not just a naive resample) — applied as the LAST step of each chain, after
+// captions/title-card overlay and after music mixing. Because it's the very
+// last video/audio step, every upstream `enable='between(t,...)'` caption
+// gate and the title-card's own on-screen window are evaluated against the
+// original (pre-speed) timeline and need no rescaling themselves — the
+// entire already-composited result just gets uniformly compressed in time
+// at the end, video and audio by the same factor, so they stay in sync.
+// speed === 1 (or falsy) is a no-op passthrough, so callers can splice this
+// in unconditionally rather than branching. atempo's single-instance valid
+// range is 0.5–2.0, comfortably covering this app's expected ~1.0–1.5x.
+function applyPlaybackSpeed({ videoFilterComplex, videoOutLabel, audioFilterChain, audioOutLabel, speed }) {
+  if (!speed || speed === 1) return { videoFilterComplex, videoOutLabel, audioFilterChain, audioOutLabel };
+  const video = videoFilterComplex.replace(new RegExp(`\\[${videoOutLabel}\\]$`), "[prespeed]") +
+    `;[prespeed]setpts=PTS/${speed}[speedv]`;
+  const audio = `${audioFilterChain};[${audioOutLabel}]atempo=${speed}[speeda]`;
+  return { videoFilterComplex: video, videoOutLabel: "speedv", audioFilterChain: audio, audioOutLabel: "speeda" };
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
-    buildBevelStages, buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
+    buildBevelStages, buildAudioFilterChain, buildTitleCardOverlay, applyPlaybackSpeed, parseWavDurationSec,
   };
 }

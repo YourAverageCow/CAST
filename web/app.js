@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 109;
+const VERSION = 110;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -521,7 +521,7 @@ function onOllamaModelSelectChange() {
 const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "modelCustom", "customBaseUrl", "storyLength",
   "storySystemPromptOverride",
-  "resW", "resH", "fps", "encodingQuality",
+  "resW", "resH", "fps", "encodingQuality", "videoSpeed",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset", "captionUppercase", "highlightColor",
   "captionBox", "boxColor", "boxAlpha", "boxBorderW", "boxBevel",
@@ -1004,6 +1004,9 @@ async function init() {
   $("#reduceMotion").addEventListener("change", applyReduceMotion);
   $("#uiFontScale").addEventListener("input", applyUiFontScale);
   $("#captionBox").addEventListener("change", updateCaptionBoxShadowRows);
+  $("#videoSpeed").addEventListener("input", () => {
+    $("#videoSpeedValue").textContent = parseFloat($("#videoSpeed").value).toFixed(2) + "x";
+  });
   $("#captionShadow").addEventListener("change", updateCaptionBoxShadowRows);
   // Per-engine TTS sliders (Settings -> Voice) — same "live value label next
   // to the slider" pattern as renderConcurrency/transcribeConcurrency above.
@@ -2501,7 +2504,7 @@ async function renderVideoNatively(payload, onProgress) {
     const meta = {
       subs: payload.subs, karaokeGroups: payload.karaokeGroups, style: payload.style,
       w: payload.w, h: payload.h, fps: payload.fps, bgW: payload.bgW, bgH: payload.bgH,
-      musicVolume: payload.musicVolume, crf: payload.crf,
+      musicVolume: payload.musicVolume, crf: payload.crf, speed: payload.speed,
       hasMusic, hasTitleCard,
       titleCard: hasTitleCard
         ? { cardDurationSec: payload.titleCard.cardDurationSec, narrationDelaySec: payload.titleCard.narrationDelaySec }
@@ -2668,6 +2671,7 @@ function getGlobalSettings() {
     channelName: $("#channelName").value.trim() || "Anonymous",
     ttsEngine: getEngine(),
     encodingQuality: $("#encodingQuality").value || "balanced",
+    videoSpeed: Math.max(1, Math.min(1.5, numOr($("#videoSpeed").value, parseFloat, 1))),
   };
 }
 
@@ -3050,6 +3054,7 @@ async function runJob(job, globalSettings, onUpdate, isCancelled) {
       // would silently drop it if a future quality preset ever used it, the
       // same falsy-zero trap as the caption-style fields above.
       crf: CRF_BY_QUALITY[globalSettings.encodingQuality],
+      speed: globalSettings.videoSpeed,
     }, (data) => update(describeRenderProgress(data)));
 
     const blob = new Blob([outBytes], { type: "video/mp4" });

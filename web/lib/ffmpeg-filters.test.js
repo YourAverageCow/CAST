@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
-  buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
+  buildAudioFilterChain, buildTitleCardOverlay, applyPlaybackSpeed, parseWavDurationSec,
 } = require("./ffmpeg-filters.js");
 
 function makeWav(durationSec, sampleRate) {
@@ -320,4 +320,43 @@ test("parseWavDurationSec returns null (not a wildly wrong duration) when the da
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   dv.setUint32(40, 2_000_000_000, true); // overwrite the "data" chunk size field
   assert.equal(parseWavDurationSec(bytes), null);
+});
+
+test("applyPlaybackSpeed is a no-op passthrough when speed is 1 or falsy", () => {
+  const input = { videoFilterComplex: "[0:v]null[vout]", videoOutLabel: "vout", audioFilterChain: "[1:a]anull[narr]", audioOutLabel: "narr" };
+  assert.deepEqual(applyPlaybackSpeed({ ...input, speed: 1 }), input);
+  assert.deepEqual(applyPlaybackSpeed({ ...input, speed: 0 }), input);
+  assert.deepEqual(applyPlaybackSpeed({ ...input, speed: null }), input);
+});
+
+test("applyPlaybackSpeed appends setpts to video and atempo to audio as the final step, relabeling both outputs", () => {
+  const result = applyPlaybackSpeed({
+    videoFilterComplex: "[0:v]drawtext=...[capped];[capped][3:v]overlay=0:0[vout]",
+    videoOutLabel: "vout",
+    audioFilterChain: "[1:a]anull[narr];[narr][2:a]amix=inputs=2[aout]",
+    audioOutLabel: "aout",
+    speed: 1.2,
+  });
+  // Original chains are untouched up to their prior output label...
+  assert.match(result.videoFilterComplex, /\[capped\]\[3:v\]overlay=0:0\[prespeed\]/);
+  assert.match(result.audioFilterChain, /\[narr\]\[2:a\]amix=inputs=2\[aout\]/);
+  // ...and speed is the very last stage, off a fresh label.
+  assert.match(result.videoFilterComplex, /;\[prespeed\]setpts=PTS\/1\.2\[speedv\]$/);
+  assert.match(result.audioFilterChain, /;\[aout\]atempo=1\.2\[speeda\]$/);
+  assert.equal(result.videoOutLabel, "speedv");
+  assert.equal(result.audioOutLabel, "speeda");
+});
+
+test("applyPlaybackSpeed only relabels the trailing output pad, not an earlier filter that happens to share the label text", () => {
+  // Regression guard for the $ anchor in the replace regex — a naive global
+  // replace of "[vout]" could also mangle an unrelated intermediate label.
+  const result = applyPlaybackSpeed({
+    videoFilterComplex: "[0:v]drawtext=text=vout[capped];[capped]null[vout]",
+    videoOutLabel: "vout",
+    audioFilterChain: "[1:a]anull[narr]",
+    audioOutLabel: "narr",
+    speed: 1.1,
+  });
+  assert.match(result.videoFilterComplex, /drawtext=text=vout\[capped\]/); // untouched
+  assert.match(result.videoFilterComplex, /\[capped\]null\[prespeed\];\[prespeed\]setpts=PTS\/1\.1\[speedv\]$/);
 });

@@ -118,7 +118,7 @@ function writeAssetFile(dir, filename, bytes, hash, cached) {
 
 const {
   safeColor, buildCaptionCues, buildKaraokeCues, buildDrawtextFilterChain,
-  buildAudioFilterChain, buildTitleCardOverlay, parseWavDurationSec,
+  buildAudioFilterChain, buildTitleCardOverlay, applyPlaybackSpeed, parseWavDurationSec,
 } = require(path.join(ROOT, "lib", "ffmpeg-filters.js"));
 const { CAPTION_FONTS } = require(path.join(ROOT, "lib", "caption-presets.js"));
 
@@ -876,9 +876,17 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     videoFC = overlay.filterComplex;
     videoOutLabel = overlay.outLabel;
   }
-  const audioChain = buildAudioFilterChain({
+  let audioChain = buildAudioFilterChain({
     narrationInputIndex: 1, musicInputIndex, musicVolume: meta.musicVolume, delaySec: narrationDelaySec,
   });
+  const speed = Math.max(1, Math.min(2, numOr(meta.speed, parseFloat, 1)));
+  if (speed !== 1) {
+    const sped = applyPlaybackSpeed({
+      videoFilterComplex: videoFC, videoOutLabel, audioFilterChain: audioChain.filterChain, audioOutLabel: audioChain.outLabel, speed,
+    });
+    videoFC = sped.videoFilterComplex; videoOutLabel = sped.videoOutLabel;
+    audioChain = { filterChain: sped.audioFilterChain, outLabel: sped.audioOutLabel };
+  }
   const filterComplex = `${videoFC};${audioChain.filterChain}`;
 
   const inputArgs = ["-stream_loop", "-1", "-i", "bg.mp4", "-i", "audio.wav"];
@@ -893,10 +901,20 @@ function buildRenderArgs(dir, meta, bg, audio, music, titleCardImage) {
     const narrDurationSec = parseWavDurationSec(audio);
     if (narrDurationSec) {
       const bound = cardDurationSec + narrDurationSec + 0.5;
+      // Left in original (pre-speed) terms deliberately — this is only a
+      // safety cap against the infinitely-looped background outrunning
+      // -shortest, not the real stopping point (the sped-up audio stream's
+      // own genuinely-shorter duration is), so being a bit generous here is
+      // harmless; being too tight would risk cutting content short.
       durationArgs.push("-t", bound.toFixed(3));
       expectedDurationSec = bound;
     }
   }
+  // Progress pct (below) is measured against the OUTPUT stream's own
+  // out_time_ms, which after atempo/setpts only runs up to the now-shorter
+  // real duration — divide the expectation to match, or progress would
+  // under-report and look stuck for the last stretch of every sped-up render.
+  if (speed !== 1) expectedDurationSec = expectedDurationSec / speed;
 
   // Explicit thread budget (see threadBudget() above) rather than leaving
   // -threads/-filter_complex_threads unset — unset means "auto-detect and

@@ -174,9 +174,17 @@ self.onmessage = async (e) => {
       // cue timings unshifted to match); otherwise it silence-pads narration
       // by adelay so speech starts only once the card's window ends, with
       // caption cues shifted by the same amount before they reach this worker.
-      const audio = buildAudioFilterChain({
+      let audio = buildAudioFilterChain({
         narrationInputIndex: 1, musicInputIndex, musicVolume: msg.musicVolume, delaySec: narrationDelaySec,
       });
+      const speed = Math.max(1, Math.min(2, numOr(msg.speed, parseFloat, 1)));
+      if (speed !== 1) {
+        const sped = applyPlaybackSpeed({
+          videoFilterComplex: videoFC, videoOutLabel, audioFilterChain: audio.filterChain, audioOutLabel: audio.outLabel, speed,
+        });
+        videoFC = sped.videoFilterComplex; videoOutLabel = sped.videoOutLabel;
+        audio = { filterChain: sped.audioFilterChain, outLabel: sped.audioOutLabel };
+      }
       const filterComplex = `${videoFC};${audio.filterChain}`;
 
       const inputArgs = ["-stream_loop", "-1", "-i", "bg.mp4", "-i", "audio.wav"];
