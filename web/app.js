@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 120;
+const VERSION = 121;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1126,6 +1126,22 @@ async function probeYoutubeCapability() {
   }
 }
 
+// Same "is a server present" shape as probeYoutubeCapability — TikTok's
+// publish section lives inside the SAME Publish tab rather than a separate
+// tab, so this doesn't gate its own tab button, just the TikTok subsection
+// within it (see setSettingsTab-adjacent init() wiring below).
+let tiktokAvailable = false;
+async function probeTiktokCapability() {
+  try {
+    const resp = await fetch("/tiktok-capability");
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return !!data.available;
+  } catch (e) {
+    return false;
+  }
+}
+
 // ---------- Anonymous usage counters (opt-out) ----------
 // Reports one of three known event names to a small Cloudflare Worker that
 // does nothing but increment a global counter per event — no per-user ID,
@@ -1181,9 +1197,9 @@ async function init() {
   // indicator. Runs in the background instead; buildEngineSelect() re-runs
   // once it settles so the "Kokoro — native" option's availability updates
   // in place rather than blocking everything else.
-  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, youtubeAvailable] = await Promise.all([
+  [nativeRenderAvailable, nativeWhisperAvailable, nativePocketTtsAvailable, youtubeAvailable, tiktokAvailable] = await Promise.all([
     probeNativeRenderBackend(), probeNativeWhisperBackend(), probeNativePocketTtsBackend(), probeYoutubeCapability(),
-    loadDefaultStorySystemPrompt(),
+    probeTiktokCapability(), loadDefaultStorySystemPrompt(),
   ]);
   probeNativeKokoroBackend().then((available) => {
     nativeKokoroAvailable = available;
@@ -1208,7 +1224,7 @@ async function init() {
     // voice selection for no reason on every page load.
     if (savedEngine === "kokoroNative" || savedEngineQuick === "kokoroNative") onEngineChangeUI();
   });
-  $("#publishTabBtn").style.display = youtubeAvailable ? "" : "none";
+  $("#publishTabBtn").style.display = (youtubeAvailable || tiktokAvailable) ? "" : "none";
   $("#scheduleTabBtn").style.display = youtubeAvailable ? "" : "none";
   // Fire-and-forget, not awaited — populates youtubeAccountsCache (and, via
   // refreshChannelBrandingSyncAccountSelect, applies the default "sync with
@@ -1216,6 +1232,7 @@ async function init() {
   // Publish or Branding tab first. Doesn't block the rest of startup on a
   // network round trip that isn't required for the app to be usable.
   if (youtubeAvailable) refreshYoutubeAccounts();
+  if (tiktokAvailable) refreshTiktokAccounts();
   buildEngineSelect();
   buildProviderSelect();
   buildFontSelect();
@@ -3465,12 +3482,14 @@ function renderResultCard(job, container, opts) {
         <button data-action="download">Download</button>
         <button data-action="copy">Copy Link</button>
       </div>
-      <div class="publish-section" data-job-id="${job.id}"></div>`;
+      <div class="publish-section" data-job-id="${job.id}"></div>
+      <div class="tiktok-publish-section" data-job-id="${job.id}"></div>`;
     div.querySelector('[data-action="preview"]').onclick = () => previewExported(job.resultUrl);
     div.querySelector('[data-action="download"]').onclick = () => downloadVideo(job.resultUrl, videoFilenameFor(job));
     div.querySelector('[data-action="copy"]').onclick = () => copyVideoLink(job.resultUrl);
     renderPublishSection(job, div.querySelector(".publish-section"));
     maybeAutoPublish(job, div.querySelector(".publish-section"));
+    renderTiktokPublishSection(job, div.querySelector(".tiktok-publish-section"));
   } else if (job.status === "error") {
     div.innerHTML = title +
       `<div class="result-error">${escapeHtml(job.error || "Export failed")}</div>` +
@@ -3624,6 +3643,83 @@ function renderPublishSection(job, container) {
   container.querySelector('[data-action="publish-regenerate"]').onclick = () => generatePublishMetadata(job, container, true);
   container.querySelector('[data-action="publish-cancel"]').onclick = () => { pub._panelOpen = false; renderPublishSection(job, container); };
   container.querySelector('[data-action="publish-upload"]').onclick = () => uploadJobToYoutube(job, container);
+}
+
+// TikTok's per-job panel — same "everywhere" re-render fix and collapsed-
+// button-until-opened shell as the YouTube one above, but a much shallower
+// state machine: no metadata-generation step (no AI-written description/
+// tags/thumbnail to build, just a title and a cover-frame timestamp into
+// the video itself), and no privacy-level picker — this app isn't audited
+// by TikTok yet, so anything but SELF_ONLY just errors; the panel says so
+// plainly instead of offering a choice that doesn't actually work.
+function renderTiktokPublishSectionEverywhere(job) {
+  document.querySelectorAll(`.tiktok-publish-section[data-job-id="${job.id}"]`).forEach((el) => renderTiktokPublishSection(job, el));
+}
+
+function renderTiktokPublishSection(job, container) {
+  if (!container) return;
+  if (!tiktokAvailable) { container.innerHTML = ""; return; }
+  const pub = job.tiktokPublish;
+  if (pub.status === "uploading") {
+    container.innerHTML = `
+      <div class="result-status">${escapeHtml(pub._phaseLabel || "Posting to TikTok...")} ${pub.uploadProgressPct || 0}%</div>
+      <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pub.uploadProgressPct || 0}%"></div></div>`;
+    return;
+  }
+  if (pub.status === "posted") {
+    container.innerHTML = `<div class="result-status" style="color:var(--green);">Posted to TikTok (private — visible only to you until this app passes TikTok's review).</div>`;
+    return;
+  }
+  if (pub.status === "failed") {
+    container.innerHTML = `
+      <div class="result-error">TikTok post failed: ${escapeHtml(pub.error || "unknown error")}</div>
+      <button data-action="tiktok-retry">Try Again</button>`;
+    container.querySelector('[data-action="tiktok-retry"]').onclick = () => { pub.status = "none"; renderTiktokPublishSection(job, container); };
+    return;
+  }
+  if (!tiktokAccountsCache.length) {
+    container.innerHTML = `<p style="font-size:0.72rem;color:var(--muted);">Connect a TikTok account in Settings → Publish to post directly.</p>`;
+    return;
+  }
+  if (!pub._panelOpen) {
+    container.innerHTML = `<button data-action="tiktok-open">Post to TikTok</button>`;
+    container.querySelector('[data-action="tiktok-open"]').onclick = () => openTiktokPublishPanel(job, container);
+    return;
+  }
+  container.innerHTML = `
+    <div class="publish-form" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:6px;">
+      <label>Account</label>
+      <select data-field="accountId">
+        ${tiktokAccountsCache.map(a => `<option value="${a.id}" ${a.id === pub.accountId ? "selected" : ""}>${escapeHtml(a.displayName)}</option>`).join("")}
+      </select>
+      <label style="margin-top:6px;">Title</label>
+      <input type="text" data-field="title" value="${escapeHtml(pub.title || "")}" maxlength="150">
+      <p style="font-size:0.68rem;color:var(--muted);margin-top:8px;">
+        Posts are private (visible only to you) until this app passes TikTok's review — this isn't a bug.
+        By clicking "Post," you certify that the content complies with
+        <a href="https://www.tiktok.com/community-guidelines" target="_blank" rel="noopener">TikTok's Community Guidelines</a>.
+      </p>
+      <div class="row" style="margin-top:8px;">
+        <button data-action="tiktok-cancel">Cancel</button>
+        <button class="primary" data-action="tiktok-upload">Post</button>
+      </div>
+    </div>`;
+  container.querySelector('[data-field="accountId"]').onchange = (e) => { pub.accountId = e.target.value; };
+  container.querySelector('[data-field="title"]').oninput = (e) => { pub.title = e.target.value; };
+  container.querySelector('[data-action="tiktok-cancel"]').onclick = () => { pub._panelOpen = false; renderTiktokPublishSection(job, container); };
+  container.querySelector('[data-action="tiktok-upload"]').onclick = () => uploadJobToTiktok(job, container);
+}
+
+// First open: pick a starting account, pre-fill the title from the story
+// (same extractTitleFromStory() helper the YouTube panel's plain-extraction
+// fallback uses — TikTok has no AI-metadata-generation step to prefer
+// instead). A later re-open just re-renders whatever's already there.
+function openTiktokPublishPanel(job, container) {
+  const pub = job.tiktokPublish;
+  pub._panelOpen = true;
+  if (pub.accountId == null) pub.accountId = tiktokAccountsCache[0].id;
+  if (pub.title == null) pub.title = extractTitleFromStory(job.story) || "Untitled";
+  renderTiktokPublishSection(job, container);
 }
 
 const YOUTUBE_CATEGORY_OPTIONS = [
@@ -3933,6 +4029,70 @@ async function uploadJobToYoutube(job, container) {
   } finally {
     if (es) es.close();
     renderPublishSectionEverywhere(job);
+  }
+}
+
+// TikTok's equivalent — same SSE-before-POST ordering and length-prefixed
+// binary frame convention as uploadJobToYoutube, but the frame carries no
+// thumbnail slot (TikTok picks a cover frame from the video itself via
+// videoCoverTimestampMs) and the upload has two distinct phases the
+// server's SSE ticks distinguish: "uploading" (bytes going up) and
+// "processing" (TikTok finishing the post server-side, asynchronously,
+// after the last chunk already arrived) — pub._phaseLabel drives which
+// text renderTiktokPublishSection shows above the same progress bar shape.
+async function uploadJobToTiktok(job, container) {
+  const pub = job.tiktokPublish;
+  if (!job.resultBlob) { alert("No finished video to post."); return; }
+  if (!pub.title || !pub.title.trim()) { alert("Enter a title first."); return; }
+  pub.status = "uploading";
+  pub.uploadProgressPct = 0;
+  pub._phaseLabel = "Uploading to TikTok...";
+  renderTiktokPublishSectionEverywhere(job);
+
+  const id = crypto.randomUUID();
+  let es = null;
+  try {
+    es = new EventSource(`/tiktok-upload-progress/${id}`);
+    es.onmessage = (e) => {
+      try {
+        const tick = JSON.parse(e.data);
+        if (typeof tick.pct === "number") pub.uploadProgressPct = tick.pct;
+        if (tick.phase === "processing") pub._phaseLabel = "Processing on TikTok...";
+        else if (tick.phase === "uploading") pub._phaseLabel = "Uploading to TikTok...";
+        renderTiktokPublishSectionEverywhere(job);
+      } catch (err) { /* ignore malformed tick */ }
+    };
+
+    const videoBytes = new Uint8Array(await job.resultBlob.arrayBuffer());
+    const meta = {
+      accountId: pub.accountId,
+      title: pub.title,
+      videoCoverTimestampMs: pub.videoCoverTimestampMs || 0,
+      videoLen: videoBytes.length,
+    };
+    const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+    const header = new Uint8Array(4);
+    new DataView(header.buffer).setUint32(0, metaBytes.length, true);
+    const frame = new Blob([header, metaBytes, videoBytes]);
+
+    const resp = await fetch(`/tiktok-upload?id=${id}`, { method: "POST", body: frame });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Post failed.");
+    // A "processing" status (the poll-timeout soft-failure path in
+    // runTiktokUpload) isn't a hard error — TikTok may still finish the
+    // post server-side after this request returns, it just took longer
+    // than this app waited around to confirm; treat it the same as a
+    // normal success rather than surfacing a scary failure state.
+    pub.status = "posted";
+    pub.publishId = data.publishId;
+    pub.uploadProgressPct = 100;
+    reportEvent("video_published");
+  } catch (e) {
+    pub.status = "failed";
+    pub.error = e && e.message ? e.message : String(e);
+  } finally {
+    if (es) es.close();
+    renderTiktokPublishSectionEverywhere(job);
   }
 }
 
@@ -5151,6 +5311,141 @@ async function removeYoutubeAccount(id) {
   try {
     await fetch(`/youtube-accounts/${id}`, { method: "DELETE" });
     await refreshYoutubeAccounts();
+  } catch (e) {
+    alert("Couldn't remove account: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// ---------- TikTok account management ----------
+// Simpler than the YouTube equivalents above by design: TikTok needs
+// exactly one client key/secret pair per install (see server.js's TikTok
+// section comment for why), not a repeatable "Add Project" list, so there's
+// no youtubeOauthClientsCache-style array or per-project picker here — just
+// one GET-then-render/POST-to-overwrite pair.
+async function saveTiktokCredentials() {
+  const clientKey = $("#tiktokClientKey").value.trim();
+  const clientSecret = $("#tiktokClientSecret").value.trim();
+  const statusEl = $("#tiktokClientStatus");
+  if (!clientKey || !clientSecret) { statusEl.textContent = "Client Key and Client Secret are required."; return; }
+  try {
+    const resp = await fetch("/tiktok-credentials", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientKey, clientSecret }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Failed to save.");
+    statusEl.textContent = "Saved. You can now sign in below.";
+    refreshTiktokSignInAvailability();
+  } catch (e) {
+    statusEl.textContent = "Error: " + (e && e.message ? e.message : String(e));
+  }
+}
+
+// Reflects whether credentials are already saved back into the form (so
+// reopening Settings doesn't look like nothing was ever entered) and
+// enables/disables the Sign In button accordingly.
+async function refreshTiktokSignInAvailability() {
+  let configured = false;
+  try {
+    const resp = await fetch("/tiktok-credentials");
+    const data = await resp.json();
+    configured = !!data.configured;
+    if (data.clientKey) $("#tiktokClientKey").value = data.clientKey;
+    if (data.clientSecret) $("#tiktokClientSecret").value = data.clientSecret;
+  } catch (e) { /* leave fields as-is on a fetch failure */ }
+  const btn = $("#tiktokSignInBtn");
+  if (btn) btn.disabled = !configured;
+}
+
+function renderTiktokAccountsList(accounts) {
+  const list = $("#tiktokAccountsList");
+  if (!list) return;
+  if (!accounts.length) {
+    list.innerHTML = `<p style="font-size:0.8rem;color:var(--muted);">No account connected yet.</p>`;
+    return;
+  }
+  list.innerHTML = accounts.map(a => `
+    <div class="row" style="align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;">
+      <div class="row" style="align-items:center;gap:8px;">
+        ${a.avatarUrl ? `<img src="${a.avatarUrl}" style="width:28px;height:28px;border-radius:50%;">` : ""}
+        <span>${escapeHtml(a.displayName)}</span>
+      </div>
+      <button onclick="removeTiktokAccount('${a.id}')" style="color:var(--danger);">Remove</button>
+    </div>
+  `).join("");
+}
+
+// Cache of the last-known account list — read by the per-job TikTok publish
+// panel's account picker, same reasoning as youtubeAccountsCache.
+let tiktokAccountsCache = [];
+async function refreshTiktokAccounts() {
+  await refreshTiktokSignInAvailability();
+  try {
+    const resp = await fetch("/tiktok-accounts");
+    const data = await resp.json();
+    tiktokAccountsCache = data.accounts || [];
+    renderTiktokAccountsList(tiktokAccountsCache);
+  } catch (e) {
+    tiktokAccountsCache = [];
+    if ($("#tiktokAccountsList")) $("#tiktokAccountsList").innerHTML = `<p style="font-size:0.8rem;color:var(--danger);">Couldn't load accounts (no backend server).</p>`;
+  }
+}
+
+const TIKTOK_SIGNIN_TIMEOUT_MS = 5 * 60 * 1000;
+// Mirrors startYoutubeOAuth()'s exact shape: listen for the SSE result
+// BEFORE opening the sign-in tab (same ordering constraint as every other
+// id-correlated SSE channel in this app), poll for the tab being closed
+// early, and a give-up timeout so a closed/abandoned Electron system-
+// browser tab (which the winRef.closed poll can never see, since
+// window.open() routes externally there) doesn't leave the button stuck
+// forever.
+async function startTiktokOAuth() {
+  const btn = $("#tiktokSignInBtn");
+  const originalLabel = btn.textContent;
+  btn.disabled = true; btn.textContent = "Opening TikTok sign-in...";
+  let es = null, closePollTimer = null, giveUpTimer = null;
+  try {
+    const resp = await fetch("/tiktok-oauth-start", { method: "POST" });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Couldn't start sign-in.");
+    const result = await new Promise((resolve, reject) => {
+      es = new EventSource(`/tiktok-oauth-status/${data.state}`);
+      es.onmessage = (e) => {
+        try { resolve(JSON.parse(e.data)); } catch (err) { reject(err); }
+      };
+      es.onerror = () => reject(new Error("Lost connection waiting for sign-in to finish."));
+      const winRef = window.open(data.authUrl, "_blank");
+      btn.textContent = "Waiting for you to finish signing in...";
+      if (winRef) {
+        closePollTimer = setInterval(() => {
+          if (winRef.closed) reject(new Error("The sign-in tab was closed before finishing."));
+        }, 1000);
+      }
+      giveUpTimer = setTimeout(() => {
+        reject(new Error(`Didn't hear back after ${TIKTOK_SIGNIN_TIMEOUT_MS / 60000} minutes — the sign-in tab may have been closed. Try again.`));
+      }, TIKTOK_SIGNIN_TIMEOUT_MS);
+    });
+    if (result.status === "success") {
+      showToast(`Connected ${result.account.displayName}.`);
+      await refreshTiktokAccounts();
+    } else {
+      throw new Error(result.error || "Sign-in failed.");
+    }
+  } catch (e) {
+    alert("TikTok sign-in failed: " + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (es) es.close();
+    if (closePollTimer) clearInterval(closePollTimer);
+    if (giveUpTimer) clearTimeout(giveUpTimer);
+    btn.disabled = false; btn.textContent = originalLabel;
+  }
+}
+
+async function removeTiktokAccount(id) {
+  if (!confirm("Disconnect this TikTok account? You'll need to sign in again to post to it.")) return;
+  try {
+    await fetch(`/tiktok-accounts/${id}`, { method: "DELETE" });
+    await refreshTiktokAccounts();
   } catch (e) {
     alert("Couldn't remove account: " + (e && e.message ? e.message : String(e)));
   }

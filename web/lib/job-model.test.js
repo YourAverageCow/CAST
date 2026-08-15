@@ -37,6 +37,11 @@ test("createJob has sane defaults", () => {
     thumbnailBlob: null, thumbnailUrl: null,
     videoId: null, uploadProgressPct: 0,
   });
+  assert.deepEqual(job.tiktokPublish, {
+    accountId: null, status: "none", error: null,
+    title: null, videoCoverTimestampMs: 0,
+    publishId: null, uploadProgressPct: 0,
+  });
   assert.ok(job.id);
   assert.ok(job.createdAt > 0);
 });

@@ -814,6 +814,247 @@ async function runYoutubeUpload(id, store, account, video, thumbnail, meta, resp
   }
 }
 
+// ---------- TikTok Content Posting integration ----------
+// Deliberately NOT structured like the YouTube section above: TikTok's
+// per-user rate limit (video.publish scope, ~15-25 posts/day) is scoped to
+// each user's own access token, not a shared per-app quota the way
+// YouTube's 10,000-units/day is scoped to the OAuth CLIENT (Google Cloud
+// project) — so there's no need for YouTube's oauthClients list / multi-
+// project quota-switching machinery here. Exactly one client key/secret
+// pair per install is enough; still user-supplied (not baked into this
+// open-source app's distributed code) for the same reason YouTube's is.
+const TIKTOK_STORE_PATH = path.join(os.homedir(), ".cast", "tiktok-accounts.json");
+function loadTiktokStore() {
+  try {
+    const raw = fs.readFileSync(TIKTOK_STORE_PATH, "utf8");
+    const data = JSON.parse(raw);
+    if (!data.accounts) data.accounts = [];
+    if (data.clientKey === undefined) data.clientKey = null;
+    if (data.clientSecret === undefined) data.clientSecret = null;
+    return data;
+  } catch (e) {
+    if (e.code !== "ENOENT") {
+      console.error(`TikTok account store at ${TIKTOK_STORE_PATH} exists but failed to load (${e.message}) — treating as empty. Any connected account will need to be reconnected.`);
+    }
+    return { clientKey: null, clientSecret: null, accounts: [] };
+  }
+}
+function saveTiktokStore(data) {
+  fs.mkdirSync(path.dirname(TIKTOK_STORE_PATH), { recursive: true });
+  const tmpPath = TIKTOK_STORE_PATH + ".tmp";
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+  fs.renameSync(tmpPath, TIKTOK_STORE_PATH);
+  try { fs.chmodSync(TIKTOK_STORE_PATH, 0o600); } catch (e) { /* best-effort — no-op on platforms without POSIX perms (Windows) */ }
+}
+
+// TikTok's PKCE (RFC 7636) implementation is hex-encoded SHA-256, NOT the
+// base64url encoding generatePkcePair() above uses for Google — confirmed
+// against TikTok's own docs. A naive reuse of that helper would silently
+// produce an incompatible code_challenge, so this stays its own function
+// rather than a parameterized shared one.
+function generateTiktokPkcePair() {
+  const verifier = crypto.randomBytes(32).toString("hex");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("hex");
+  return { verifier, challenge };
+}
+
+const TIKTOK_SCOPES = "user.info.basic,video.publish"; // comma-separated per TikTok's format, unlike Google's space-separated scope string
+// TikTok's "Desktop" app type explicitly allows a loopback redirect with a
+// wildcard port (confirmed against TikTok's own docs) — same effective
+// address family as YOUTUBE_REDIRECT_URI, registered under "Desktop" in
+// TikTok's developer portal (see the Settings -> Publish setup instructions).
+const TIKTOK_REDIRECT_URI = `http://127.0.0.1:${PORT}/tiktok-oauth-callback`;
+
+async function exchangeTiktokCode(clientKey, clientSecret, code, verifier, redirectUri) {
+  const resp = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", "Cache-Control": "no-cache" },
+    body: new URLSearchParams({
+      client_key: clientKey, client_secret: clientSecret,
+      code, redirect_uri: redirectUri, code_verifier: verifier,
+      grant_type: "authorization_code",
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok || data.error) throw new Error(data.error_description || data.error || `Token exchange failed (${resp.status})`);
+  return data; // {access_token, refresh_token, expires_in, refresh_expires_in, open_id, ...}
+}
+
+async function refreshTiktokToken(clientKey, clientSecret, refreshToken) {
+  const resp = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", "Cache-Control": "no-cache" },
+    body: new URLSearchParams({
+      client_key: clientKey, client_secret: clientSecret,
+      refresh_token: refreshToken, grant_type: "refresh_token",
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok || data.error) throw new Error(data.error_description || data.error || `Token refresh failed (${resp.status})`);
+  return data; // {access_token, expires_in, refresh_token, refresh_expires_in, ...}
+}
+
+// Same shape as ensureFreshAccessToken (YouTube) — mutates `account`,
+// caller must saveTiktokStore(store) once done. TikTok access tokens last
+// 24h (vs Google's 1h) and refresh tokens last 365 days, but the check
+// logic is identical either way, just against different real lifetimes.
+async function ensureFreshTiktokToken(store, account) {
+  if (account.accessToken && account.accessTokenExpiresAt > Date.now() + TOKEN_REFRESH_SKEW_MS) {
+    return account.accessToken;
+  }
+  if (!store.clientKey || !store.clientSecret) throw new Error("TikTok app credentials are no longer configured — reconnect from Settings.");
+  const refreshed = await refreshTiktokToken(store.clientKey, store.clientSecret, account.refreshToken);
+  account.accessToken = refreshed.access_token;
+  account.accessTokenExpiresAt = Date.now() + (refreshed.expires_in || 86400) * 1000;
+  if (refreshed.refresh_token) account.refreshToken = refreshed.refresh_token;
+  saveTiktokStore(store);
+  return account.accessToken;
+}
+
+async function fetchTiktokUserInfo(accessToken) {
+  const resp = await fetch("https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const data = await resp.json();
+  if (!resp.ok || (data.error && data.error.code !== "ok")) throw new Error((data.error && data.error.message) || `User info lookup failed (${resp.status})`);
+  const user = data.data && data.data.user;
+  if (!user) throw new Error("TikTok didn't return account info.");
+  return { openId: user.open_id, displayName: user.display_name, avatarUrl: user.avatar_url };
+}
+
+function stripTiktokTokens(account) {
+  const { accessToken, refreshToken, ...rest } = account;
+  return rest;
+}
+
+// TikTok's chunk rules (confirmed from their Content Posting API docs, not
+// guessed): whole file as one chunk under 5MB; otherwise 5MB-64MB per
+// chunk, with the LAST chunk allowed up to 128MB to absorb any remainder
+// rather than leaving an awkward tiny final chunk.
+const TIKTOK_MIN_CHUNK = 5 * 1024 * 1024;
+const TIKTOK_MAX_CHUNK = 64 * 1024 * 1024;
+function tiktokChunkPlan(totalBytes) {
+  if (totalBytes < TIKTOK_MIN_CHUNK) {
+    return { chunkSize: totalBytes, totalChunks: 1 };
+  }
+  const chunkSize = TIKTOK_MAX_CHUNK;
+  const totalChunks = Math.ceil(totalBytes / chunkSize);
+  return { chunkSize, totalChunks };
+}
+
+const TIKTOK_STATUS_POLL_INTERVAL_MS = 2000;
+const TIKTOK_STATUS_POLL_TIMEOUT_MS = 2 * 60 * 1000;
+
+// Direct Post: init -> chunked PUT -> poll for PUBLISH_COMPLETE/FAILED.
+// Genuinely different shape from runYoutubeUpload's resumable-until-a-200
+// model: TikTok's chunk plan is fixed up front (not discovered
+// incrementally), and a successful last PUT only means the BYTES arrived —
+// actual publish completion happens asynchronously on TikTok's own end, so
+// this has to poll after the upload finishes, not just report done.
+async function runTiktokUpload(id, store, account, video, meta, respond) {
+  try {
+    const accessToken = await ensureFreshTiktokToken(store, account);
+    sendProgress(id, { phase: "initializing", pct: 0 });
+
+    const { chunkSize, totalChunks } = tiktokChunkPlan(video.length);
+    const title = (meta.title || "").slice(0, 2200); // TikTok's own 2200-UTF-16-unit cap
+    const initResp = await fetch("https://open.tiktokapis.com/v2/post/publish/video/init/", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({
+        post_info: {
+          title,
+          // Hardcoded regardless of what the UI might send — an unaudited
+          // client gets a hard API error for anything but SELF_ONLY, so
+          // there's no real choice here yet (see Settings -> Publish's
+          // TikTok section for the user-facing explanation of why).
+          privacy_level: "SELF_ONLY",
+          video_cover_timestamp_ms: meta.videoCoverTimestampMs || 0,
+        },
+        source_info: {
+          source: "FILE_UPLOAD",
+          video_size: video.length,
+          chunk_size: chunkSize,
+          total_chunk_count: totalChunks,
+        },
+      }),
+    });
+    const initData = await initResp.json();
+    if (!initResp.ok || (initData.error && initData.error.code !== "ok")) {
+      throw new Error((initData.error && initData.error.message) || `TikTok upload init failed (${initResp.status})`);
+    }
+    const { publish_id: publishId, upload_url: uploadUrl } = initData.data;
+
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(start + chunkSize, video.length) - 1;
+      const putResp = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "video/mp4",
+          "Content-Length": String(end - start + 1),
+          "Content-Range": `bytes ${start}-${end}/${video.length}`,
+        },
+        body: video.subarray(start, end + 1),
+      });
+      if (!putResp.ok) {
+        throw new Error(`TikTok chunk upload failed (${putResp.status}): ${(await putResp.text()).slice(0, 300)}`);
+      }
+      sendProgress(id, { phase: "uploading", pct: Math.round(((i + 1) / totalChunks) * 100) });
+    }
+
+    sendProgress(id, { phase: "processing", pct: 100 });
+    const deadline = Date.now() + TIKTOK_STATUS_POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, TIKTOK_STATUS_POLL_INTERVAL_MS));
+      const statusResp = await fetch("https://open.tiktokapis.com/v2/post/publish/status/fetch/", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+        body: JSON.stringify({ publish_id: publishId }),
+      });
+      const statusData = await statusResp.json();
+      const status = statusData.data && statusData.data.status;
+      if (status === "PUBLISH_COMPLETE") {
+        respond(200, { publishId, status: "posted" });
+        return;
+      }
+      if (status === "FAILED") {
+        throw new Error((statusData.data && statusData.data.fail_reason) || "TikTok reported the post failed.");
+      }
+      // PROCESSING_UPLOAD / SEND_TO_USER_INBOX / anything else: keep polling.
+    }
+    // Timed out waiting, not necessarily failed — TikTok is still processing
+    // on its own end; treat this the same as the render stall watchdog
+    // pattern elsewhere in this file: a soft signal to check manually, not
+    // a hard failure that discards a possibly-still-succeeding post.
+    respond(200, { publishId, status: "processing", note: "Still processing on TikTok — check the app directly if this doesn't update." });
+  } catch (e) {
+    sendProgress(id, { phase: "error", error: e.message });
+    respond(500, { error: e.message });
+  } finally {
+    closeProgressChannel(id);
+  }
+}
+
+// Same length-prefixed framing as parseYoutubeUploadBody, simpler: no
+// thumbnail slot (TikTok picks a cover frame via video_cover_timestamp_ms
+// instead of an uploaded image).
+function parseTiktokUploadBody(body) {
+  if (body.length < 4) throw new Error("Body too short to contain a metadata length header");
+  const metaLen = body.readUInt32LE(0);
+  if (4 + metaLen > body.length) throw new Error("Metadata length exceeds body size");
+  const meta = JSON.parse(body.subarray(4, 4 + metaLen).toString("utf8"));
+  let offset = 4 + metaLen;
+  const expectedLen = offset + (meta.videoLen || 0);
+  if (!Number.isFinite(expectedLen) || expectedLen > body.length) {
+    throw new Error("Segment lengths in metadata don't match the request body size");
+  }
+  const video = body.subarray(offset, offset + meta.videoLen);
+  return { meta, video };
+}
+
+const tiktokUploadLimiter = makeSlotLimiter(2); // same conservative-cap reasoning as youtubeUploadLimiter — a fixed per-account rate limit, more server concurrency doesn't help
+
 // `parseInt(x) || default` silently replaces a legitimate 0 (no stroke, no
 // shadow offset) with the fallback, since 0 is falsy — mirrors web/app.js's
 // numOr(), which the client already uses when building this same `style`
@@ -2103,6 +2344,191 @@ function handleRequest(req, res) {
         res.end(JSON.stringify(data));
       };
       runYoutubeUpload(id, store, account, parsed.video, parsed.thumbnail, parsed.meta, respond);
+    });
+    return;
+  }
+
+  // ---- TikTok Content Posting integration ----
+  if (urlNoQuery === "/tiktok-capability" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ available: true }));
+    return;
+  }
+  if (urlNoQuery === "/tiktok-credentials" && req.method === "GET") {
+    const store = loadTiktokStore();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ clientKey: store.clientKey, clientSecret: store.clientSecret, configured: !!(store.clientKey && store.clientSecret) }));
+    return;
+  }
+  if (urlNoQuery === "/tiktok-credentials" && req.method === "POST") {
+    readBodyWithLimit(req, res, 4 * 1024, (buf) => {
+      let body;
+      try { body = JSON.parse(buf.toString("utf8") || "{}"); } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Malformed JSON body: " + e.message }));
+        return;
+      }
+      const clientKey = typeof body.clientKey === "string" ? body.clientKey.trim() : "";
+      const clientSecret = typeof body.clientSecret === "string" ? body.clientSecret.trim() : "";
+      if (!clientKey || !clientSecret) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Both Client Key and Client Secret are required." }));
+        return;
+      }
+      const store = loadTiktokStore();
+      store.clientKey = clientKey;
+      store.clientSecret = clientSecret;
+      saveTiktokStore(store);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    return;
+  }
+  if (urlNoQuery === "/tiktok-oauth-start" && req.method === "POST") {
+    const store = loadTiktokStore();
+    if (!store.clientKey || !store.clientSecret) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Add your TikTok app's Client Key/Secret first." }));
+      return;
+    }
+    const state = crypto.randomBytes(16).toString("hex");
+    const { verifier, challenge } = generateTiktokPkcePair();
+    // Namespaced with a "tiktok:" prefix in the SAME pkceChallenges map the
+    // YouTube flow uses (bare state, no prefix) — collision between the two
+    // flows' random state values is astronomically unlikely regardless, but
+    // the prefix costs nothing and self-documents which flow a pending
+    // entry belongs to.
+    pkceChallenges.set("tiktok:" + state, { verifier });
+    const authUrl = "https://www.tiktok.com/v2/auth/authorize/?" + new URLSearchParams({
+      client_key: store.clientKey,
+      redirect_uri: TIKTOK_REDIRECT_URI,
+      response_type: "code",
+      scope: TIKTOK_SCOPES,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      state,
+    }).toString();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ authUrl, state }));
+    return;
+  }
+  if (urlNoQuery.startsWith("/tiktok-oauth-status/") && req.method === "GET") {
+    const state = "tiktok-oauth:" + urlNoQuery.slice("/tiktok-oauth-status/".length);
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+    progressChannels.set(state, res);
+    req.on("close", () => { progressChannels.delete(state); });
+    return;
+  }
+  if (urlNoQuery === "/tiktok-oauth-callback" && req.method === "GET") {
+    const reqUrl = new URL(req.url, "http://localhost");
+    const code = reqUrl.searchParams.get("code");
+    const state = reqUrl.searchParams.get("state");
+    const oauthError = reqUrl.searchParams.get("error");
+    const channelKey = state ? "tiktok-oauth:" + state : null;
+    (async () => {
+      try {
+        if (oauthError) throw new Error(oauthError);
+        if (!code || !state) throw new Error("Missing code or state in TikTok's redirect.");
+        const pending = pkceChallenges.get("tiktok:" + state);
+        if (!pending) throw new Error("This sign-in link expired or was already used — try again from Settings.");
+        pkceChallenges.delete("tiktok:" + state);
+        const store = loadTiktokStore();
+        if (!store.clientKey || !store.clientSecret) throw new Error("TikTok app credentials were removed before sign-in finished — try again from Settings.");
+        const tokens = await exchangeTiktokCode(store.clientKey, store.clientSecret, code, pending.verifier, TIKTOK_REDIRECT_URI);
+        const user = await fetchTiktokUserInfo(tokens.access_token);
+        // Dedup by TikTok's stable open_id — simpler than YouTube's
+        // (channelId, oauthClientId) pair dedup, since there's only ever
+        // one client here.
+        const existing = store.accounts.find(a => a.openId === user.openId);
+        const account = {
+          id: existing ? existing.id : crypto.randomUUID(),
+          openId: user.openId,
+          displayName: user.displayName,
+          avatarUrl: user.avatarUrl,
+          accessToken: tokens.access_token,
+          accessTokenExpiresAt: Date.now() + (tokens.expires_in || 86400) * 1000,
+          refreshToken: tokens.refresh_token || (existing && existing.refreshToken) || null,
+          addedAt: existing ? existing.addedAt : Date.now(),
+        };
+        if (!account.refreshToken) throw new Error("TikTok didn't return a refresh token — try signing in again.");
+        if (existing) Object.assign(existing, account); else store.accounts.push(account);
+        saveTiktokStore(store);
+        if (channelKey) sendProgress(channelKey, { status: "success", account: stripTiktokTokens(account) });
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(oauthCallbackPage(`Connected <b>${user.displayName}</b>.`, true));
+      } catch (e) {
+        if (channelKey) sendProgress(channelKey, { status: "error", error: e.message });
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(oauthCallbackPage(e.message, false));
+      } finally {
+        if (channelKey) closeProgressChannel(channelKey);
+      }
+    })();
+    return;
+  }
+  if (urlNoQuery === "/tiktok-accounts" && req.method === "GET") {
+    const store = loadTiktokStore();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ accounts: store.accounts.map(stripTiktokTokens) }));
+    return;
+  }
+  if (urlNoQuery.startsWith("/tiktok-accounts/") && req.method === "DELETE") {
+    const accountId = urlNoQuery.slice("/tiktok-accounts/".length);
+    const store = loadTiktokStore();
+    const idx = store.accounts.findIndex(a => a.id === accountId);
+    if (idx === -1) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "No such account." }));
+      return;
+    }
+    const [removed] = store.accounts.splice(idx, 1);
+    saveTiktokStore(store);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+    // Best-effort, after responding — revoking is a courtesy cleanup, not
+    // something the client needs to wait on.
+    if (removed.refreshToken && store.clientKey && store.clientSecret) {
+      fetch("https://open.tiktokapis.com/v2/oauth/revoke/", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_key: store.clientKey, client_secret: store.clientSecret, token: removed.refreshToken }),
+      }).catch(() => {});
+    }
+    return;
+  }
+  if (urlNoQuery.startsWith("/tiktok-upload-progress/") && req.method === "GET") {
+    const id = "tiktok-upload:" + urlNoQuery.slice("/tiktok-upload-progress/".length);
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+    progressChannels.set(id, res);
+    req.on("close", () => { progressChannels.delete(id); });
+    return;
+  }
+  if (urlNoQuery === "/tiktok-upload" && req.method === "POST") {
+    const id = "tiktok-upload:" + (new URL(req.url, "http://localhost").searchParams.get("id") || crypto.randomUUID());
+    readBodyWithLimit(req, res, 4 * 1024 * 1024 * 1024, async (bodyBuf) => {
+      let parsed;
+      try {
+        parsed = parseTiktokUploadBody(bodyBuf);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Malformed upload request: " + e.message }));
+        return;
+      }
+      const store = loadTiktokStore();
+      const account = store.accounts.find(a => a.id === parsed.meta.accountId);
+      if (!account) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "No such connected TikTok account — sign in again from Settings." }));
+        return;
+      }
+      sendProgress(id, { phase: "queued", activeUploads: tiktokUploadLimiter.getActive(), uploadSlots: tiktokUploadLimiter.getMax() });
+      await tiktokUploadLimiter.acquire();
+      const respond = (status, data) => {
+        tiktokUploadLimiter.release();
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      };
+      runTiktokUpload(id, store, account, parsed.video, parsed.meta, respond);
     });
     return;
   }

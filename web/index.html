@@ -999,6 +999,54 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <option value="">First connected channel</option>
           </select>
         </div>
+        <div class="settings-section">
+          <h3>TikTok — One-Time Setup</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:10px;">
+            TikTok requires one registered app before "Sign in with TikTok" works — unlike YouTube, this is a single
+            key/secret pair for everyone who uses CAST from this install, not a repeatable per-project list (TikTok's
+            rate limit is per person signing in, not per app registration, so there's no quota reason to add more than one).
+          </p>
+          <ol style="font-size:0.8rem;padding-left:20px;display:flex;flex-direction:column;gap:10px;margin:0;">
+            <li>
+              Register an app on the TikTok for Developers portal (any name).
+              <div><button onclick="window.open('https://developers.tiktok.com/apps','_blank')">1. Open: TikTok Developer Apps →</button></div>
+            </li>
+            <li>
+              Add the <b>Content Posting API</b> product to your app, requesting the <code>user.info.basic</code> and
+              <code>video.publish</code> scopes.
+            </li>
+            <li>
+              Set the app type to <b>Desktop</b> (matters the same way it does for YouTube's setup above — the wrong type
+              causes a redirect mismatch at sign-in) and add this exact redirect URI:
+              <code>http://127.0.0.1:8123/tiktok-oauth-callback</code>
+            </li>
+            <li>
+              Copy the Client Key and Client Secret from your app's Basic Information page into the fields below.
+            </li>
+          </ol>
+          <label style="margin-top:14px;">Client Key</label>
+          <input type="text" id="tiktokClientKey" placeholder="aw...">
+          <label style="margin-top:8px;">Client Secret</label>
+          <div class="key-field-row">
+            <input type="password" id="tiktokClientSecret" placeholder="...">
+            <button type="button" onclick="toggleKeyVisibility('tiktokClientSecret', this)">Show</button>
+            <button type="button" onclick="copyKeyToClipboard('tiktokClientSecret', this)">Copy</button>
+          </div>
+          <button class="accent" onclick="saveTiktokCredentials()" style="margin-top:8px;">Save</button>
+          <p id="tiktokClientStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
+        </div>
+        <div class="settings-section">
+          <h3>Connected TikTok Account</h3>
+          <div id="tiktokAccountsList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px;">
+            <p style="font-size:0.8rem;color:var(--muted);">No account connected yet.</p>
+          </div>
+          <button class="primary" onclick="startTiktokOAuth()" id="tiktokSignInBtn" disabled>Sign in with TikTok</button>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:8px;">
+            This app hasn't gone through TikTok's app review yet, so posts are restricted to <b>private (visible only to
+            you)</b> regardless of any setting here — that's a TikTok-side rule for unreviewed apps, not something CAST
+            can change. Posting still works end-to-end; the video just won't be publicly visible until review passes.
+          </p>
+        </div>
       </div>
 
       <div class="settings-tab-panel" data-tab="schedule">

@@ -50,6 +50,26 @@ function createPublishState() {
   };
 }
 
+// Deliberately a separate, parallel state object rather than folding TikTok
+// into createPublishState()'s "targets" field — TikTok's Content Posting
+// API has a much narrower metadata surface than YouTube's (no separate
+// description/tags/scheduling/custom-thumbnail-upload, just a title and a
+// cover-frame timestamp into the video itself), so generalizing the two
+// into one shape now would mean a bunch of YouTube-only fields sitting
+// unused on every TikTok post, or vice versa. Revisit unifying them only
+// once a third platform makes the shared shape actually pay for itself.
+function createTiktokPublishState() {
+  return {
+    accountId: null, // id of the tiktok-accounts.json account to post as
+    status: "none", // "none" | "uploading" | "posted" | "failed"
+    error: null,
+    title: null,
+    videoCoverTimestampMs: 0,
+    publishId: null, // TikTok's publish_id once posted
+    uploadProgressPct: 0,
+  };
+}
+
 function makeJobId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
@@ -103,6 +123,7 @@ function createJob(overrides) {
     resultUrl: null,
 
     publish: createPublishState(),
+    tiktokPublish: createTiktokPublishState(),
 
     createdAt: Date.now(),
   };
@@ -126,5 +147,5 @@ function resolveJobSettings(job, globalSettings) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { JOB_OVERRIDE_FIELDS, createJob, resolveJobSettings, makeJobId };
+  module.exports = { JOB_OVERRIDE_FIELDS, createJob, createPublishState, createTiktokPublishState, resolveJobSettings, makeJobId };
 }
