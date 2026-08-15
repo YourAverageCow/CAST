@@ -860,6 +860,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             <button onclick="document.getElementById('importSettingsInput').click()">Import Settings</button>
           </div>
           <input type="file" id="importSettingsInput" accept="application/json" style="display:none" onchange="importSettingsFile(this)">
+          <div class="row" style="margin-top:8px;">
+            <button class="accent" onclick="copySettingsToClipboard()">Copy Settings</button>
+            <button onclick="pasteSettingsFromClipboard()">Paste Settings</button>
+          </div>
           <button onclick="resetSettingsToDefaults()" style="margin-top:8px;color:var(--danger);">Reset to Defaults</button>
         </div>
         <div class="settings-section" id="appUpdatesSection" style="display:none;">

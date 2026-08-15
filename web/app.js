@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 122;
+const VERSION = 123;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -859,11 +859,18 @@ async function applyLoadedSettings() {
   return savedData;
 }
 
-function exportSettings() {
+// Shared by the file-based and clipboard-based export paths below — the
+// exact same JSON, just handed off differently (a downloaded file vs. a
+// clipboard write).
+function settingsExportJson() {
   const raw = localStorage.getItem("cast_settings");
   const data = raw ? JSON.parse(raw) : {};
   data._exportedFromVersion = VERSION;
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  return JSON.stringify(data, null, 2);
+}
+
+function exportSettings() {
+  const blob = new Blob([settingsExportJson()], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = `cast-settings-${new Date().toISOString().slice(0, 10)}.json`;
@@ -872,16 +879,32 @@ function exportSettings() {
   setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
 }
 
+async function copySettingsToClipboard() {
+  try {
+    await navigator.clipboard.writeText(settingsExportJson());
+    showToast("Settings copied to clipboard.");
+  } catch (e) {
+    alert("Couldn't copy to clipboard: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// Shared by the file-based and clipboard-based import paths below — parses
+// and applies a settings JSON string exactly the same way regardless of
+// where the text came from.
+async function applySettingsJsonText(jsonText) {
+  const data = JSON.parse(jsonText);
+  delete data._exportedFromVersion;
+  localStorage.setItem("cast_settings", JSON.stringify(data));
+  await applyLoadedSettings();
+}
+
 function importSettingsFile(input) {
   const file = input.files && input.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = async () => {
     try {
-      const data = JSON.parse(reader.result);
-      delete data._exportedFromVersion;
-      localStorage.setItem("cast_settings", JSON.stringify(data));
-      await applyLoadedSettings();
+      await applySettingsJsonText(reader.result);
       showToast("Settings imported.");
     } catch (e) {
       alert("Couldn't import that file: " + (e && e.message ? e.message : String(e)));
@@ -889,6 +912,21 @@ function importSettingsFile(input) {
   };
   reader.readAsText(file);
   input.value = "";
+}
+
+async function pasteSettingsFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text.trim()) { alert("Clipboard is empty."); return; }
+    await applySettingsJsonText(text);
+    showToast("Settings imported from clipboard.");
+  } catch (e) {
+    // Covers both a real parse failure and the browser denying clipboard
+    // read permission (e.g. the page not focused, or a user declining the
+    // permission prompt) — either way, "Import Settings" (file) still works
+    // as a fallback, so this isn't a dead end.
+    alert("Couldn't import from clipboard: " + (e && e.message ? e.message : String(e)) + " — try \"Import Settings\" with a saved file instead.");
+  }
 }
 
 // Deliberately leaves the channel profile picture and panel-width/collapsed-
