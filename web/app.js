@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 123;
+const VERSION = 124;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -3688,9 +3688,13 @@ function renderPublishSection(job, container) {
 // button-until-opened shell as the YouTube one above, but a much shallower
 // state machine: no metadata-generation step (no AI-written description/
 // tags/thumbnail to build, just a title and a cover-frame timestamp into
-// the video itself), and no privacy-level picker — this app isn't audited
-// by TikTok yet, so anything but SELF_ONLY just errors; the panel says so
-// plainly instead of offering a choice that doesn't actually work.
+// the video itself). The privacy-level select, comment/duet/stitch
+// toggles, and creator identity/preview block below are all driven by a
+// real fetchTiktokCreatorInfo() call (TikTok's Content Posting API audit
+// explicitly checks for this) rather than hardcoded — for an unaudited
+// client TikTok itself only ever returns SELF_ONLY as an available privacy
+// option, but the UI doesn't assume that; it just reflects whatever comes
+// back, so nothing here needs to change once this app passes review.
 function renderTiktokPublishSectionEverywhere(job) {
   document.querySelectorAll(`.tiktok-publish-section[data-job-id="${job.id}"]`).forEach((el) => renderTiktokPublishSection(job, el));
 }
@@ -3725,40 +3729,108 @@ function renderTiktokPublishSection(job, container) {
     container.querySelector('[data-action="tiktok-open"]').onclick = () => openTiktokPublishPanel(job, container);
     return;
   }
+  if (pub._loadingCreatorInfo) {
+    container.innerHTML = `<p style="font-size:0.75rem;color:var(--muted);">Loading account info...</p>`;
+    return;
+  }
+  if (pub._creatorInfoError) {
+    container.innerHTML = `
+      <p style="font-size:0.75rem;color:var(--danger);">Couldn't load TikTok account info: ${escapeHtml(pub._creatorInfoError)}</p>
+      <div class="row" style="margin-top:6px;">
+        <button data-action="tiktok-cancel">Cancel</button>
+        <button data-action="tiktok-retry-info">Retry</button>
+      </div>`;
+    container.querySelector('[data-action="tiktok-cancel"]').onclick = () => { pub._panelOpen = false; renderTiktokPublishSection(job, container); };
+    container.querySelector('[data-action="tiktok-retry-info"]').onclick = () => openTiktokPublishPanel(job, container);
+    return;
+  }
+  const info = pub._creatorInfo || {};
+  const privacyOptions = info.privacyLevelOptions || [];
+  const previewImg = pub._previewDataUrl ? `<img src="${pub._previewDataUrl}" alt="" style="width:54px;height:96px;object-fit:cover;border-radius:4px;border:1px solid var(--border);">` : "";
   container.innerHTML = `
     <div class="publish-form" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:6px;">
-      <label>Account</label>
+      <div class="row" style="align-items:center;gap:8px;">
+        ${info.avatarUrl ? `<img src="${info.avatarUrl}" alt="" style="width:28px;height:28px;border-radius:50%;">` : ""}
+        <span style="font-size:0.8rem;">Posting as <strong>${escapeHtml(info.nickname || "")}</strong></span>
+        ${previewImg}
+      </div>
+      <label style="margin-top:6px;">Account</label>
       <select data-field="accountId">
         ${tiktokAccountsCache.map(a => `<option value="${a.id}" ${a.id === pub.accountId ? "selected" : ""}>${escapeHtml(a.displayName)}</option>`).join("")}
       </select>
       <label style="margin-top:6px;">Title</label>
       <input type="text" data-field="title" value="${escapeHtml(pub.title || "")}" maxlength="150">
+      <label style="margin-top:6px;">Who can view this post</label>
+      <select data-field="privacyLevel">
+        <option value="" ${pub.privacyLevel ? "" : "selected"} disabled>Choose privacy...</option>
+        ${privacyOptions.map(v => `<option value="${v}" ${v === pub.privacyLevel ? "selected" : ""}>${TIKTOK_PRIVACY_LABELS[v] || v}</option>`).join("")}
+      </select>
+      <div style="margin-top:6px;font-size:0.75rem;">
+        <label style="display:block;"><input type="checkbox" data-field="disableComment" ${pub.disableComment ? "checked" : ""} ${info.commentDisabled ? "disabled" : ""} style="width:auto;"> Disable comments</label>
+        <label style="display:block;"><input type="checkbox" data-field="disableDuet" ${pub.disableDuet ? "checked" : ""} ${info.duetDisabled ? "disabled" : ""} style="width:auto;"> Disable duets</label>
+        <label style="display:block;"><input type="checkbox" data-field="disableStitch" ${pub.disableStitch ? "checked" : ""} ${info.stitchDisabled ? "disabled" : ""} style="width:auto;"> Disable stitches</label>
+      </div>
       <p style="font-size:0.68rem;color:var(--muted);margin-top:8px;">
-        Posts are private (visible only to you) until this app passes TikTok's review — this isn't a bug.
-        By clicking "Post," you certify that the content complies with
-        <a href="https://www.tiktok.com/community-guidelines" target="_blank" rel="noopener">TikTok's Community Guidelines</a>.
+        ${privacyOptions.length === 1 && privacyOptions[0] === "SELF_ONLY" ? "Posts are private (visible only to you) until this app passes TikTok's review — this isn't a bug. " : ""}
+        After posting it may take a few minutes for TikTok to finish processing before it's visible in the app.
+        By clicking "Post," you agree to TikTok's <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target="_blank" rel="noopener">Music Usage Confirmation</a>
+        and certify the content complies with <a href="https://www.tiktok.com/community-guidelines" target="_blank" rel="noopener">TikTok's Community Guidelines</a>.
       </p>
       <div class="row" style="margin-top:8px;">
         <button data-action="tiktok-cancel">Cancel</button>
         <button class="primary" data-action="tiktok-upload">Post</button>
       </div>
     </div>`;
-  container.querySelector('[data-field="accountId"]').onchange = (e) => { pub.accountId = e.target.value; };
+  container.querySelector('[data-field="accountId"]').onchange = (e) => { pub.accountId = e.target.value; openTiktokPublishPanel(job, container); };
   container.querySelector('[data-field="title"]').oninput = (e) => { pub.title = e.target.value; };
+  container.querySelector('[data-field="privacyLevel"]').onchange = (e) => { pub.privacyLevel = e.target.value || null; };
+  container.querySelector('[data-field="disableComment"]').onchange = (e) => { pub.disableComment = e.target.checked; };
+  container.querySelector('[data-field="disableDuet"]').onchange = (e) => { pub.disableDuet = e.target.checked; };
+  container.querySelector('[data-field="disableStitch"]').onchange = (e) => { pub.disableStitch = e.target.checked; };
   container.querySelector('[data-action="tiktok-cancel"]').onclick = () => { pub._panelOpen = false; renderTiktokPublishSection(job, container); };
   container.querySelector('[data-action="tiktok-upload"]').onclick = () => uploadJobToTiktok(job, container);
 }
 
+const TIKTOK_PRIVACY_LABELS = {
+  PUBLIC_TO_EVERYONE: "Everyone",
+  MUTUAL_FOLLOW_FRIENDS: "Friends",
+  FOLLOWER_OF_CREATOR: "Followers",
+  SELF_ONLY: "Only me",
+};
+
 // First open: pick a starting account, pre-fill the title from the story
 // (same extractTitleFromStory() helper the YouTube panel's plain-extraction
 // fallback uses — TikTok has no AI-metadata-generation step to prefer
-// instead). A later re-open just re-renders whatever's already there.
-function openTiktokPublishPanel(job, container) {
+// instead), fetch the real creator info (nickname/avatar/privacy options/
+// disabled-interaction flags) TikTok's audit expects the UI to reflect, and
+// generate a content preview thumbnail from the finished render. A later
+// re-open (or switching the account select) re-fetches, since a different
+// account can have different privacy options.
+async function openTiktokPublishPanel(job, container) {
   const pub = job.tiktokPublish;
   pub._panelOpen = true;
   if (pub.accountId == null) pub.accountId = tiktokAccountsCache[0].id;
   if (pub.title == null) pub.title = extractTitleFromStory(job.story) || "Untitled";
+  pub._loadingCreatorInfo = true;
+  pub._creatorInfoError = null;
   renderTiktokPublishSection(job, container);
+  try {
+    const [info, previewDataUrl] = await Promise.all([
+      fetchTiktokCreatorInfo(pub.accountId),
+      pub._previewDataUrl ? Promise.resolve(pub._previewDataUrl) : generateVideoThumbnail(job.resultBlob),
+    ]);
+    pub._creatorInfo = info;
+    pub._previewDataUrl = previewDataUrl;
+    // If the account switched away from whatever privacy level was
+    // selected before (or nothing was selected yet), don't silently keep
+    // an option this account may not actually offer.
+    if (!info.privacyLevelOptions.includes(pub.privacyLevel)) pub.privacyLevel = null;
+  } catch (e) {
+    pub._creatorInfoError = e.message || String(e);
+  } finally {
+    pub._loadingCreatorInfo = false;
+    renderTiktokPublishSection(job, container);
+  }
 }
 
 const YOUTUBE_CATEGORY_OPTIONS = [
@@ -4083,6 +4155,7 @@ async function uploadJobToTiktok(job, container) {
   const pub = job.tiktokPublish;
   if (!job.resultBlob) { alert("No finished video to post."); return; }
   if (!pub.title || !pub.title.trim()) { alert("Enter a title first."); return; }
+  if (!pub.privacyLevel) { alert("Choose a privacy level first."); return; }
   pub.status = "uploading";
   pub.uploadProgressPct = 0;
   pub._phaseLabel = "Uploading to TikTok...";
@@ -4106,6 +4179,10 @@ async function uploadJobToTiktok(job, container) {
     const meta = {
       accountId: pub.accountId,
       title: pub.title,
+      privacyLevel: pub.privacyLevel,
+      disableComment: !!pub.disableComment,
+      disableDuet: !!pub.disableDuet,
+      disableStitch: !!pub.disableStitch,
       videoCoverTimestampMs: pub.videoCoverTimestampMs || 0,
       videoLen: videoBytes.length,
     };
@@ -5428,6 +5505,16 @@ async function refreshTiktokAccounts() {
     tiktokAccountsCache = [];
     if ($("#tiktokAccountsList")) $("#tiktokAccountsList").innerHTML = `<p style="font-size:0.8rem;color:var(--danger);">Couldn't load accounts (no backend server).</p>`;
   }
+}
+
+// Fetched fresh every time the publish panel opens (not cached across jobs)
+// since it's cheap and this is exactly the "real, current" data TikTok's
+// audit requirements expect the UI to reflect — not a stale snapshot.
+async function fetchTiktokCreatorInfo(accountId) {
+  const resp = await fetch(`/tiktok-creator-info/${accountId}`);
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || "Couldn't load TikTok account info.");
+  return data;
 }
 
 const TIKTOK_SIGNIN_TIMEOUT_MS = 5 * 60 * 1000;

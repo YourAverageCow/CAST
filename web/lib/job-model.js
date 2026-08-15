@@ -65,6 +65,15 @@ function createTiktokPublishState() {
     error: null,
     title: null,
     videoCoverTimestampMs: 0,
+    // Deliberately null, not a hardcoded default — TikTok's audit
+    // requirements call for a real, unforced choice from whatever options
+    // the creator_info API actually returns for this account (today just
+    // SELF_ONLY for an unaudited client, more once this app passes review).
+    // See renderTiktokPublishSection() in app.js.
+    privacyLevel: null,
+    disableComment: false,
+    disableDuet: false,
+    disableStitch: false,
     publishId: null, // TikTok's publish_id once posted
     uploadProgressPct: 0,
   };

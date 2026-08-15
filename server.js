@@ -927,6 +927,37 @@ function stripTiktokTokens(account) {
   return rest;
 }
 
+// TikTok's Content Posting API audit requires the app to show the real
+// creator identity (nickname/avatar) and the ACTUAL privacy-level options
+// TikTok is willing to grant this client before every post, not a hardcoded
+// guess — for an unaudited client that's just SELF_ONLY today, but calling
+// this for real (instead of hardcoding "SELF_ONLY" client-side) means the
+// UI automatically offers the full option set the moment this app passes
+// review, with no further code change needed. Also surfaces
+// comment/duet/stitch-disabled flags and the max post duration, all of
+// which the Content Posting API docs list as required pre-post display data.
+async function fetchTiktokCreatorInfo(accessToken) {
+  const resp = await fetch("https://open.tiktokapis.com/v2/post/publish/creator_info/query/", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+  });
+  const data = await resp.json();
+  if (!resp.ok || (data.error && data.error.code !== "ok")) {
+    throw new Error((data.error && data.error.message) || `Creator info lookup failed (${resp.status})`);
+  }
+  const d = data.data || {};
+  return {
+    nickname: d.creator_nickname || "",
+    avatarUrl: d.creator_avatar_url || "",
+    username: d.creator_username || "",
+    privacyLevelOptions: d.privacy_level_options || [],
+    commentDisabled: !!d.comment_disabled,
+    duetDisabled: !!d.duet_disabled,
+    stitchDisabled: !!d.stitch_disabled,
+    maxVideoPostDurationSec: d.max_video_post_duration_sec || null,
+  };
+}
+
 // TikTok's chunk rules (confirmed from their Content Posting API docs, not
 // guessed): whole file as one chunk under 5MB; otherwise 5MB-64MB per
 // chunk, with the LAST chunk allowed up to 128MB to absorb any remainder
@@ -944,6 +975,12 @@ function tiktokChunkPlan(totalBytes) {
 
 const TIKTOK_STATUS_POLL_INTERVAL_MS = 2000;
 const TIKTOK_STATUS_POLL_TIMEOUT_MS = 2 * 60 * 1000;
+// The only privacy_level values TikTok's API itself defines — used only to
+// reject an obviously-malformed request early; the real constraint (which
+// of these an unaudited client may actually use) is enforced by TikTok's
+// own API, driven by whatever fetchTiktokCreatorInfo() reported to the
+// client as this account's privacyLevelOptions.
+const TIKTOK_VALID_PRIVACY_LEVELS = ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"];
 
 // Direct Post: init -> chunked PUT -> poll for PUBLISH_COMPLETE/FAILED.
 // Genuinely different shape from runYoutubeUpload's resumable-until-a-200
@@ -953,6 +990,9 @@ const TIKTOK_STATUS_POLL_TIMEOUT_MS = 2 * 60 * 1000;
 // this has to poll after the upload finishes, not just report done.
 async function runTiktokUpload(id, store, account, video, meta, respond) {
   try {
+    if (!TIKTOK_VALID_PRIVACY_LEVELS.includes(meta.privacyLevel)) {
+      throw new Error("No privacy level was selected — reopen the TikTok panel and choose one before posting.");
+    }
     const accessToken = await ensureFreshTiktokToken(store, account);
     sendProgress(id, { phase: "initializing", pct: 0 });
 
@@ -964,11 +1004,17 @@ async function runTiktokUpload(id, store, account, video, meta, respond) {
       body: JSON.stringify({
         post_info: {
           title,
-          // Hardcoded regardless of what the UI might send — an unaudited
-          // client gets a hard API error for anything but SELF_ONLY, so
-          // there's no real choice here yet (see Settings -> Publish's
-          // TikTok section for the user-facing explanation of why).
-          privacy_level: "SELF_ONLY",
+          // Whatever the client selected from the real privacyLevelOptions
+          // fetchTiktokCreatorInfo() returned for this account — for an
+          // unaudited client that's still only ever going to be SELF_ONLY
+          // in practice (TikTok's API itself won't offer anything else),
+          // but it's no longer hardcoded here: the moment this app passes
+          // review, creator_info starts returning the full option set and
+          // this just works, no code change needed.
+          privacy_level: meta.privacyLevel,
+          disable_comment: !!meta.disableComment,
+          disable_duet: !!meta.disableDuet,
+          disable_stitch: !!meta.disableStitch,
           video_cover_timestamp_ms: meta.videoCoverTimestampMs || 0,
         },
         source_info: {
@@ -2494,6 +2540,24 @@ function handleRequest(req, res) {
         body: new URLSearchParams({ client_key: store.clientKey, client_secret: store.clientSecret, token: removed.refreshToken }),
       }).catch(() => {});
     }
+    return;
+  }
+  if (urlNoQuery.startsWith("/tiktok-creator-info/") && req.method === "GET") {
+    const accountId = urlNoQuery.slice("/tiktok-creator-info/".length);
+    (async () => {
+      try {
+        const store = loadTiktokStore();
+        const account = store.accounts.find(a => a.id === accountId);
+        if (!account) throw new Error("No such connected TikTok account — sign in again from Settings.");
+        const accessToken = await ensureFreshTiktokToken(store, account);
+        const info = await fetchTiktokCreatorInfo(accessToken);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(info));
+      } catch (e) {
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    })();
     return;
   }
   if (urlNoQuery.startsWith("/tiktok-upload-progress/") && req.method === "GET") {

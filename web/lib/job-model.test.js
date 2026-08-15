@@ -40,6 +40,7 @@ test("createJob has sane defaults", () => {
   assert.deepEqual(job.tiktokPublish, {
     accountId: null, status: "none", error: null,
     title: null, videoCoverTimestampMs: 0,
+    privacyLevel: null, disableComment: false, disableDuet: false, disableStitch: false,
     publishId: null, uploadProgressPct: 0,
   });
   assert.ok(job.id);
