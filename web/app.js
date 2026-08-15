@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 121;
+const VERSION = 122;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -845,10 +845,11 @@ async function applyLoadedSettings() {
     "piperSpeed", "kokoroSpeed", "openaiTtsSpeed",
     "elevenlabsStability", "elevenlabsSimilarity",
     "browserSpeechRate", "browserSpeechPitch",
+    "videoSpeed",
   ]) {
     const el = document.getElementById(id);
     const valueEl = document.getElementById(id + "Value");
-    if (el && valueEl) valueEl.textContent = parseFloat(el.value).toFixed(2);
+    if (el && valueEl) valueEl.textContent = parseFloat(el.value).toFixed(2) + (id === "videoSpeed" ? "x" : "");
   }
   const storySlider = document.getElementById("storyGenConcurrency");
   if (storySlider) {
