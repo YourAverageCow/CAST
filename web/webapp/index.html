@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<script src="../coi-serviceworker.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AITAH Video Creator — Web</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --danger: #f85149;
+  --green: #3fb950;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  overflow: hidden;
+}
+.sidebar {
+  width: 360px;
+  min-width: 280px;
+  max-width: 700px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 20px;
+  overflow-y: auto;
+  height: 100vh;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.sidebar::-webkit-scrollbar, .sidebar-inner::-webkit-scrollbar, .main::-webkit-scrollbar { display: none; }
+.panel-resize-handle { position: absolute; top: 0; width: 6px; height: 100%; cursor: ew-resize; z-index: 15; touch-action: none; }
+.panel-resize-handle:hover, .panel-resize-handle.dragging { background: rgba(88,166,255,0.35); }
+#sidebarResizeHandle { right: -3px; }
+#settingsResizeHandle { left: -3px; }
+.sidebar-inner { flex: 1; overflow-y: auto; -ms-overflow-style: none; scrollbar-width: none; }
+.sidebar-footer { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 12px; font-size: 0.7rem; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+.sidebar-footer .version { font-family: 'SF Mono', Menlo, monospace; color: var(--accent); background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); padding: 2px 8px; border-radius: 4px; }
+.sidebar-footer .build-tag { color: var(--green); }
+.main { flex: 1; padding: 20px 30px; overflow-y: auto; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 20px; -ms-overflow-style: none; scrollbar-width: none; }
+
+.sidebar-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+.sidebar-header h1 { font-size: 1.2rem; font-weight: 600; margin: 0; }
+.subtitle { color: var(--muted); font-size: 0.75rem; margin-bottom: 16px; }
+
+h2 { font-size: 0.78rem; font-weight: 600; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; display: flex; align-items: center; gap: 8px; }
+h2 .step-num { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #0d1117; font-size: 0.7rem; font-weight: 700; flex: none; }
+h2 .step-bar { flex: 1; height: 1px; background: var(--border); }
+h2:first-of-type { margin-top: 8px; }
+
+label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 3px; margin-top: 10px; }
+select, input, textarea {
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.8rem;
+  font-family: inherit;
+}
+select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(88,166,255,0.12); }
+textarea { resize: vertical; min-height: 120px; line-height: 1.5; overflow-y: hidden; }
+textarea.valid { border-color: var(--green) !important; }
+button {
+  padding: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, transform 0.05s;
+}
+button:hover { background: #21262d; border-color: #444c56; }
+button:active { transform: scale(0.98); }
+button.primary { background: linear-gradient(180deg, #2ea043, #238636); border-color: #2ea043; color: #fff; width: 100%; margin-top: 8px; font-weight: 600; }
+button.primary:hover { background: linear-gradient(180deg, #3fb950, #2ea043); border-color: #3fb950; }
+button.accent { background: linear-gradient(180deg, #388bfd, #1f6feb); border-color: #388bfd; color: #fff; font-weight: 600; }
+button.accent:hover { background: linear-gradient(180deg, #58a6ff, #388bfd); border-color: #58a6ff; }
+button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.row { display: flex; gap: 8px; }
+.row button { flex: 1; }
+
+#videoUploadArea { border: 2px dashed var(--border); border-radius: 8px; padding: 20px; text-align: center; cursor: pointer; transition: border-color 0.15s; margin-top: 8px; }
+#videoUploadArea:hover, #videoUploadArea.drag { border-color: var(--accent); }
+#videoUploadArea p { color: var(--muted); font-size: 0.8rem; }
+#videoUploadArea .icon { font-size: 1.5rem; }
+#videoUploadArea.uploaded { border-color: var(--green); border-style: solid; }
+
+.preview-wrapper { position: relative; width: 100%; max-width: 400px; aspect-ratio: 9/16; background: #000; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+.preview-wrapper video { width: 100%; height: 100%; object-fit: cover; }
+#previewPlaceholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.9rem; }
+#captionOverlay { position: absolute; max-width: 80%; width: max-content; text-align: center; padding: 8px 12px; border-radius: 6px; pointer-events: none; display: none; line-height: 1.3; cursor: ns-resize; touch-action: none; user-select: none; }
+#captionOverlay.show { display: block; }
+#captionOverlay.editable { pointer-events: auto; outline: 1px dashed rgba(255,255,255,0.5); }
+#captionResizeHandle { position: absolute; right: -7px; bottom: -7px; width: 13px; height: 13px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); box-shadow: 0 1px 4px rgba(0,0,0,0.5); cursor: nwse-resize; touch-action: none; display: none; transition: transform 0.12s ease; }
+#captionResizeHandle:hover { transform: scale(1.3); }
+#captionOverlay.editable #captionResizeHandle { display: block; }
+#captionEditHint { text-align: center; font-size: 0.75rem; color: var(--muted); margin-top: 6px; }
+
+#outputContainer { width: 100%; max-width: 600px; }
+.video-result { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.3); margin-bottom: 16px; }
+.video-result .actions { display: flex; gap: 8px; justify-content: stretch; }
+.video-result .actions button { flex: 1; width: auto; padding: 10px 8px; border-radius: 6px; white-space: nowrap; }
+.video-result .actions button:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
+.video-result .actions button:first-child:hover { background: #388bfd; }
+.video-result .result-status { font-size: 0.85rem; color: var(--muted); margin-bottom: 8px; }
+.video-result .result-error { font-size: 0.85rem; color: var(--danger); text-align: left; white-space: pre-wrap; }
+
+.progress-bar-track { width: 100%; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.progress-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s ease; }
+
+/* ---- Single/Batch flow toggle ---- */
+.flow-toggle { display: flex; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px; margin-bottom: 20px; width: max-content; }
+.flow-toggle-btn { background: transparent; border: none; color: var(--muted); padding: 6px 18px; border-radius: 6px; font-size: 0.85rem; cursor: pointer; }
+.flow-toggle-btn.active { background: var(--accent); color: #fff; }
+.flow-toggle-btn:not(.active):hover { color: var(--text); }
+
+/* ---- Batch composer ---- */
+#batchFlow { width: 100%; max-width: 900px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+#batchComposer { width: 100%; max-width: 700px; display: flex; flex-direction: column; gap: 12px; }
+#batchCardList { display: flex; flex-direction: column; gap: 14px; }
+.batch-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.batch-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.batch-card-index { font-size: 0.8rem; color: var(--muted); font-weight: 600; }
+.batch-card-remove { background: transparent; border: 1px solid var(--border); color: var(--muted); width: 26px; height: 26px; border-radius: 6px; cursor: pointer; padding: 0; font-size: 0.9rem; }
+.batch-card-remove:hover { color: var(--danger); border-color: var(--danger); }
+.batch-card label { font-size: 0.75rem; color: var(--muted); display: block; margin: 8px 0 4px; }
+.batch-card textarea { min-height: 60px; }
+.batch-card .row { display: flex; gap: 8px; margin-top: 6px; }
+.batch-card .row button { flex: 1; padding: 8px; font-size: 0.8rem; }
+.bc-upload-area { border: 2px dashed var(--border); border-radius: 8px; padding: 12px; text-align: center; cursor: pointer; font-size: 0.8rem; color: var(--muted); }
+.bc-upload-area.uploaded { border-color: var(--green); border-style: solid; color: var(--text); }
+.bc-customize-toggle { background: transparent; border: none; color: var(--accent); font-size: 0.78rem; cursor: pointer; padding: 4px 0; margin-top: 6px; width: 100%; text-align: left; }
+.bc-customize { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+.bc-customize .field-full { grid-column: 1 / -1; }
+.bc-customize label { margin: 0 0 3px; }
+
+.batch-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.batch-parallelism-label { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); }
+.batch-parallelism-label select { width: auto; padding: 6px 10px; }
+.batch-hint { font-size: 0.72rem; color: var(--muted); margin: 0; }
+
+#resultsGrid { width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+#resultsGrid .video-result { margin-bottom: 0; }
+.result-card-title { font-size: 0.78rem; color: var(--text); margin-bottom: 8px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.result-retry-btn { width: 100%; margin-top: 8px; padding: 8px; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; }
+.result-retry-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.toast { position: fixed; bottom: 20px; right: 20px; background: #238636; color: #fff; padding: 10px 18px; border-radius: 6px; font-size: 0.8rem; opacity: 0; transition: opacity 0.3s; z-index: 200; }
+.toast.show { opacity: 1; }
+
+#downloadToast {
+  position: fixed;
+  top: 16px; right: 64px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  opacity: 0;
+  transition: opacity 0.3s;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  pointer-events: none;
+}
+#downloadToast.show { opacity: 1; pointer-events: auto; }
+.download-spinner {
+  width: 16px; height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: dspin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes dspin { to { transform: rotate(360deg); } }
+
+.voice-preview-row { display: flex; gap: 8px; align-items: end; }
+.voice-preview-row select { flex: 1; }
+.voice-preview-row button { width: auto; padding: 7px 12px; font-size: 0.75rem; }
+
+.app-gear { position: fixed; top: 16px; right: 16px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; z-index: 220; padding: 0; }
+.app-gear:hover { color: var(--text); border-color: var(--accent); background: #21262d; }
+.app-version { position: fixed; bottom: 12px; right: 16px; font-family: 'SF Mono', Menlo, monospace; font-size: 0.7rem; color: var(--accent); background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); padding: 2px 8px; border-radius: 4px; z-index: 80; }
+
+/* Settings panel (right slide-in) */
+#settingsOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 90; }
+#settingsOverlay.show { display: block; }
+#settingsPanel { position: fixed; top: 0; right: 0; width: 380px; min-width: 300px; max-width: 640px; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 91; padding: 20px; overflow-y: auto; transform: translateX(100%); transition: transform 0.2s ease; }
+#settingsPanel.dragging-resize { transition: none; }
+#settingsPanel.open { transform: translateX(0); }
+.settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.settings-header h2 { margin: 0; font-size: 1rem; color: var(--text); text-transform: none; letter-spacing: 0; }
+.close-btn { width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--muted); cursor: pointer; font-size: 0.9rem; display: flex; align-items: center; justify-content: center; padding: 0; }
+.close-btn:hover { color: var(--text); background: var(--border); }
+.settings-section { margin-bottom: 20px; }
+.settings-section h3 { font-size: 0.85rem; font-weight: 600; color: var(--accent); margin-bottom: 8px; }
+.caption-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.caption-grid input { margin-top: 0; }
+.caption-grid label { margin-top: 6px; }
+
+/* Player panel (right side) */
+#playerOverlay { display: none; position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 300; box-shadow: -8px 0 30px rgba(0,0,0,0.5); }
+#playerOverlay.show { display: block; }
+#debugImageOverlay { display: none; position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 300; box-shadow: -8px 0 30px rgba(0,0,0,0.5); }
+#debugImageOverlay.show { display: block; }
+.player-box { position: relative; height: 100%; display: flex; flex-direction: column; padding: 20px; gap: 12px; overflow-y: auto; }
+.player-box video { width: 100%; border-radius: 8px; background: #000; aspect-ratio: 9/16; object-fit: contain; }
+.player-close { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font-size: 0.9rem; display: flex; align-items: center; justify-content: center; padding: 0; z-index: 2; }
+.player-actions { display: flex; gap: 8px; justify-content: center; }
+.player-actions button { width: auto; flex: 1; padding: 8px 20px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; font-size: 0.8rem; }
+.player-actions button:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+#browserNote { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); border-radius: 8px; padding: 10px 12px; font-size: 0.75rem; color: var(--muted); margin-bottom: 12px; line-height: 1.5; }
+#outdatedNote { background: rgba(240,166,50,0.1); border: 1px solid rgba(240,166,50,0.35); border-radius: 8px; padding: 10px 12px; font-size: 0.75rem; color: var(--text); margin-bottom: 12px; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<!-- Settings panel -->
+<div id="settingsOverlay" onclick="closeSettings()"></div>
+<div id="settingsPanel">
+  <div class="panel-resize-handle" id="settingsResizeHandle"></div>
+  <div class="settings-header">
+    <h2>Settings</h2>
+    <button class="close-btn" onclick="closeSettings()">X</button>
+  </div>
+  <div class="settings-section">
+    <h3>AI Provider</h3>
+    <label>Provider</label>
+    <select id="provider">
+      <option value="deepseek">DeepSeek</option>
+      <option value="openai">OpenAI</option>
+    </select>
+    <label>Model</label>
+    <select id="model"></select>
+    <label>API Key</label>
+    <input type="text" id="apiKey" placeholder="Your API key">
+    <label>Story Length</label>
+    <select id="storyLength">
+      <option value="150">Short (~150 words)</option>
+      <option value="400" selected>Medium (~400 words)</option>
+      <option value="700">Long (~700 words)</option>
+      <option value="1000">Extra Long (~1000 words)</option>
+    </select>
+  </div>
+  <div class="settings-section">
+    <h3>Video Output</h3>
+    <div class="caption-grid">
+      <div><label>Width</label><input type="number" id="resW" value="1080" min="480" max="2160" step="2"></div>
+      <div><label>Height</label><input type="number" id="resH" value="1920" min="480" max="3840" step="2"></div>
+      <div><label>FPS</label><input type="number" id="fps" value="30" min="10" max="60"></div>
+    </div>
+  </div>
+  <div class="settings-section">
+    <h3>Caption Style</h3>
+    <label>Preset</label>
+    <select id="captionPreset">
+      <option value="capcut" selected>CapCut (one word at a time)</option>
+      <option value="classic">Classic (grouped phrases)</option>
+    </select>
+    <div class="caption-grid" style="margin-top:8px;">
+      <div><label>Font</label><input type="text" id="font" value="Arial"></div>
+      <div><label>Font Size</label><input type="number" id="fontSize" value="68" min="24" max="120"></div>
+      <div><label>Position Y</label><input type="number" id="positionY" value="0.55" min="0.05" max="0.95" step="0.01"></div>
+      <div><label>Text Color</label><input type="text" id="textColor" value="white"></div>
+      <div><label>Stroke Color</label><input type="text" id="strokeColor" value="black"></div>
+      <div><label>Stroke Width</label><input type="number" id="strokeWidth" value="3" min="0" max="10"></div>
+    </div>
+  </div>
+  <div class="settings-section">
+    <h3>Narration Voice</h3>
+    <label>TTS Engine</label>
+    <select id="ttsEngine" onchange="onEngineChangeUI()"></select>
+    <p id="engineNote" style="font-size:0.72rem;color:var(--muted);margin:6px 0;"></p>
+    <div id="ttsOpenaiKeyRow" style="display:none;">
+      <label>OpenAI TTS API Key</label>
+      <input type="text" id="ttsOpenaiKey" placeholder="sk-...">
+    </div>
+    <div id="ttsElevenlabsKeyRow" style="display:none;">
+      <label>ElevenLabs API Key</label>
+      <input type="text" id="ttsElevenlabsKey" placeholder="Your ElevenLabs API key">
+    </div>
+    <label style="margin-top:8px;">Voice</label>
+    <select id="voice"></select>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+      <input type="checkbox" id="enableBrowserAsr" style="width:auto;"> Improve caption sync with AI transcription (slower, ~40MB download)
+    </label>
+    <p style="font-size:0.72rem;color:var(--muted);margin-top:4px;">Only used when a local native Whisper backend isn't already available (that's used automatically and is faster) — this runs speech-to-text in your browser instead to get real word timestamps, rather than an estimate.</p>
+  </div>
+  <div class="settings-section">
+    <h3>Title Card Identity</h3>
+    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Used when a video has the title card enabled. The title card itself is turned on per-video.</p>
+    <label>Channel Name</label>
+    <input type="text" id="channelName" placeholder="Anonymous" value="Anonymous">
+    <label style="margin-top:8px;">Profile Picture</label>
+    <div class="row" style="align-items:center;gap:10px;">
+      <img id="channelProfilePicPreview" style="display:none;width:40px;height:40px;border-radius:50%;object-fit:cover;">
+      <button class="accent" onclick="document.getElementById('channelProfilePicInput').click()" style="flex:1;">Upload</button>
+      <button onclick="removeProfilePic()" style="flex:1;">Remove</button>
+    </div>
+    <input type="file" id="channelProfilePicInput" accept="image/*" style="display:none" onchange="handleProfilePicUpload(this)">
+  </div>
+  <div class="settings-section">
+    <h3>Debug</h3>
+    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Check how captions/title card actually look without generating a full story or waiting on TTS.</p>
+    <label>Sample caption text</label>
+    <textarea id="debugSampleText" rows="2">This is a test caption line for checking timing and style.</textarea>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+      <input type="checkbox" id="debugAlsoTestTts" style="width:auto;"> Also test TTS generation (uses the selected engine/voice above)
+    </label>
+    <div class="row" style="margin-top:8px;">
+      <button class="accent" onclick="previewTitleCard()">Preview Title Card</button>
+      <button class="primary" onclick="runDebugTestRender()" id="debugRenderBtn">Test Render (real, ~3s clip)</button>
+    </div>
+    <p id="debugStatus" style="font-size:0.72rem;color:var(--muted);margin-top:6px;"></p>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="sidebar" id="sidebar">
+  <div class="panel-resize-handle" id="sidebarResizeHandle"></div>
+  <div class="sidebar-inner">
+  <div class="sidebar-header">
+    <h1>Video Creator</h1>
+  </div>
+  <p class="subtitle">AITAH story videos — runs 100% in your browser</p>
+  <div id="outdatedNote">⚠️ This is the legacy zero-install web version, kept around for the "click a link, no install" case. It's no longer where active development happens — the actively developed version now runs as a local app with native rendering/transcription instead of in-browser WASM. Some newer features may not be here yet.</div>
+  <div id="browserNote">Everything runs locally: TTS uses Piper (in-browser), video renders with ffmpeg.wasm. First use downloads the voice model + engine once.</div>
+
+  <h2><span class="step-num">1</span>Background Video<span class="step-bar"></span></h2>
+  <div id="videoUploadArea" onclick="document.getElementById('videoInput').click()">
+    <div class="icon">🎬</div>
+    <p id="uploadStatus">Click to upload background video</p>
+  </div>
+  <input type="file" id="videoInput" accept="video/*" style="display:none" onchange="handleVideoUpload(this)">
+  <div id="presetVideoRow" style="display:none;margin-top:6px;">
+    <select id="presetVideoSelect" onchange="selectPresetVideo(this.value, this)">
+      <option value="">Or pick a preset...</option>
+    </select>
+  </div>
+
+  <h2><span class="step-num">2</span>Story<span class="step-bar"></span></h2>
+  <label>Premise / Idea</label>
+  <textarea id="premise" placeholder="e.g. My brother asked me to babysit his kids during my wedding..." rows="2" oninput="validateInputs()"></textarea>
+  <div class="row">
+    <button class="accent" onclick="getIdeas()" id="ideasBtn">Suggest Ideas</button>
+    <button class="primary" onclick="generateStory()" id="genStoryBtn">Generate Story</button>
+  </div>
+  <label>Story Text</label>
+  <textarea id="storyText" placeholder="Your story will appear here... or paste your own!" rows="7" oninput="validateInputs(); autoGrow(this);"></textarea>
+
+  <h2><span class="step-num">3</span>Preview &amp; Export<span class="step-bar"></span></h2>
+  <div class="voice-preview-row" style="margin-bottom:8px;display:flex;gap:6px;">
+    <select id="ttsEngineQuick" onchange="syncEngineQuick()" style="flex:1;">
+      <option value="">Use settings engine</option>
+    </select>
+    <select id="voiceQuick" onchange="syncVoiceQuick()" style="flex:1;">
+      <option value="">Use settings voice</option>
+    </select>
+  </div>
+  <div class="row" style="align-items:center;margin-top:4px;">
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--text);margin:0;">
+      <input type="checkbox" id="titleCardEnabled" style="width:auto;" checked> Title card
+    </label>
+  </div>
+  <input type="text" id="titleCardText" placeholder="Auto title from story (or type your own)" style="margin-top:6px;">
+
+  <label style="margin-top:10px;">Background Music</label>
+  <div class="row">
+    <input type="file" id="musicInput" accept="audio/*" style="display:none" onchange="handleMusicUpload(this)">
+    <button class="accent" onclick="document.getElementById('musicInput').click()" style="flex:1;">Upload track</button>
+    <button onclick="clearMusic()" style="flex:1;">None</button>
+  </div>
+  <p id="musicStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
+  <div id="presetMusicRow" style="display:none;margin-top:6px;">
+    <select id="presetMusicSelect" onchange="selectPresetMusic(this.value, this)">
+      <option value="">Or pick a preset...</option>
+    </select>
+  </div>
+  <label style="margin-top:4px;">Music Volume</label>
+  <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25">
+
+  <div class="row">
+    <button class="accent" onclick="startPreview()" id="previewBtn">Preview</button>
+    <button class="primary" onclick="exportVideo()" id="exportBtn" style="margin-top:0">Export Video</button>
+  </div>
+  <p style="font-size:0.7rem;color:var(--muted);margin-top:6px;">Preview plays captions in real-time. Export renders the MP4.</p>
+  </div>
+  <div class="sidebar-footer">
+    <span class="build-tag">● ready</span>
+  </div>
+</div>
+
+<div class="main">
+  <button class="gear-btn app-gear" onclick="toggleSettings()" title="Settings">&#9881;</button>
+  <span class="version app-version" id="versionBadge">v0</span>
+
+  <div class="flow-toggle" id="flowToggle">
+    <button class="flow-toggle-btn active" data-flow="single" onclick="setFlow('single')">Single</button>
+    <button class="flow-toggle-btn" data-flow="batch" onclick="setFlow('batch')">Batch</button>
+  </div>
+
+  <div id="singleFlow">
+    <div class="preview-wrapper" id="previewContainer">
+      <video id="videoPreview" loop muted playsinline style="display:none"></video>
+      <div id="previewPlaceholder">Upload a background video</div>
+      <div id="captionOverlay"><span id="captionText"></span><div id="captionResizeHandle"></div></div>
+    </div>
+    <div id="captionEditHint" style="display:none">Drag the caption up/down to move it, drag the dot to resize</div>
+    <div id="outputContainer"></div>
+  </div>
+
+  <div id="batchFlow" style="display:none">
+    <div id="batchComposer">
+      <div id="batchCardList"></div>
+      <button class="accent" id="addBatchCardBtn" onclick="addBatchCard()">+ Add Video</button>
+      <div class="batch-controls">
+        <label class="batch-parallelism-label">Parallel renders
+          <select id="batchParallelism"></select>
+        </label>
+        <button class="primary" onclick="renderAllBatch()" id="renderAllBtn">Generate All</button>
+      </div>
+      <p class="batch-hint" id="batchParallelismHint"></p>
+    </div>
+    <div id="resultsGrid"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div id="downloadToast">
+  <span class="download-spinner"></span>
+  <span id="downloadToastText">Downloading TTS model...</span>
+</div>
+
+<div id="playerOverlay">
+  <div class="player-box">
+    <button class="player-close" onclick="closePlayer()">X</button>
+    <h2 style="margin:0;color:var(--text);text-transform:none;letter-spacing:0;">Preview</h2>
+    <video id="playerVideo" controls playsinline></video>
+    <div class="player-actions">
+      <button onclick="downloadVideo(document.getElementById('playerVideo').src)">Download</button>
+      <button onclick="copyVideoLink(document.getElementById('playerVideo').src)">Copy Link</button>
+    </div>
+  </div>
+</div>
+
+<div id="debugImageOverlay">
+  <div class="player-box">
+    <button class="player-close" onclick="closeDebugImagePreview()">X</button>
+    <h2 style="margin:0;color:var(--text);text-transform:none;letter-spacing:0;">Title Card Preview</h2>
+    <img id="debugImagePreview" style="width:100%;border-radius:8px;">
+  </div>
+</div>
+
+<script src="../lib/captions.js"></script>
+<script src="../lib/video-utils.js"></script>
+<script src="../lib/job-model.js"></script>
+<script src="../lib/ffmpeg-filters.js"></script>
+<script src="../lib/tts-engines.js"></script>
+<script src="../lib/presets.js"></script>
+<script src="../worker-pool.js"></script>
+<script src="../app.js"></script>
+</body>
+</html>
