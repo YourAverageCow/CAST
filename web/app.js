@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 124;
+const VERSION = 125;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -729,7 +729,7 @@ function onOllamaModelSelectChange() {
 const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "modelCustom", "customBaseUrl", "storyLength",
   "storySystemPromptOverride",
-  "resW", "resH", "fps", "encodingQuality", "videoSpeed",
+  "resW", "resH", "fps", "encodingQuality", "videoSpeed", "defaultMusicVolume",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset", "captionUppercase", "highlightColor",
   "captionBox", "boxColor", "boxAlpha", "boxBorderW", "boxBevel",
@@ -850,6 +850,15 @@ async function applyLoadedSettings() {
     const el = document.getElementById(id);
     const valueEl = document.getElementById(id + "Value");
     if (el && valueEl) valueEl.textContent = parseFloat(el.value).toFixed(2) + (id === "videoSpeed" ? "x" : "");
+  }
+  const defaultMusicVolumeEl = document.getElementById("defaultMusicVolume");
+  if (defaultMusicVolumeEl) {
+    $("#defaultMusicVolumeValue").textContent = Math.round(parseFloat(defaultMusicVolumeEl.value) * 100) + "%";
+    // Seeds the Single-video export's own music-volume slider with this
+    // default on load/import — still freely adjustable per export
+    // afterward, same as every other "default X" setting in this app.
+    const musicVolumeEl = document.getElementById("musicVolume");
+    if (musicVolumeEl) musicVolumeEl.value = defaultMusicVolumeEl.value;
   }
   const storySlider = document.getElementById("storyGenConcurrency");
   if (storySlider) {
@@ -1320,6 +1329,9 @@ async function init() {
   $("#captionBox").addEventListener("change", updateCaptionBoxShadowRows);
   $("#videoSpeed").addEventListener("input", () => {
     $("#videoSpeedValue").textContent = (numOr($("#videoSpeed").value, parseFloat, 1)).toFixed(2) + "x";
+  });
+  $("#defaultMusicVolume").addEventListener("input", () => {
+    $("#defaultMusicVolumeValue").textContent = Math.round(numOr($("#defaultMusicVolume").value, parseFloat, 0.25) * 100) + "%";
   });
   $("#captionShadow").addEventListener("change", updateCaptionBoxShadowRows);
   // Scheduling is a MODE of auto-upload, not an independent trigger — turning
@@ -6299,7 +6311,10 @@ function updateParallelismHint() {
 }
 
 function addBatchCard() {
-  const job = trackJob(createJob());
+  const defaultMusicVolumeEl = $("#defaultMusicVolume");
+  const job = trackJob(createJob({
+    musicVolume: defaultMusicVolumeEl ? parseFloat(defaultMusicVolumeEl.value) || 0.25 : 0.25,
+  }));
   batchJobs.push(job);
   const el = buildBatchCardElement(job);
   $("#batchCardList").appendChild(el);
@@ -6411,7 +6426,7 @@ function buildBatchCardElement(job) {
           ${presetMusicOpts}
         </select>` : ""}
         <button class="library-pick-link bc-library-pick-music">Choose from library</button>
-        <input type="range" class="bc-musicVolume" min="0" max="1" step="0.05" value="0.25">
+        <input type="range" class="bc-musicVolume" min="0" max="1" step="0.05" value="${job.musicVolume}">
       </div>
     </div>
   `;

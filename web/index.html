@@ -642,6 +642,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
           </label>
           <input type="range" id="videoSpeed" min="1" max="1.5" step="0.05" value="1">
           <p style="font-size:0.72rem;color:var(--muted);margin-top:2px;">Speeds up narration and captions only (audio pitch-corrected) — the background video keeps playing at its normal speed. Applied automatically to every render. 1.00x = off.</p>
+          <label style="margin-top:8px;display:flex;justify-content:space-between;">
+            <span>Default Music Volume</span>
+            <span id="defaultMusicVolumeValue" style="color:var(--muted);">25%</span>
+          </label>
+          <input type="range" id="defaultMusicVolume" min="0" max="1" step="0.05" value="0.25">
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:2px;">Starting background-music volume for the Single-video export slider and every new batch job. Still adjustable per video afterward.</p>
         </div>
         <div class="settings-section">
           <h3>Caption Style</h3>
