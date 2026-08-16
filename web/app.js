@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 125;
+const VERSION = 126;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -3707,6 +3707,13 @@ function renderPublishSection(job, container) {
 // client TikTok itself only ever returns SELF_ONLY as an available privacy
 // option, but the UI doesn't assume that; it just reflects whatever comes
 // back, so nothing here needs to change once this app passes review.
+const TIKTOK_PRIVACY_LABELS = {
+  PUBLIC_TO_EVERYONE: "Everyone",
+  MUTUAL_FOLLOW_FRIENDS: "Friends",
+  FOLLOWER_OF_CREATOR: "Followers",
+  SELF_ONLY: "Only me",
+};
+
 function renderTiktokPublishSectionEverywhere(job) {
   document.querySelectorAll(`.tiktok-publish-section[data-job-id="${job.id}"]`).forEach((el) => renderTiktokPublishSection(job, el));
 }
@@ -3803,13 +3810,6 @@ function renderTiktokPublishSection(job, container) {
   container.querySelector('[data-action="tiktok-upload"]').onclick = () => uploadJobToTiktok(job, container);
 }
 
-const TIKTOK_PRIVACY_LABELS = {
-  PUBLIC_TO_EVERYONE: "Everyone",
-  MUTUAL_FOLLOW_FRIENDS: "Friends",
-  FOLLOWER_OF_CREATOR: "Followers",
-  SELF_ONLY: "Only me",
-};
-
 // First open: pick a starting account, pre-fill the title from the story
 // (same extractTitleFromStory() helper the YouTube panel's plain-extraction
 // fallback uses — TikTok has no AI-metadata-generation step to prefer
@@ -3827,12 +3827,9 @@ async function openTiktokPublishPanel(job, container) {
   pub._creatorInfoError = null;
   renderTiktokPublishSection(job, container);
   try {
-    const [info, previewDataUrl] = await Promise.all([
-      fetchTiktokCreatorInfo(pub.accountId),
-      pub._previewDataUrl ? Promise.resolve(pub._previewDataUrl) : generateVideoThumbnail(job.resultBlob),
-    ]);
+    const info = await fetchTiktokCreatorInfo(pub.accountId);
+    if (!pub._previewDataUrl) pub._previewDataUrl = await generateVideoThumbnail(job.resultBlob);
     pub._creatorInfo = info;
-    pub._previewDataUrl = previewDataUrl;
     // If the account switched away from whatever privacy level was
     // selected before (or nothing was selected yet), don't silently keep
     // an option this account may not actually offer.
@@ -6311,9 +6308,8 @@ function updateParallelismHint() {
 }
 
 function addBatchCard() {
-  const defaultMusicVolumeEl = $("#defaultMusicVolume");
   const job = trackJob(createJob({
-    musicVolume: defaultMusicVolumeEl ? parseFloat(defaultMusicVolumeEl.value) || 0.25 : 0.25,
+    musicVolume: numOr($("#defaultMusicVolume") && $("#defaultMusicVolume").value, parseFloat, 0.25),
   }));
   batchJobs.push(job);
   const el = buildBatchCardElement(job);

@@ -2544,11 +2544,15 @@ function handleRequest(req, res) {
   }
   if (urlNoQuery.startsWith("/tiktok-creator-info/") && req.method === "GET") {
     const accountId = urlNoQuery.slice("/tiktok-creator-info/".length);
+    const store = loadTiktokStore();
+    const account = store.accounts.find(a => a.id === accountId);
+    if (!account) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "No such connected TikTok account — sign in again from Settings." }));
+      return;
+    }
     (async () => {
       try {
-        const store = loadTiktokStore();
-        const account = store.accounts.find(a => a.id === accountId);
-        if (!account) throw new Error("No such connected TikTok account — sign in again from Settings.");
         const accessToken = await ensureFreshTiktokToken(store, account);
         const info = await fetchTiktokCreatorInfo(accessToken);
         res.writeHead(200, { "Content-Type": "application/json" });
