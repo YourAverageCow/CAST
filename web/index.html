@@ -1026,9 +1026,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
               <code>video.publish</code> scopes.
             </li>
             <li>
-              Set the app type to <b>Desktop</b> (matters the same way it does for YouTube's setup above — the wrong type
-              causes a redirect mismatch at sign-in) and add this exact redirect URI:
-              <code>http://127.0.0.1:8123/tiktok-oauth-callback</code>
+              Add this exact redirect URI — unlike YouTube's, TikTok requires this to be on a verified website domain
+              rather than a bare <code>127.0.0.1</code> address, so this points at a small hand-off page on CAST's own
+              site that forwards the sign-in back to your computer:
+              <code>https://youraveragecow.github.io/CAST/tiktok-oauth-callback/</code>
             </li>
             <li>
               Copy the Client Key and Client Secret from your app's Basic Information page into the fields below.
