@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connecting TikTok — CAST</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #c9d1d9; --muted: #8b949e; --accent: #58a6ff; --danger: #f85149;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --muted: #59636e; --accent: #0969da; --danger: #cf222e; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6; display: flex; align-items: center; justify-content: center; min-height: 100vh;
+  }
+  .wrap { max-width: 480px; margin: 0 auto; padding: 40px 24px; text-align: center; }
+  h1 { font-size: 1.3rem; margin: 0 0 12px; }
+  p { color: var(--muted); font-size: 0.92rem; margin: 0 0 8px; }
+  a.btn {
+    display: inline-block; margin-top: 16px; padding: 10px 20px; border-radius: 8px;
+    background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; font-size: 0.9rem;
+  }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; }
+  .spinner {
+    width: 28px; height: 28px; border: 3px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; margin: 0 auto 20px; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="spinner" id="spinner"></div>
+  <h1 id="heading">Connecting your TikTok account&hellip;</h1>
+  <p id="message">Redirecting back to CAST on your computer. This page can be closed once that tab confirms the connection.</p>
+  <div id="fallback" style="display:none;">
+    <a class="btn" id="fallbackLink" href="#">Continue to CAST</a>
+    <p style="margin-top:14px;">If nothing happens, make sure CAST is running on your computer, then click the button above. You can also just close this tab and try &ldquo;Sign in with TikTok&rdquo; again from Settings.</p>
+  </div>
+</div>
+<script>
+  // TikTok requires the OAuth redirect_uri to live on this app's verified
+  // website domain — it can't be a bare http://127.0.0.1 loopback address
+  // the way YouTube's redirect is. But the actual token exchange needs the
+  // TikTok app's client secret, which a static GitHub Pages site has no
+  // safe way to hold. So this page does neither: it's a pure hand-off —
+  // TikTok redirects the browser here with ?code=&state=, and this page
+  // immediately forwards those same params to CAST's own local server,
+  // which does the real (server-side, secret-holding) exchange exactly as
+  // it always has. Nothing here ever sees or needs the client secret.
+  var params = window.location.search; // includes leading "?code=...&state=..." or "?error=..."
+  var localTarget = "http://127.0.0.1:8123/tiktok-oauth-callback" + params;
+
+  if (!params || params.indexOf("code=") === -1 && params.indexOf("error=") === -1) {
+    document.getElementById("spinner").style.display = "none";
+    document.getElementById("heading").textContent = "Nothing to connect";
+    document.getElementById("message").textContent = "This page is only meant to be reached as part of TikTok's sign-in redirect from CAST.";
+  } else {
+    document.getElementById("fallbackLink").href = localTarget;
+    // Give the automatic redirect a moment, then reveal the manual
+    // fallback link in case CAST isn't running (or is on a non-default
+    // port) so the user isn't stuck looking at a spinner forever.
+    setTimeout(function () {
+      document.getElementById("fallback").style.display = "block";
+    }, 2500);
+    window.location.href = localTarget;
+  }
+</script>
+</body>
+</html>
