@@ -249,17 +249,25 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   <div class="settings-section">
     <h3>AI Provider</h3>
     <label>Provider</label>
-    <select id="provider">
-      <option value="deepseek">DeepSeek</option>
-      <option value="openai">OpenAI</option>
-    </select>
+    <select id="provider"></select>
+    <div id="customBaseUrlRow" style="display:none;">
+      <label>Base URL</label>
+      <input type="text" id="customBaseUrl" placeholder="http://localhost:11434/v1">
+    </div>
     <label>Model</label>
     <select id="model"></select>
-    <label>API Key</label>
-    <div class="key-field-row">
-      <input type="password" id="apiKey" placeholder="Your API key">
-      <button type="button" onclick="toggleKeyVisibility('apiKey', this)">Show</button>
-      <button type="button" onclick="copyKeyToClipboard('apiKey', this)">Copy</button>
+    <div id="modelCustomRow" style="display:none;">
+      <select id="ollamaModelSelect" style="display:none;" onchange="onOllamaModelSelectChange()"></select>
+      <input type="text" id="modelCustom" placeholder="e.g. llama3.1, mistral, phi3...">
+      <p id="ollamaModelStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;"></p>
+    </div>
+    <div id="apiKeyRow">
+      <label>API Key</label>
+      <div class="key-field-row">
+        <input type="password" id="apiKey" placeholder="Your API key">
+        <button type="button" onclick="toggleKeyVisibility('apiKey', this)">Show</button>
+        <button type="button" onclick="copyKeyToClipboard('apiKey', this)">Copy</button>
+      </div>
     </div>
     <label>Story Length</label>
     <select id="storyLength">
@@ -268,6 +276,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <option value="700">Long (~700 words)</option>
       <option value="1000">Extra Long (~1000 words)</option>
     </select>
+  </div>
+  <div class="settings-section">
+    <h3>Story Prompt</h3>
+    <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">The writing-style rules sent to the AI for every story. Edit to change tone, structure, or content rules.</p>
+    <textarea id="storySystemPromptOverride" rows="8" style="font-size:0.78rem;"></textarea>
+    <button onclick="resetStorySystemPrompt()" style="margin-top:6px;">Reset to Default</button>
   </div>
   <div class="settings-section">
     <h3>Video Output</h3>
@@ -510,6 +524,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 <script src="../lib/job-model.js"></script>
 <script src="../lib/ffmpeg-filters.js"></script>
 <script src="../lib/tts-engines.js"></script>
+<script src="../lib/story-providers.js"></script>
 <script src="../lib/presets.js"></script>
 <script src="../worker-pool.js"></script>
 <script src="../app.js"></script>

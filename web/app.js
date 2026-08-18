@@ -1,7 +1,7 @@
-// Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
+// Everything runs in the browser: multiple AI story-gen providers, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 69;
+const VERSION = 70;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -41,18 +41,42 @@ function toggleSettings() {
 }
 
 // ---------- API config ----------
-const MODELS = {
-  deepseek: ["deepseek-chat", "deepseek-reasoner"],
-  openai: ["gpt-4o-mini", "gpt-4o"],
-};
-
-function apiBase() {
-  return $("#provider").value === "openai" ? "https://api.openai.com/v1" : "https://api.deepseek.com/v1";
+// STORY_PROVIDERS (web/lib/story-providers.js) is the registry — this
+// section is just the DOM glue: which provider/model/base-URL/API-key the
+// settings panel currently has selected, and building the <select>s from
+// the registry instead of hardcoded <option> tags (mirrors buildEngineSelect
+// for TTS_ENGINES).
+function getStoryProvider() {
+  return STORY_PROVIDERS[$("#provider").value] || STORY_PROVIDERS[DEFAULT_STORY_PROVIDER];
 }
 
+function buildProviderSelect() {
+  $("#provider").innerHTML = Object.values(STORY_PROVIDERS)
+    .map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join("");
+}
+
+// A provider's base URL is fixed except Ollama/self-hosted ones
+// (editableBaseUrl), where the settings panel exposes a text field so the
+// user can point at a different host/port than the localhost default.
+function apiBase() {
+  const provider = getStoryProvider();
+  if (provider.editableBaseUrl) {
+    return $("#customBaseUrl").value.trim() || provider.baseUrl;
+  }
+  return provider.baseUrl;
+}
+
+function getModel() {
+  const provider = getStoryProvider();
+  return provider.customModel ? $("#modelCustom").value.trim() : $("#model").value;
+}
+
+// Ollama (and any other needsApiKey:false provider) doesn't require a key —
+// only alert/block generation for providers that actually need one.
 function getApiKey() {
+  const provider = getStoryProvider();
   const k = $("#apiKey").value.trim();
-  if (!k) { alert("Enter your API key in Settings first."); return null; }
+  if (!k && provider.needsApiKey) return null;
   return k;
 }
 
@@ -63,7 +87,8 @@ function numOr(raw, parseFn, fallback) {
 }
 
 const SETTINGS_FIELDS = [
-  "apiKey", "provider", "model", "storyLength",
+  "apiKey", "provider", "model", "modelCustom", "customBaseUrl", "storyLength",
+  "storySystemPromptOverride",
   "resW", "resH", "fps", "defaultMusicVolume",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset",
@@ -297,10 +322,18 @@ async function init() {
   migrateLegacyLocalStorageKeys();
   $("#versionBadge").textContent = `v${VERSION}`;
   [nativeRenderAvailable, nativeWhisperAvailable] = await Promise.all([
-    probeNativeRenderBackend(), probeNativeWhisperBackend(),
+    probeNativeRenderBackend(), probeNativeWhisperBackend(), loadDefaultStorySystemPrompt(),
   ]);
   buildEngineSelect();
+  buildProviderSelect();
   const savedData = loadSettings(); // returns saved data; `model`/`voice` need their options built first
+  // First-ever run (nothing saved yet) starts the textarea pre-filled with
+  // the real default prompt, not an empty box — resetStorySystemPrompt()
+  // and a later loadSettings() (Import) both already set a non-empty value
+  // through the normal path, so this only ever fires once per fresh install.
+  if (!$("#storySystemPromptOverride").value.trim()) {
+    $("#storySystemPromptOverride").value = DEFAULT_STORY_SYSTEM_PROMPT;
+  }
   populateModels();
   await populateVoices(getEngine());
   if (savedData && savedData.voice) {
@@ -321,6 +354,15 @@ async function init() {
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
   $("#defaultMusicVolume").addEventListener("input", updateDefaultMusicVolumeLabel);
+  // Re-detect Ollama's installed models when the base URL changes (e.g.
+  // pointing at a different port/host) — debounced-ish via a simple
+  // trailing timer so this doesn't fire a network request on every
+  // keystroke while typing a new URL.
+  let ollamaModelRefreshTimer;
+  $("#customBaseUrl").addEventListener("input", () => {
+    clearTimeout(ollamaModelRefreshTimer);
+    ollamaModelRefreshTimer = setTimeout(refreshOllamaModelList, 500);
+  });
   initCaptionDrag();
   initPanelResize("sidebar", "sidebarResizeHandle", 1, "cast_sidebarWidth");
   initPanelResize("settingsPanel", "settingsResizeHandle", -1, "cast_settingsWidth");
@@ -369,11 +411,84 @@ function initPanelResize(panelId, handleId, sign, storageKey) {
   handle.addEventListener("pointercancel", stop);
 }
 
+// Rebuilds #model's <select> options for whichever provider is selected, and
+// toggles the custom-model/custom-base-URL fields a provider like Ollama
+// needs instead of/alongside them. Called on #provider's change event and
+// once from init()/loadSettings().
 function populateModels() {
-  const p = $("#provider").value;
-  $("#model").innerHTML = MODELS[p].map((m, i) => `<option value="${m}" ${i===0?'selected':''}>${m}</option>`).join("");
+  const provider = getStoryProvider();
+  $("#model").style.display = provider.customModel ? "none" : "";
+  $("#modelCustomRow").style.display = provider.customModel ? "" : "none";
+  if (!provider.customModel) {
+    $("#model").innerHTML = provider.models.map((m, i) => `<option value="${m}" ${i === 0 ? "selected" : ""}>${m}</option>`).join("");
+  }
+  $("#customBaseUrlRow").style.display = provider.editableBaseUrl ? "" : "none";
+  if (provider.editableBaseUrl && !$("#customBaseUrl").value) {
+    $("#customBaseUrl").value = provider.baseUrl;
+  }
+  $("#apiKeyRow").style.display = provider.needsApiKey ? "" : "none";
+  // Not awaited — populateModels() itself isn't async and every existing
+  // caller (provider-change listener, init()) doesn't need to block on a
+  // local network round trip just to show/hide the rest of the panel.
+  refreshOllamaModelList();
 }
 $("#provider").addEventListener("change", populateModels);
+
+// Ollama exposes its own native model-list API at /api/tags — a sibling to
+// the OpenAI-compatibility endpoint at /v1 this app otherwise talks to for
+// actual generation, not part of the OpenAI-compatible surface itself, so
+// this is genuinely Ollama-specific rather than something every provider on
+// the "editable base URL" field (LM Studio, vLLM, ...) could also use.
+// Lets the model field auto-detect what's actually pulled instead of
+// requiring the user to type an exact model name/tag from memory.
+async function refreshOllamaModelList() {
+  const provider = getStoryProvider();
+  const select = $("#ollamaModelSelect");
+  const status = $("#ollamaModelStatus");
+  if (provider.id !== "ollama") { select.style.display = "none"; status.textContent = ""; return; }
+  const baseUrl = $("#customBaseUrl").value.trim() || provider.baseUrl;
+  const tagsUrl = baseUrl.replace(/\/v1\/?$/, "") + "/api/tags";
+  try {
+    const ctrl = new AbortController();
+    // Local server — should respond near-instantly if it's actually
+    // running; a short timeout means "not running" fails fast instead of
+    // making the Story tab feel stuck for the default 3+ minutes fetch()
+    // would otherwise wait on a connection nothing is listening on.
+    const t = setTimeout(() => ctrl.abort(), 3000);
+    let resp;
+    try {
+      resp = await fetch(tagsUrl, { signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    const models = (data.models || []).map(m => m.name || m.model).filter(Boolean);
+    if (!models.length) {
+      select.style.display = "none";
+      status.textContent = "No models found — pull one with `ollama pull <model>`, or enter a name manually below.";
+      return;
+    }
+    select.innerHTML = models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+    select.style.display = "";
+    // Prefer whatever's already saved if it's still actually installed,
+    // otherwise default to the first detected model rather than leaving
+    // the field blank.
+    const saved = $("#modelCustom").value.trim();
+    select.value = models.includes(saved) ? saved : models[0];
+    onOllamaModelSelectChange();
+    status.textContent = `${models.length} model${models.length === 1 ? "" : "s"} detected — pick one, or type a different name below.`;
+  } catch (e) {
+    select.style.display = "none";
+    status.textContent = "Couldn't detect models — make sure Ollama is running, or enter a model name manually below.";
+  }
+}
+function onOllamaModelSelectChange() {
+  const select = $("#ollamaModelSelect");
+  if (!select.value) return;
+  $("#modelCustom").value = select.value;
+  $("#modelCustom").dispatchEvent(new Event("input", { bubbles: true }));
+}
 
 // Rebuilds #voice/#voiceQuick from the given engine's own voice list —
 // engines have entirely different voices, so this runs on init and every
@@ -406,41 +521,162 @@ function getVoice() {
   return $("#voice").value || TTS_ENGINES[getEngine()].defaultVoice() || "";
 }
 
-// ---------- DeepSeek story generation (streaming, client-side) ----------
-async function streamChat(messages, onChunk) {
+// A batch job waiting behind others for its turn at storyGenLimiter's cap
+// used to be visually indistinguishable from one actively generating —
+// both just showed "Generating..." — which reads as "stuck" rather than
+// "queued" once a slow provider/model makes that wait genuinely long.
+function makeClientSlotLimiter(max) {
+  let active = 0;
+  const queue = [];
+  const state = { max };
+  return {
+    acquire() {
+      return new Promise((resolve) => {
+        const tryAcquire = () => {
+          if (active < state.max) { active++; resolve(); }
+          else queue.push(tryAcquire);
+        };
+        tryAcquire();
+      });
+    },
+    release() {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    },
+    setMax(n) {
+      state.max = n;
+      while (active < state.max && queue.length) queue.shift()();
+    },
+    getMax() { return state.max; },
+    getActive() { return active; },
+  };
+}
+const DEFAULT_STORY_GEN_CONCURRENCY = 3;
+const storyGenLimiter = makeClientSlotLimiter(DEFAULT_STORY_GEN_CONCURRENCY);
+
+// ---------- Story generation (streaming, client-side) ----------
+// Provider-agnostic: STORY_PROVIDERS (web/lib/story-providers.js) supplies
+// buildChatRequest() (the {url, headers, body} to send) and parseSSEDelta()
+// (how to pull the next text chunk out of one parsed `data: ` line) — this
+// function is just the shared fetch + SSE-read loop every provider streams
+// through, regardless of whether its wire format is OpenAI's or Anthropic's.
+// Every call goes through storyGenLimiter by default, so unbounded
+// concurrent requests can't get silently throttled by a low-rate-limit key.
+async function streamChat(messages, onChunk, temperature, skipLimiter, onAcquired) {
+  if (skipLimiter) { if (onAcquired) onAcquired(); return streamChatInner(messages, onChunk, temperature); }
+  await storyGenLimiter.acquire();
+  // onAcquired (optional) fires the instant this call actually starts
+  // running, as opposed to still sitting in storyGenLimiter's queue behind
+  // other jobs.
+  if (onAcquired) onAcquired();
+  try {
+    return await streamChatInner(messages, onChunk, temperature);
+  } finally {
+    storyGenLimiter.release();
+  }
+}
+async function streamChatInner(messages, onChunk, temperature) {
+  const provider = getStoryProvider();
   const key = getApiKey();
-  if (!key) return;
-  const base = apiBase();
-  const resp = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-    body: JSON.stringify({
-      model: $("#model").value,
-      stream: true,
-      temperature: 0.9,
-      messages,
-    }),
+  // Throw, don't silently return — every caller treats a resolved
+  // streamChat() as success (shows a "Story generated!"/etc. toast) even
+  // though onChunk was never called and the textarea it was writing into is
+  // still empty. Callers already wrap this in try/catch and alert(e.message).
+  if (key === null) throw new Error("Enter your API key in Settings first.");
+  const { url, headers, body } = buildChatRequest(provider, {
+    model: getModel(), messages, temperature: temperature == null ? 0.9 : temperature, apiKey: key, baseUrl: apiBase(),
   });
+  // Two separate bounds: the initial connection (a provider that's down/
+  // unreachable could otherwise hang at the fetch() call itself with no
+  // error and no recovery) and a stall watchdog on the stream once it
+  // starts (a connection that stops delivering chunks mid-story, without
+  // ever formally closing, would otherwise hang forever at reader.read()).
+  const ctrl = new AbortController();
+  const connectTimer = setTimeout(() => {
+    showToast(`Story provider isn't responding — still waiting (30s)...`, 4000);
+    ctrl.abort();
+  }, 30000);
+  let resp;
+  try {
+    resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("Request timed out — the provider didn't respond within 30s.");
+    throw e;
+  } finally {
+    clearTimeout(connectTimer);
+  }
   if (!resp.ok) throw new Error("API error: " + resp.status);
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      const data = line.slice(6).trim();
-      if (data === "[DONE]") continue;
+  // Reasoning models (e.g. DeepSeek's deepseek-reasoner) stream real bytes —
+  // delta.reasoning_content "thinking" tokens — for a real stretch before
+  // any delta.content shows up. parseSSEDelta only ever looks at
+  // delta.content, so those chunks reset the stall watchdog below (real
+  // data IS arriving) but never call onChunk() — told once, not per-chunk,
+  // the moment reasoning starts, so a long wait doesn't read as a hang.
+  let sawRealContent = false;
+  let toldReasoning = false;
+  const reasoningStallStart = { t: null };
+  try {
+    while (true) {
+      let stallTimer;
+      const stallGuard = new Promise((_, reject) => {
+        stallTimer = setTimeout(() => {
+          showToast("Story generation stalled — no data received for 60s.", 4000);
+          reject(new Error("Story generation stalled — no data received for 60s."));
+        }, 60000);
+      });
+      let done, value;
       try {
-        const parsed = JSON.parse(data);
-        const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
-        if (delta && delta.content) onChunk(delta.content);
-      } catch (e) {}
+        ({ done, value } = await Promise.race([reader.read(), stallGuard]));
+      } finally {
+        clearTimeout(stallTimer);
+      }
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const data = line.slice(6).trim();
+        if (data === "[DONE]") continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(data);
+        } catch (e) {
+          continue; // a malformed/partial SSE line is expected occasionally — skip it, not a real error
+        }
+        const text = parseSSEDelta(provider.api, parsed);
+        if (text) {
+          sawRealContent = true;
+          // Deliberately NOT wrapped in try/catch — swallowing an error a
+          // caller's onChunk throws (e.g. a stale/removed DOM element) lets
+          // the underlying network request keep succeeding invisibly while
+          // the real bug vanishes with no error, no toast, nothing.
+          onChunk(text);
+        } else if (!sawRealContent) {
+          const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+          if (delta && delta.reasoning_content) {
+            if (!toldReasoning) {
+              toldReasoning = true;
+              reasoningStallStart.t = Date.now();
+              showToast(`${provider.label} is thinking before it answers — this can take a while on a reasoning model.`, 5000);
+            } else if (Date.now() - reasoningStallStart.t > 30000) {
+              reasoningStallStart.t = Date.now();
+              showToast(`Still thinking (${provider.label})... this is normal for a reasoning model, just slow.`, 5000);
+            }
+          }
+        }
+      }
     }
+  } catch (e) {
+    // A stall throws out of the race above while reader.read() is still
+    // pending underneath it — cancel the reader so the underlying
+    // connection actually tears down instead of being silently abandoned.
+    try { await reader.cancel(); } catch (cancelErr) { /* best-effort */ }
+    throw e;
   }
 }
 
@@ -475,7 +711,7 @@ async function getIdeas() {
   try {
     await streamChat(
       [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
-       { role: "user", content: ideasPrompt() }],
+       { role: "user", content: ideasPrompt(STORY_CATEGORIES[Math.floor(Math.random() * STORY_CATEGORIES.length)]) }],
       (chunk) => { ta.value += chunk; autoGrow(ta); }
     );
     validateInputs();
@@ -2218,7 +2454,7 @@ async function getIdeasForCard(job, btn, ta) {
   try {
     await streamChat(
       [{ role: "system", content: "You output only one short creative idea. No markdown, no quotes." },
-       { role: "user", content: ideasPrompt() }],
+       { role: "user", content: ideasPrompt(STORY_CATEGORIES[Math.floor(Math.random() * STORY_CATEGORIES.length)]) }],
       (chunk) => { ta.value += chunk; job.premise = ta.value; autoGrow(ta); }
     );
   } catch (e) { alert("Failed: " + e.message); }
@@ -2283,28 +2519,42 @@ async function retryBatchJob(job) {
   await runJob(job, getGlobalSettings(), (j) => renderResultCard(j, $("#resultsGrid")));
 }
 
-// ---------- Prompts (mirror prompts.txt) ----------
+// ---------- Prompts ----------
+// The real content lives in story-system-prompt.txt (a plain text file
+// alongside this script, editable directly without touching JS) — fetched
+// once at startup by loadDefaultStorySystemPrompt() below. This short inline
+// string is only a safety net for the rare case that fetch fails; it's
+// deliberately NOT a full duplicate of the real prompt, since the whole
+// point of moving it to its own file is one source of truth, not two that
+// can drift apart.
+let DEFAULT_STORY_SYSTEM_PROMPT = "You are a master of writing fake-but-believable AITAH (Am I The Asshole Here) Reddit posts. Open with a hook, write in first person, and end with \"So Reddit AITAH\".";
+async function loadDefaultStorySystemPrompt() {
+  try {
+    const res = await fetch(BASE + "story-system-prompt.txt");
+    if (!res.ok) return;
+    const text = (await res.text()).trim();
+    if (text) DEFAULT_STORY_SYSTEM_PROMPT = text;
+  } catch (e) {
+    // Keep the short built-in fallback above — a broken story-generation
+    // prompt is a much worse failure than a plainer default one.
+  }
+}
+
+// Settings' textarea holds the actual live prompt (pre-filled with the
+// default above on first run, not an empty box — see init()) — this reads
+// whatever's currently there, falling back to the default if it's ever
+// empty, and always appends the word-count rule separately so the editable
+// textarea itself never needs to contain template syntax.
 function storySystemPrompt() {
   const wc = parseInt($("#storyLength").value) || 400;
-  return `You are a master of writing fake-but-believable AITAH (Am I The Asshole Here) Reddit posts.
-Your stories must follow these rules:
-
-1. Casual, slightly dramatic first-person storytelling
-2. NO throwaway-account disclaimer — never start with "Throwaway because..." or anything similar.
-3. Open the story immediately with a hook that sets up the conflict.
-4. Vary your opening every time — never repeat the same first sentence across stories.
-5. Short paragraphs (2-4 sentences) — Reddit style
-6. Family/friend/relationship/financial drama
-7. A clear conflict where the narrator might actually be wrong
-8. Keep it around ${wc} words
-9. End with "So Reddit AITAH" — no question mark, nothing after
-10. Write in a natural slightly messy style — as if typed on a phone at 2am
-11. DO NOT make it obviously AI-generated
-12. CRITICAL: Your very first line MUST be the title in "AITAH for [doing the thing]" format
-13. Use natural punctuation — commas, periods, quotes.
-14. Break the story into short paragraphs separated by blank lines.
-
-IMPORTANT: First line is ALWAYS the AITAH title. Then a blank line, then the story. NEVER use a "Throwaway because" opener. Plain text only.`;
+  const base = ($("#storySystemPromptOverride").value || "").trim() || DEFAULT_STORY_SYSTEM_PROMPT;
+  return `${base}\n\nKeep it around ${wc} words.`;
+}
+function resetStorySystemPrompt() {
+  const ta = $("#storySystemPromptOverride");
+  ta.value = DEFAULT_STORY_SYSTEM_PROMPT;
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+  showToast("Story prompt reset to default.");
 }
 function storyUserPrompt(premise) {
   return `Write an AITAH Reddit post about: ${premise}
@@ -2317,8 +2567,23 @@ Use normal punctuation. Break the story into short paragraphs separated by blank
 
 Plain text only.`;
 }
-function ideasPrompt() {
-  return `Generate ONE creative idea for an AITAH Reddit post. Output ONLY the idea as a single string like "AITAH for [doing something dramatic]". No JSON, no quotes, no formatting.`;
+const STORY_CATEGORIES = [
+  "family drama (parents, siblings, in-laws)",
+  "workplace or coworker conflict",
+  "friendship falling out",
+  "money disagreement (splitting bills, lending, inheritance)",
+  "wedding or engagement drama",
+  "roommate conflict",
+  "romantic relationship conflict, not a breakup",
+  "parenting disagreement",
+  "neighbor dispute",
+  "travel or vacation conflict",
+  "pet-related conflict",
+  "holiday or family-gathering drama",
+];
+function ideasPrompt(category) {
+  const hint = category ? ` Make the scenario specifically about: ${category}.` : "";
+  return `Generate ONE creative idea for an AITAH Reddit post.${hint} Output ONLY the idea as a single string like "AITAH for [doing something dramatic]". No JSON, no quotes, no formatting.`;
 }
 
 // ---------- Input validation ----------
