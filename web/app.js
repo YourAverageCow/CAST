@@ -1,7 +1,7 @@
 // Everything runs in the browser: DeepSeek API, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 68;
+const VERSION = 69;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -57,9 +57,14 @@ function getApiKey() {
 }
 
 // Persist all settings in localStorage so they survive page reloads / hard resets.
+function numOr(raw, parseFn, fallback) {
+  const n = parseFn(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 const SETTINGS_FIELDS = [
   "apiKey", "provider", "model", "storyLength",
-  "resW", "resH", "fps",
+  "resW", "resH", "fps", "defaultMusicVolume",
   "font", "fontSize", "positionY", "textColor", "strokeColor", "strokeWidth",
   "voice", "captionPreset",
   "channelName",
@@ -73,17 +78,36 @@ function saveSettings() {
       const el = document.getElementById(id);
       if (el) data[id] = el.type === "checkbox" ? el.checked : el.value;
     }
-    localStorage.setItem("slopdaddy_settings", JSON.stringify(data));
+    localStorage.setItem("cast_settings", JSON.stringify(data));
   } catch (e) {}
 }
 
 // Returns the parsed saved-settings object (or null) so init() can restore
 // `voice` after populateVoices() has built that engine's option list —
 // can't set a <select>'s value to an option that doesn't exist yet.
+// Just the live label — wired to #defaultMusicVolume's own "input" event so
+// it updates on every drag.
+function updateDefaultMusicVolumeLabel() {
+  const el = document.getElementById("defaultMusicVolume");
+  const valueEl = document.getElementById("defaultMusicVolumeValue");
+  if (el && valueEl) valueEl.textContent = Math.round(numOr(el.value, parseFloat, 0.25) * 100) + "%";
+}
+
+// Called only on load/import (not on every live drag) — resyncs the label
+// AND seeds the sidebar's own per-video #musicVolume slider from the
+// restored default. Still freely adjustable per export afterward, same as
+// every other "default X" setting.
+function resyncDefaultMusicVolumeLabel() {
+  updateDefaultMusicVolumeLabel();
+  const el = document.getElementById("defaultMusicVolume");
+  const musicVolumeEl = document.getElementById("musicVolume");
+  if (el && musicVolumeEl) musicVolumeEl.value = el.value;
+}
+
 function loadSettings() {
   try {
-    const raw = localStorage.getItem("slopdaddy_settings");
-    if (!raw) return null;
+    const raw = localStorage.getItem("cast_settings");
+    if (!raw) { resyncDefaultMusicVolumeLabel(); return null; }
     const data = JSON.parse(raw);
     // Restore everything except model (rebuilt per-provider) and voice
     // (rebuilt per-engine) — both restored once their options exist.
@@ -97,8 +121,109 @@ function loadSettings() {
       const m = document.getElementById("model");
       if (m && [...m.options].some(o => o.value === data["model"])) m.value = data["model"];
     }
+    resyncDefaultMusicVolumeLabel();
     return data;
   } catch (e) { return null; }
+}
+
+// Shared by the file-based and clipboard-based export paths below — the
+// exact same JSON, just handed off differently (a downloaded file vs. a
+// clipboard write).
+function settingsExportJson() {
+  const raw = localStorage.getItem("cast_settings");
+  const data = raw ? JSON.parse(raw) : {};
+  data._exportedFromVersion = VERSION;
+  return JSON.stringify(data, null, 2);
+}
+
+function exportSettings() {
+  const blob = new Blob([settingsExportJson()], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `cast-settings-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+}
+
+async function copySettingsToClipboard() {
+  try {
+    await navigator.clipboard.writeText(settingsExportJson());
+    showToast("Settings copied to clipboard.");
+  } catch (e) {
+    alert("Couldn't copy to clipboard: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// Shared by the file-based and clipboard-based import paths below — parses
+// and applies a settings JSON string exactly the same way regardless of
+// where the text came from. loadSettings() (not applyLoadedSettings() —
+// that's a main-only function, this app has no tabbed Settings panel to
+// resync) already handles restoring every field from localStorage.
+function applySettingsJsonText(jsonText) {
+  const data = JSON.parse(jsonText);
+  delete data._exportedFromVersion;
+  localStorage.setItem("cast_settings", JSON.stringify(data));
+  loadSettings();
+}
+
+function importSettingsFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      applySettingsJsonText(reader.result);
+      showToast("Settings imported.");
+    } catch (e) {
+      alert("Couldn't import that file: " + (e && e.message ? e.message : String(e)));
+    }
+  };
+  reader.readAsText(file);
+  input.value = "";
+}
+
+async function pasteSettingsFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text.trim()) { alert("Clipboard is empty."); return; }
+    applySettingsJsonText(text);
+    showToast("Settings imported from clipboard.");
+  } catch (e) {
+    alert("Couldn't import from clipboard: " + (e && e.message ? e.message : String(e)) + " — try \"Import Settings\" with a saved file instead.");
+  }
+}
+
+// Deliberately leaves the channel profile picture and panel-width
+// localStorage keys untouched — this resets *settings*, not branding or
+// layout. Reloads rather than calling loadSettings() in place — with no
+// saved blob, loadSettings() has nothing to restore and would leave every
+// field showing whatever was on screen a moment ago instead of its actual
+// HTML-attribute default — a fresh load is what actually applies defaults.
+function resetSettingsToDefaults() {
+  if (!confirm("Reset all settings to their defaults? This can't be undone.")) return;
+  localStorage.removeItem("cast_settings");
+  location.reload();
+}
+
+function toggleKeyVisibility(id, btn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const revealing = el.type === "password";
+  el.type = revealing ? "text" : "password";
+  btn.textContent = revealing ? "Hide" : "Show";
+}
+async function copyKeyToClipboard(id, btn) {
+  const el = document.getElementById(id);
+  if (!el || !el.value) return;
+  try {
+    await navigator.clipboard.writeText(el.value);
+    const original = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch (e) {
+    alert("Couldn't copy to clipboard: " + (e && e.message ? e.message : String(e)));
+  }
 }
 
 // ---------- Init ----------
@@ -149,7 +274,27 @@ async function probeNativeWhisperBackend() {
   }
 }
 
+// Copies a returning visitor's pre-rebrand localStorage data forward under
+// the new "cast_*" keys without deleting the old copy — just leaves an
+// unused old copy sitting there. Must run before loadSettings() so a
+// returning user's saved settings are found under the new key on their
+// very first post-rebrand load.
+function migrateLegacyLocalStorageKeys() {
+  const migrations = [
+    ["slopdaddy_settings", "cast_settings"],
+    ["slopdaddy_sidebarWidth", "cast_sidebarWidth"],
+    ["slopdaddy_settingsWidth", "cast_settingsWidth"],
+    ["slopdaddy_channelProfilePic", "cast_channelProfilePic"],
+  ];
+  for (const [oldKey, newKey] of migrations) {
+    if (localStorage.getItem(newKey) === null && localStorage.getItem(oldKey) !== null) {
+      localStorage.setItem(newKey, localStorage.getItem(oldKey));
+    }
+  }
+}
+
 async function init() {
+  migrateLegacyLocalStorageKeys();
   $("#versionBadge").textContent = `v${VERSION}`;
   [nativeRenderAvailable, nativeWhisperAvailable] = await Promise.all([
     probeNativeRenderBackend(), probeNativeWhisperBackend(),
@@ -175,9 +320,10 @@ async function init() {
     const el = document.getElementById(id);
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
+  $("#defaultMusicVolume").addEventListener("input", updateDefaultMusicVolumeLabel);
   initCaptionDrag();
-  initPanelResize("sidebar", "sidebarResizeHandle", 1, "slopdaddy_sidebarWidth");
-  initPanelResize("settingsPanel", "settingsResizeHandle", -1, "slopdaddy_settingsWidth");
+  initPanelResize("sidebar", "sidebarResizeHandle", 1, "cast_sidebarWidth");
+  initPanelResize("settingsPanel", "settingsResizeHandle", -1, "cast_settingsWidth");
   // The sidebar (and with it the preview box) can be resized by dragging its
   // edge — recompute the preview's pixel-to-output scale when that happens.
   new ResizeObserver(() => { if (currentVideo) updateCaptionStyle(); }).observe($("#previewContainer"));
@@ -1421,7 +1567,7 @@ function copyVideoLink(url) {
 // `overlay`, so none of that complexity has to live in the filter graph.
 // Not unit-tested — like autoTranscodeToH264's canvas work, this is DOM-
 // coupled glue code with no meaningful logic to test outside a real canvas.
-const CHANNEL_PROFILE_PIC_KEY = "slopdaddy_channelProfilePic";
+const CHANNEL_PROFILE_PIC_KEY = "cast_channelProfilePic";
 let channelProfilePicDataUrl = null;
 
 function loadChannelProfilePic() {
@@ -1823,7 +1969,9 @@ function updateParallelismHint() {
 }
 
 function addBatchCard() {
-  const job = createJob();
+  const job = createJob({
+    musicVolume: numOr($("#defaultMusicVolume") && $("#defaultMusicVolume").value, parseFloat, 0.25),
+  });
   batchJobs.push(job);
   const el = buildBatchCardElement(job);
   $("#batchCardList").appendChild(el);
@@ -1934,7 +2082,7 @@ function buildBatchCardElement(job) {
           <option value="">Or pick a preset...</option>
           ${presetMusicOpts}
         </select>` : ""}
-        <input type="range" class="bc-musicVolume" min="0" max="1" step="0.05" value="0.25">
+        <input type="range" class="bc-musicVolume" min="0" max="1" step="0.05" value="${job.musicVolume}">
       </div>
     </div>
   `;

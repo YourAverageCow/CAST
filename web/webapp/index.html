@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <script src="../coi-serviceworker.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AITAH Video Creator — Web</title>
+<title>CAST — Web App</title>
 <style>
 :root {
   --bg: #0d1117;
@@ -231,6 +231,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 #browserNote { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); border-radius: 8px; padding: 10px 12px; font-size: 0.75rem; color: var(--muted); margin-bottom: 12px; line-height: 1.5; }
 #outdatedNote { background: rgba(240,166,50,0.1); border: 1px solid rgba(240,166,50,0.35); border-radius: 8px; padding: 10px 12px; font-size: 0.75rem; color: var(--text); margin-bottom: 12px; line-height: 1.5; }
+.key-field-row { display: flex; gap: 6px; align-items: stretch; }
+.key-field-row input { flex: 1; min-width: 0; }
+.key-field-row button { flex: 0 0 auto; padding: 8px 10px; font-size: 0.78rem; }
 </style>
 </head>
 <body>
@@ -253,7 +256,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <label>Model</label>
     <select id="model"></select>
     <label>API Key</label>
-    <input type="text" id="apiKey" placeholder="Your API key">
+    <div class="key-field-row">
+      <input type="password" id="apiKey" placeholder="Your API key">
+      <button type="button" onclick="toggleKeyVisibility('apiKey', this)">Show</button>
+      <button type="button" onclick="copyKeyToClipboard('apiKey', this)">Copy</button>
+    </div>
     <label>Story Length</label>
     <select id="storyLength">
       <option value="150">Short (~150 words)</option>
@@ -269,6 +276,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       <div><label>Height</label><input type="number" id="resH" value="1920" min="480" max="3840" step="2"></div>
       <div><label>FPS</label><input type="number" id="fps" value="30" min="10" max="60"></div>
     </div>
+    <label style="margin-top:8px;display:flex;justify-content:space-between;">
+      <span>Default Music Volume</span>
+      <span id="defaultMusicVolumeValue" style="color:var(--muted);">25%</span>
+    </label>
+    <input type="range" id="defaultMusicVolume" min="0" max="1" step="0.05" value="0.25">
+    <p style="font-size:0.72rem;color:var(--muted);margin-top:2px;">Starting background-music volume for the sidebar's own slider and every new batch card. Still adjustable per video afterward.</p>
   </div>
   <div class="settings-section">
     <h3>Caption Style</h3>
@@ -293,11 +306,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <p id="engineNote" style="font-size:0.72rem;color:var(--muted);margin:6px 0;"></p>
     <div id="ttsOpenaiKeyRow" style="display:none;">
       <label>OpenAI TTS API Key</label>
-      <input type="text" id="ttsOpenaiKey" placeholder="sk-...">
+      <div class="key-field-row">
+        <input type="password" id="ttsOpenaiKey" placeholder="sk-...">
+        <button type="button" onclick="toggleKeyVisibility('ttsOpenaiKey', this)">Show</button>
+        <button type="button" onclick="copyKeyToClipboard('ttsOpenaiKey', this)">Copy</button>
+      </div>
     </div>
     <div id="ttsElevenlabsKeyRow" style="display:none;">
       <label>ElevenLabs API Key</label>
-      <input type="text" id="ttsElevenlabsKey" placeholder="Your ElevenLabs API key">
+      <div class="key-field-row">
+        <input type="password" id="ttsElevenlabsKey" placeholder="Your ElevenLabs API key">
+        <button type="button" onclick="toggleKeyVisibility('ttsElevenlabsKey', this)">Show</button>
+        <button type="button" onclick="copyKeyToClipboard('ttsElevenlabsKey', this)">Copy</button>
+      </div>
     </div>
     <label style="margin-top:8px;">Voice</label>
     <select id="voice"></select>
@@ -320,6 +341,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <input type="file" id="channelProfilePicInput" accept="image/*" style="display:none" onchange="handleProfilePicUpload(this)">
   </div>
   <div class="settings-section">
+    <h3>Settings Backup</h3>
+    <div class="row">
+      <button class="accent" onclick="exportSettings()">Export Settings</button>
+      <button onclick="document.getElementById('importSettingsInput').click()">Import Settings</button>
+    </div>
+    <input type="file" id="importSettingsInput" accept="application/json" style="display:none" onchange="importSettingsFile(this)">
+    <div class="row" style="margin-top:8px;">
+      <button class="accent" onclick="copySettingsToClipboard()">Copy Settings</button>
+      <button onclick="pasteSettingsFromClipboard()">Paste Settings</button>
+    </div>
+    <button onclick="resetSettingsToDefaults()" style="margin-top:8px;color:var(--danger);">Reset to Defaults</button>
+  </div>
+  <div class="settings-section">
     <h3>Debug</h3>
     <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Check how captions/title card actually look without generating a full story or waiting on TTS.</p>
     <label>Sample caption text</label>
@@ -340,7 +374,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   <div class="panel-resize-handle" id="sidebarResizeHandle"></div>
   <div class="sidebar-inner">
   <div class="sidebar-header">
-    <h1>Video Creator</h1>
+    <h1>CAST</h1>
   </div>
   <p class="subtitle">AITAH story videos — runs 100% in your browser</p>
   <div id="outdatedNote">⚠️ This is the legacy zero-install web version, kept around for the "click a link, no install" case. It's no longer where active development happens — the actively developed version now runs as a local app with native rendering/transcription instead of in-browser WASM. Some newer features may not be here yet.</div>
