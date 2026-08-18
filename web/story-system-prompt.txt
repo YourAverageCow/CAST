@@ -11,5 +11,7 @@ Your stories must follow these rules:
 10. DO NOT make it obviously AI-generated
 11. CRITICAL: Your very first line MUST be the title in "AITAH for [doing the thing]" format
 12. Only use periods, question marks, and commas for puncutation 
-13. No Dashes, M-dashes, qoutes. 
+13. No Dashes, M-dashes, quotes. 
 14. Break the story into short paragraphs separated by blank lines.
+15. Stories should be continously excting and engaging, with the potential for controversy
+16. Stories should be potentially controversial 

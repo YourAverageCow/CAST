@@ -961,13 +961,20 @@ async function fetchTiktokCreatorInfo(accessToken) {
 }
 
 // TikTok's chunk rules (confirmed from their Content Posting API docs, not
-// guessed): whole file as one chunk under 5MB; otherwise 5MB-64MB per
-// chunk, with the LAST chunk allowed up to 128MB to absorb any remainder
-// rather than leaving an awkward tiny final chunk.
+// guessed): a video up to 64MB goes as a single chunk, with chunk_size set
+// to the video's own real size (TikTok rejects a single-chunk upload whose
+// declared chunk_size doesn't match total_size) — NOT "under 5MB", which
+// was this function's original (wrong) threshold and silently declared a
+// hardcoded 64MB chunk_size for every video between 5MB and 64MB even
+// though the actual PUT only ever sent that video's real, smaller byte
+// count, producing TikTok's "chunk size is invalid" error on init. Only a
+// video over 64MB needs to be split into multiple 5MB-64MB chunks, with
+// the LAST chunk allowed up to 128MB to absorb any remainder rather than
+// leaving an awkward tiny final chunk.
 const TIKTOK_MIN_CHUNK = 5 * 1024 * 1024;
 const TIKTOK_MAX_CHUNK = 64 * 1024 * 1024;
 function tiktokChunkPlan(totalBytes) {
-  if (totalBytes < TIKTOK_MIN_CHUNK) {
+  if (totalBytes <= TIKTOK_MAX_CHUNK) {
     return { chunkSize: totalBytes, totalChunks: 1 };
   }
   const chunkSize = TIKTOK_MAX_CHUNK;
