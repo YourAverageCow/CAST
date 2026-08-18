@@ -859,16 +859,13 @@ function generateTiktokPkcePair() {
 }
 
 const TIKTOK_SCOPES = "user.info.basic,video.publish"; // comma-separated per TikTok's format, unlike Google's space-separated scope string
-// Unlike YOUTUBE_REDIRECT_URI, this can't be a bare http://127.0.0.1
-// loopback address — TikTok requires the OAuth redirect_uri to live on this
-// app's own verified website domain. web/tiktok-oauth-callback/index.html
-// (the `web` branch, deployed on the same GitHub Pages site) is a pure
-// client-side hand-off page: TikTok redirects the browser there with
-// ?code=&state=, and it immediately forwards those to this exact local
-// route (http://127.0.0.1:${PORT}/tiktok-oauth-callback), which is what
-// actually does the token exchange — the static bridge page never sees or
-// needs the TikTok app's client secret.
-const TIKTOK_REDIRECT_URI = "https://youraveragecow.github.io/CAST/tiktok-oauth-callback/";
+// TikTok's "Desktop" app type explicitly requires the redirect_uri host to
+// be exactly "localhost" or "127.0.0.1" with a port — confirmed directly
+// from TikTok's own developer-portal validation message, not just their
+// docs. Same effective address family as YOUTUBE_REDIRECT_URI, registered
+// under "Desktop" in TikTok's developer portal (see the Settings -> Publish
+// setup instructions).
+const TIKTOK_REDIRECT_URI = `http://127.0.0.1:${PORT}/tiktok-oauth-callback`;
 
 async function exchangeTiktokCode(clientKey, clientSecret, code, verifier, redirectUri) {
   const resp = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
