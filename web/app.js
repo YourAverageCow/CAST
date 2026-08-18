@@ -1,7 +1,7 @@
 // Everything runs in the browser: multiple AI story-gen providers, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 71;
+const VERSION = 72;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -99,6 +99,7 @@ const SETTINGS_FIELDS = [
   "elevenlabsModel", "elevenlabsStability", "elevenlabsSimilarity",
   "browserSpeechRate", "browserSpeechPitch",
   "enableBrowserAsr",
+  "theme", "accentColor", "compactMode", "reduceMotion", "uiFontScale",
 ];
 function saveSettings() {
   try {
@@ -325,6 +326,74 @@ async function probeNativeWhisperBackend() {
 // unused old copy sitting there. Must run before loadSettings() so a
 // returning user's saved settings are found under the new key on their
 // very first post-rebrand load.
+let systemThemeMediaQuery = null;
+function applyTheme(value) {
+  if (systemThemeMediaQuery) { systemThemeMediaQuery.onchange = null; systemThemeMediaQuery = null; }
+  if (value === "system") {
+    systemThemeMediaQuery = matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => {
+      if (systemThemeMediaQuery.matches) delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = "light";
+    };
+    sync();
+    systemThemeMediaQuery.onchange = sync;
+  } else if (value === "light") {
+    document.documentElement.dataset.theme = "light";
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+  updateThemeToggleIcon();
+}
+
+// Quick top-right toggle — flips between dark/light directly rather than
+// cycling through "system" too, since that's a deliberate user choice best
+// left to the Settings dropdown (this button syncs #theme to whichever
+// concrete value it lands on, so opening Settings afterward shows the truth
+// rather than a stale "system" that no longer reflects what's shown).
+function toggleThemeQuick() {
+  const isLight = document.documentElement.dataset.theme === "light";
+  const next = isLight ? "dark" : "light";
+  $("#theme").value = next;
+  applyTheme(next);
+  saveSettings();
+}
+function updateThemeToggleIcon() {
+  const btn = $("#themeToggleBtn");
+  if (!btn) return;
+  // Sun icon when currently dark (click to go light), moon icon when
+  // currently light (click to go dark) — the icon shows the destination,
+  // not the current state.
+  btn.innerHTML = document.documentElement.dataset.theme === "light" ? "&#9789;" : "&#9728;";
+}
+
+const DEFAULT_ACCENT_COLOR = "#58a6ff";
+function applyAccentColor() {
+  const value = ($("#accentColor").value || "").trim();
+  if (!value || value.toLowerCase() === DEFAULT_ACCENT_COLOR) {
+    document.documentElement.style.removeProperty("--accent");
+  } else {
+    document.documentElement.style.setProperty("--accent", value);
+  }
+}
+function resetAccentColor() {
+  $("#accentColor").value = DEFAULT_ACCENT_COLOR;
+  $("#accentColor").dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function applyCompactMode() {
+  document.body.classList.toggle("compact", !!$("#compactMode").checked);
+}
+function applyReduceMotion() {
+  document.body.classList.toggle("reduce-motion", !!$("#reduceMotion").checked);
+}
+// Every font-size in this file's CSS is in rem, so scaling the root
+// font-size scales the whole UI proportionally.
+function applyUiFontScale() {
+  const pct = parseInt($("#uiFontScale").value, 10) || 100;
+  document.documentElement.style.fontSize = pct === 100 ? "" : (16 * pct / 100) + "px";
+  $("#uiFontScaleValue").textContent = pct + "%";
+}
+
 function migrateLegacyLocalStorageKeys() {
   const migrations = [
     ["slopdaddy_settings", "cast_settings"],
@@ -355,6 +424,14 @@ async function init() {
   if (!$("#storySystemPromptOverride").value.trim()) {
     $("#storySystemPromptOverride").value = DEFAULT_STORY_SYSTEM_PROMPT;
   }
+  // loadSettings() above only restores each field's raw .value/.checked
+  // from storage — it doesn't invoke the apply function that actually
+  // makes the effect visible, so that has to happen once here explicitly.
+  applyTheme($("#theme").value);
+  applyAccentColor();
+  applyCompactMode();
+  applyReduceMotion();
+  applyUiFontScale();
   populateModels();
   await populateVoices(getEngine());
   if (savedData && savedData.voice) {

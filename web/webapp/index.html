@@ -5,6 +5,22 @@
 <script src="../coi-serviceworker.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CAST — Web App</title>
+<script>
+// Applied synchronously here (before <style> even paints) rather than from
+// app.js's init() — waiting until then would show a flash of the wrong
+// theme on every load for anyone who's chosen "light" or has a light OS
+// theme + "system" selected.
+(function () {
+  try {
+    var raw = localStorage.getItem("cast_settings");
+    var theme = raw ? (JSON.parse(raw).theme || "dark") : "dark";
+    if (theme === "system") {
+      theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    if (theme === "light") document.documentElement.dataset.theme = "light";
+  } catch (e) { /* fall back to the default dark theme */ }
+})();
+</script>
 <style>
 :root {
   --bg: #0d1117;
@@ -16,6 +32,26 @@
   --danger: #f85149;
   --green: #3fb950;
 }
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #f6f8fa;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --muted: #59636e;
+}
+/* Compact layout — a body class (not a data-attr, to compose freely with
+   the theme attribute) tightening the same spacing/font-size properties
+   across sidebar, settings panel, labels, and buttons rather than a
+   parallel set of components. */
+body.compact .sidebar { padding: 12px; }
+body.compact .settings-section { margin-bottom: 12px; }
+body.compact label { font-size: 0.7rem; margin-top: 6px; margin-bottom: 2px; }
+body.compact select, body.compact input, body.compact textarea { padding: 5px 7px; }
+body.compact button { padding: 6px 0; font-size: 0.75rem; }
+/* Reduce motion — a blanket transition/animation kill switch. !important is
+   deliberate: this needs to win over every existing per-element transition
+   rule. */
+body.reduce-motion, body.reduce-motion * { transition: none !important; animation: none !important; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -199,6 +235,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 .app-gear { position: fixed; top: 16px; right: 16px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; z-index: 220; padding: 0; }
 .app-gear:hover { color: var(--text); border-color: var(--accent); background: #21262d; }
+.theme-toggle-btn { position: fixed; top: 16px; right: 60px; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; z-index: 220; padding: 0; }
+.theme-toggle-btn:hover { color: var(--text); border-color: var(--accent); }
 .app-version { position: fixed; bottom: 12px; right: 16px; font-family: 'SF Mono', Menlo, monospace; font-size: 0.7rem; color: var(--accent); background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); padding: 2px 8px; border-radius: 4px; z-index: 80; }
 
 /* Settings panel (right slide-in) */
@@ -402,6 +440,29 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     <input type="file" id="channelProfilePicInput" accept="image/*" style="display:none" onchange="handleProfilePicUpload(this)">
   </div>
   <div class="settings-section">
+    <h3>Appearance</h3>
+    <label>Theme</label>
+    <select id="theme" onchange="applyTheme(this.value); saveSettings();">
+      <option value="dark" selected>Dark</option>
+      <option value="light">Light</option>
+      <option value="system">Match System</option>
+    </select>
+    <label style="margin-top:8px;">Accent Color</label>
+    <input type="color" id="accentColor" value="#58a6ff" oninput="applyAccentColor()" style="width:100%;height:32px;padding:2px;">
+    <button onclick="resetAccentColor()" style="margin-top:6px;">Reset Accent Color</button>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+      <input type="checkbox" id="compactMode" style="width:auto;" onchange="applyCompactMode()"> Compact layout
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+      <input type="checkbox" id="reduceMotion" style="width:auto;" onchange="applyReduceMotion()"> Reduce motion
+    </label>
+    <label style="margin-top:10px;display:flex;justify-content:space-between;">
+      <span>UI Text Size</span>
+      <span id="uiFontScaleValue" style="color:var(--muted);">100%</span>
+    </label>
+    <input type="range" id="uiFontScale" min="80" max="130" step="5" value="100" oninput="applyUiFontScale()">
+  </div>
+  <div class="settings-section">
     <h3>Settings Backup</h3>
     <div class="row">
       <button class="accent" onclick="exportSettings()">Export Settings</button>
@@ -506,6 +567,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 </div>
 
 <div class="main">
+  <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleThemeQuick()" title="Toggle dark/light theme">&#9728;</button>
   <button class="gear-btn app-gear" onclick="toggleSettings()" title="Settings">&#9881;</button>
   <span class="version app-version" id="versionBadge">v0</span>
 
