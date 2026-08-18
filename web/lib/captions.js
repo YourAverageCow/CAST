@@ -279,9 +279,24 @@ function sanitizeText(s) {
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ""); // control chars
 }
 
+// TTS engines have no idea "AITAH"/"AITA" are initialisms — spoken
+// literally they come out as a garbled run of letters. This ONLY
+// transforms the copy of the text handed to the TTS engine — captions/
+// story text keep showing "AITAH" exactly as written; only what gets
+// spoken changes. "AITAH" is matched before the shorter "AITA" pattern
+// gets a chance to see it, since "AITAH" has no word boundary right after
+// "AITA" — the two patterns can't double-match the same span.
+function expandAitahForSpeech(text) {
+  if (typeof text !== "string") return "";
+  return text
+    .replace(/\bAITAH\b/gi, "am I the asshole")
+    .replace(/\bAITA\b/gi, "am I the asshole");
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     computeWordTimings, alignWordsFromCharacters, alignWordsBySequence, snapPausesToWords,
     countFirstParagraphWords, buildSubsFromWords, buildWordCues, sanitizeText,
+    expandAitahForSpeech,
   };
 }

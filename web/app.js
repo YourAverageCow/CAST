@@ -1,7 +1,7 @@
 // Everything runs in the browser: multiple AI story-gen providers, Piper TTS, ffmpeg.wasm.
 
 const $ = (s) => document.querySelector(s);
-const VERSION = 70;
+const VERSION = 71;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -94,6 +94,10 @@ const SETTINGS_FIELDS = [
   "voice", "captionPreset",
   "channelName",
   "ttsEngine", "ttsOpenaiKey", "ttsElevenlabsKey",
+  "piperSpeed", "kokoroSpeed",
+  "openaiTtsModel", "openaiTtsSpeed",
+  "elevenlabsModel", "elevenlabsStability", "elevenlabsSimilarity",
+  "browserSpeechRate", "browserSpeechPitch",
   "enableBrowserAsr",
 ];
 function saveSettings() {
@@ -129,10 +133,26 @@ function resyncDefaultMusicVolumeLabel() {
   if (el && musicVolumeEl) musicVolumeEl.value = el.value;
 }
 
+// loadSettings() below restores each slider's raw .value from storage
+// without dispatching input events, so their live value-label <span>s
+// (wired in init()) need an explicit resync here or they'd keep showing
+// each slider's HTML default even after a restored/imported value applies.
+function resyncTtsSliderLabels() {
+  for (const id of [
+    "piperSpeed", "kokoroSpeed", "openaiTtsSpeed",
+    "elevenlabsStability", "elevenlabsSimilarity",
+    "browserSpeechRate", "browserSpeechPitch",
+  ]) {
+    const el = document.getElementById(id);
+    const valueEl = document.getElementById(id + "Value");
+    if (el && valueEl) valueEl.textContent = parseFloat(el.value).toFixed(2);
+  }
+}
+
 function loadSettings() {
   try {
     const raw = localStorage.getItem("cast_settings");
-    if (!raw) { resyncDefaultMusicVolumeLabel(); return null; }
+    if (!raw) { resyncDefaultMusicVolumeLabel(); resyncTtsSliderLabels(); return null; }
     const data = JSON.parse(raw);
     // Restore everything except model (rebuilt per-provider) and voice
     // (rebuilt per-engine) — both restored once their options exist.
@@ -147,6 +167,7 @@ function loadSettings() {
       if (m && [...m.options].some(o => o.value === data["model"])) m.value = data["model"];
     }
     resyncDefaultMusicVolumeLabel();
+    resyncTtsSliderLabels();
     return data;
   } catch (e) { return null; }
 }
@@ -354,6 +375,19 @@ async function init() {
     if (el) el.addEventListener("input", updateCaptionStyle);
   }
   $("#defaultMusicVolume").addEventListener("input", updateDefaultMusicVolumeLabel);
+  // Per-engine TTS sliders — same "live value label next to the slider"
+  // pattern as defaultMusicVolume above.
+  for (const id of [
+    "piperSpeed", "kokoroSpeed", "openaiTtsSpeed",
+    "elevenlabsStability", "elevenlabsSimilarity",
+    "browserSpeechRate", "browserSpeechPitch",
+  ]) {
+    const el = document.getElementById(id);
+    const valueEl = document.getElementById(id + "Value");
+    if (el && valueEl) {
+      el.addEventListener("input", () => { valueEl.textContent = parseFloat(el.value).toFixed(2); });
+    }
+  }
   // Re-detect Ollama's installed models when the base URL changes (e.g.
   // pointing at a different port/host) — debounced-ish via a simple
   // trailing timer so this doesn't fire a network request on every
@@ -1094,6 +1128,14 @@ async function ensurePiper() {
         const jsonUrl = `${base}${sub}/${stem}.onnx.json`;
         const onnxUrl = `${base}${sub}/${stem}.onnx`;
         const json = await (await fetch(jsonUrl)).json();
+        // Piper has no speed argument on generate() itself — it's
+        // length_scale inside the voice's own config JSON, fed into the
+        // ONNX model's scales tensor (inverse relationship: a smaller
+        // length_scale plays faster). Since this fetch closure runs fresh
+        // on every generate() call, it can just read the live slider value
+        // instead of needing generate()'s config threaded all the way here.
+        const speed = parseFloat($("#piperSpeed") && $("#piperSpeed").value) || 1;
+        if (json.inference) json.inference.length_scale = (json.inference.length_scale || 1) / speed;
         const onnx = URL.createObjectURL(await (await fetch(onnxUrl)).blob());
         return [json, onnx];
       },
@@ -1145,6 +1187,39 @@ function queueTTS(fn) {
   // via `run`, this is only to keep ttsQueueTail chainable.
   ttsQueueTail = run.catch(() => {});
   return run;
+}
+
+// ---------- Voice preview ----------
+// A quick "hear this voice" button next to the voice dropdown — generates a
+// short fixed line and plays it immediately, bypassing generateSpeech()'s
+// resolveWordTimings() caption-sync cascade entirely (no captions needed
+// for a one-off preview). Still goes through queueTTS since Piper/Kokoro's
+// shared engine instance isn't verified safe for concurrent calls.
+let previewAudio = null;
+async function previewVoice(engineId, voice, btn) {
+  const engine = TTS_ENGINES[engineId];
+  if (!engine) return;
+  if (!voice) { showToast("No voice selected."); return; }
+  const config = getEngineConfig(engineId);
+  if (engine.needsApiKey && !config) return; // getEngineConfig() already alerted
+  if (previewAudio) { previewAudio.pause(); if (previewAudio.src) URL.revokeObjectURL(previewAudio.src); previewAudio = null; }
+  const originalLabel = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; btn.textContent = "..."; }
+  try {
+    const { audioBlob } = await queueTTS(() => engine.generate("This is a preview.", voice, config));
+    const url = URL.createObjectURL(audioBlob);
+    previewAudio = new Audio(url);
+    previewAudio.addEventListener("ended", () => URL.revokeObjectURL(url));
+    await previewAudio.play();
+  } catch (e) {
+    console.error("previewVoice failed:", e);
+    alert("Voice preview failed: " + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
+  }
+}
+function previewSettingsVoice(btn) {
+  previewVoice(getEngine(), $("#voice").value, btn);
 }
 
 // Tier 2 of the caption-sync cascade (the always-on default when native
@@ -1290,10 +1365,15 @@ async function generateSpeech(text, voice, engineId) {
   if (!text) throw new Error("Story text is empty after cleaning.");
   const config = getEngineConfig(engineId);
   if (engine.needsApiKey && !config) return Promise.reject(new Error("Missing API key for " + engine.label));
+  // Only the TTS-bound copy gets AITAH/AITA spelled out — `text` itself
+  // stays untouched below for resolveWordTimings(), so captions keep
+  // showing "AITAH" exactly as written even though it's spoken as "am I
+  // the asshole".
+  const speechText = expandAitahForSpeech(text);
   return queueTTS(async () => {
     showDownloadToast(`Generating voice (${engine.label})...`);
     try {
-      const { audioBlob, durationSec, wordTimings } = await engine.generate(text, voice, config);
+      const { audioBlob, durationSec, wordTimings } = await engine.generate(speechText, voice, config);
       hideDownloadToast();
       const audioUrl = URL.createObjectURL(audioBlob);
       const words = await resolveWordTimings(text, audioBlob, durationSec, wordTimings);
@@ -1517,15 +1597,28 @@ function getGlobalSettings() {
 // fully separate from the story-gen #apiKey/#provider fields — a user might
 // use DeepSeek for stories and OpenAI for narration at the same time.
 function getEngineConfig(engineId) {
+  if (engineId === "piper") {
+    return { speed: parseFloat($("#piperSpeed").value) || 1 };
+  }
+  if (engineId === "kokoro") {
+    return { speed: parseFloat($("#kokoroSpeed").value) || 1 };
+  }
   if (engineId === "openaiTts") {
     const key = $("#ttsOpenaiKey").value.trim();
     if (!key) { alert("Enter an OpenAI API key in Settings → Narration Voice first."); return null; }
-    return { apiKey: key };
+    return { apiKey: key, model: $("#openaiTtsModel").value, speed: parseFloat($("#openaiTtsSpeed").value) || 1 };
   }
   if (engineId === "elevenlabs") {
     const key = $("#ttsElevenlabsKey").value.trim();
     if (!key) { alert("Enter an ElevenLabs API key in Settings → Narration Voice first."); return null; }
-    return { apiKey: key };
+    return {
+      apiKey: key, modelId: $("#elevenlabsModel").value,
+      stability: parseFloat($("#elevenlabsStability").value),
+      similarityBoost: parseFloat($("#elevenlabsSimilarity").value),
+    };
+  }
+  if (engineId === "browserSpeech") {
+    return { rate: parseFloat($("#browserSpeechRate").value) || 1, pitch: parseFloat($("#browserSpeechPitch").value) || 1 };
   }
   return {};
 }
@@ -1539,6 +1632,11 @@ async function onEngineChangeUI() {
   const engine = TTS_ENGINES[engineId];
   $("#ttsOpenaiKeyRow").style.display = engineId === "openaiTts" ? "" : "none";
   $("#ttsElevenlabsKeyRow").style.display = engineId === "elevenlabs" ? "" : "none";
+  $("#piperSpeedRow").style.display = engineId === "piper" ? "" : "none";
+  $("#kokoroSpeedRow").style.display = engineId === "kokoro" ? "" : "none";
+  $("#openaiTtsExtraRow").style.display = engineId === "openaiTts" ? "" : "none";
+  $("#elevenlabsExtraRow").style.display = engineId === "elevenlabs" ? "" : "none";
+  $("#browserSpeechExtraRow").style.display = engineId === "browserSpeech" ? "" : "none";
   const notes = {
     piper: "Runs fully offline in your browser. Free, no API key.",
     kokoro: "Runs fully offline in your browser, higher quality than Piper. Free, no API key — first use downloads a ~90MB model.",

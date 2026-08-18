@@ -234,6 +234,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .key-field-row { display: flex; gap: 6px; align-items: stretch; }
 .key-field-row input { flex: 1; min-width: 0; }
 .key-field-row button { flex: 0 0 auto; padding: 8px 10px; font-size: 0.78rem; }
+.voice-row { display: flex; gap: 6px; align-items: center; }
+.voice-row select { flex: 1; }
+.voice-row .voice-preview-btn { width: auto; flex: none; padding: 7px 10px; font-size: 0.75rem; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -335,7 +338,51 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
       </div>
     </div>
     <label style="margin-top:8px;">Voice</label>
-    <select id="voice"></select>
+    <div class="voice-row">
+      <select id="voice"></select>
+      <button type="button" class="voice-preview-btn" id="voicePreviewBtn" onclick="previewSettingsVoice(this)">&#9654; Preview</button>
+    </div>
+
+    <div id="piperSpeedRow" style="display:none;margin-top:10px;">
+      <label>Speed (<span id="piperSpeedValue">1.0</span>x)</label>
+      <input type="range" id="piperSpeed" min="0.5" max="2" step="0.05" value="1">
+    </div>
+
+    <div id="kokoroSpeedRow" style="display:none;margin-top:10px;">
+      <label>Speed (<span id="kokoroSpeedValue">1.0</span>x)</label>
+      <input type="range" id="kokoroSpeed" min="0.5" max="2" step="0.05" value="1">
+    </div>
+
+    <div id="openaiTtsExtraRow" style="display:none;margin-top:10px;">
+      <label>Model</label>
+      <select id="openaiTtsModel">
+        <option value="tts-1" selected>tts-1 (standard)</option>
+        <option value="tts-1-hd">tts-1-hd (higher quality, slower)</option>
+      </select>
+      <label style="margin-top:8px;">Speed (<span id="openaiTtsSpeedValue">1.0</span>x)</label>
+      <input type="range" id="openaiTtsSpeed" min="0.25" max="4" step="0.05" value="1">
+    </div>
+
+    <div id="elevenlabsExtraRow" style="display:none;margin-top:10px;">
+      <label>Model</label>
+      <select id="elevenlabsModel">
+        <option value="eleven_multilingual_v2" selected>Multilingual v2 (highest quality)</option>
+        <option value="eleven_turbo_v2_5">Turbo v2.5 (lower latency)</option>
+        <option value="eleven_flash_v2_5">Flash v2.5 (fastest, lowest cost)</option>
+      </select>
+      <label style="margin-top:8px;">Stability (<span id="elevenlabsStabilityValue">0.50</span>)</label>
+      <input type="range" id="elevenlabsStability" min="0" max="1" step="0.05" value="0.5">
+      <label style="margin-top:8px;">Similarity Boost (<span id="elevenlabsSimilarityValue">0.75</span>)</label>
+      <input type="range" id="elevenlabsSimilarity" min="0" max="1" step="0.05" value="0.75">
+    </div>
+
+    <div id="browserSpeechExtraRow" style="display:none;margin-top:10px;">
+      <label>Rate (<span id="browserSpeechRateValue">1.0</span>x)</label>
+      <input type="range" id="browserSpeechRate" min="0.5" max="2" step="0.05" value="1">
+      <label style="margin-top:8px;">Pitch (<span id="browserSpeechPitchValue">1.0</span>)</label>
+      <input type="range" id="browserSpeechPitch" min="0" max="2" step="0.05" value="1">
+    </div>
+
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
       <input type="checkbox" id="enableBrowserAsr" style="width:auto;"> Improve caption sync with AI transcription (slower, ~40MB download)
     </label>
