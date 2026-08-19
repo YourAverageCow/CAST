@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 131;
+const VERSION = 132;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -3790,7 +3790,7 @@ function renderTiktokPublishSection(job, container) {
         <label style="display:block;"><input type="checkbox" data-field="disableStitch" ${pub.disableStitch ? "checked" : ""} ${info.stitchDisabled ? "disabled" : ""} style="width:auto;"> Disable stitches</label>
       </div>
       <p style="font-size:0.68rem;color:var(--muted);margin-top:8px;">
-        ${privacyOptions.length === 1 && privacyOptions[0] === "SELF_ONLY" ? "Posts are private (visible only to you) until this app passes TikTok's review — this isn't a bug. " : ""}
+        This app hasn't passed TikTok's review yet, so posts can only be set to "Only me" (private) regardless of what other options are listed above — TikTok rejects anything else until then, even though your account's own settings allow more.
         After posting it may take a few minutes for TikTok to finish processing before it's visible in the app.
         By clicking "Post," you agree to TikTok's <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target="_blank" rel="noopener">Music Usage Confirmation</a>
         and certify the content complies with <a href="https://www.tiktok.com/community-guidelines" target="_blank" rel="noopener">TikTok's Community Guidelines</a>.

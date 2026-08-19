@@ -1043,11 +1043,19 @@ async function runTiktokUpload(id, store, account, video, meta, respond) {
     });
     const initData = await initResp.json();
     if (!initResp.ok || (initData.error && initData.error.code !== "ok")) {
-      // Surface TikTok's actual error code alongside its human-readable
-      // message — the message alone is often a generic "review our
-      // integration guidelines" wrapper around a specific, more actionable
-      // code (e.g. unaudited_client_can_only_post_to_private_accounts).
       const err = initData.error;
+      // creator_info's privacy_level_options reflects the TikTok ACCOUNT's
+      // own privacy settings, not this app's audit status — confirmed
+      // against TikTok's own API reference. An unaudited API client is
+      // restricted to SELF_ONLY regardless of what the account itself
+      // allows, and that restriction is only enforced here at publish
+      // time, not reflected in creator_info at all. So this specific error
+      // is expected and actionable, not a real integration bug — give a
+      // plain-language message instead of TikTok's generic guidelines-page
+      // wrapper text.
+      if (err && err.code === "unaudited_client_can_only_post_to_private_accounts") {
+        throw new Error("This app hasn't passed TikTok's review yet, so it can only post as \"Only me\" (private) — reopen the panel and choose that privacy level, even if others are listed.");
+      }
       const detail = err ? `${err.message || "unknown error"} (${err.code || "no code"})` : `TikTok upload init failed (${initResp.status})`;
       throw new Error(detail);
     }
