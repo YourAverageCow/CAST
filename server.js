@@ -1025,6 +1025,13 @@ async function runTiktokUpload(id, store, account, video, meta, respond) {
           disable_duet: !!meta.disableDuet,
           disable_stitch: !!meta.disableStitch,
           video_cover_timestamp_ms: meta.videoCoverTimestampMs || 0,
+          // Every CAST video has synthetic TTS narration (even when the
+          // story text itself is user-written, not AI-generated) — TikTok's
+          // Content Posting API requires this disclosure for AI-generated
+          // content, and omitting it is a likely cause of a generic
+          // "review our integration guidelines" rejection. Always true,
+          // not user-configurable, since it's never NOT the case here.
+          is_aigc: true,
         },
         source_info: {
           source: "FILE_UPLOAD",
