@@ -978,7 +978,14 @@ function tiktokChunkPlan(totalBytes) {
     return { chunkSize: totalBytes, totalChunks: 1 };
   }
   const chunkSize = TIKTOK_MAX_CHUNK;
-  const totalChunks = Math.ceil(totalBytes / chunkSize);
+  // TikTok's own docs: total_chunk_count = floor(video_size / chunk_size),
+  // NOT ceil — the final chunk absorbs whatever remainder is left over
+  // (which is exactly what the PUT loop's `Math.min(start + chunkSize,
+  // video.length)` already does), rather than getting its own extra,
+  // smaller final chunk. Using ceil here produced a total_chunk_count one
+  // too high, which TikTok rejects outright ("the total chunk count is
+  // invalid") before ever looking at the actual PUT bytes.
+  const totalChunks = Math.floor(totalBytes / chunkSize);
   return { chunkSize, totalChunks };
 }
 
