@@ -1025,13 +1025,13 @@ async function runTiktokUpload(id, store, account, video, meta, respond) {
           disable_duet: !!meta.disableDuet,
           disable_stitch: !!meta.disableStitch,
           video_cover_timestamp_ms: meta.videoCoverTimestampMs || 0,
-          // Every CAST video has synthetic TTS narration (even when the
-          // story text itself is user-written, not AI-generated) — TikTok's
-          // Content Posting API requires this disclosure for AI-generated
-          // content, and omitting it is a likely cause of a generic
-          // "review our integration guidelines" rejection. Always true,
-          // not user-configurable, since it's never NOT the case here.
-          is_aigc: true,
+          // NOT set to true: TikTok's own policy exempts generic TTS
+          // narration from the is_aigc disclosure requirement, as long as
+          // the voice isn't a recognizable clone of a known individual —
+          // every voice CAST uses (Piper/Kokoro/OpenAI/ElevenLabs stock
+          // voices) qualifies for that exemption. An earlier version of
+          // this code hardcoded is_aigc: true on the mistaken assumption
+          // that any synthetic narration counts as AIGC; it doesn't.
         },
         source_info: {
           source: "FILE_UPLOAD",
@@ -1043,7 +1043,13 @@ async function runTiktokUpload(id, store, account, video, meta, respond) {
     });
     const initData = await initResp.json();
     if (!initResp.ok || (initData.error && initData.error.code !== "ok")) {
-      throw new Error((initData.error && initData.error.message) || `TikTok upload init failed (${initResp.status})`);
+      // Surface TikTok's actual error code alongside its human-readable
+      // message — the message alone is often a generic "review our
+      // integration guidelines" wrapper around a specific, more actionable
+      // code (e.g. unaudited_client_can_only_post_to_private_accounts).
+      const err = initData.error;
+      const detail = err ? `${err.message || "unknown error"} (${err.code || "no code"})` : `TikTok upload init failed (${initResp.status})`;
+      throw new Error(detail);
     }
     const { publish_id: publishId, upload_url: uploadUrl } = initData.data;
 
