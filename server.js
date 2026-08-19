@@ -1063,7 +1063,11 @@ async function runTiktokUpload(id, store, account, video, meta, respond) {
       if (err && err.code === "unaudited_client_can_only_post_to_private_accounts") {
         throw new Error("This app hasn't passed TikTok's review yet, so it can only post as \"Only me\" (private) — reopen the panel and choose that privacy level, even if others are listed.");
       }
-      const detail = err ? `${err.message || "unknown error"} (${err.code || "no code"})` : `TikTok upload init failed (${initResp.status})`;
+      // Include the exact numbers this request declared — TikTok's error
+      // messages alone don't say what was wrong with them, and guessing
+      // blind at chunk-size/count rules has already produced one wrong fix.
+      const chunkDebug = `video_size=${video.length} chunk_size=${chunkSize} total_chunk_count=${totalChunks}`;
+      const detail = err ? `${err.message || "unknown error"} (${err.code || "no code"}) [${chunkDebug}]` : `TikTok upload init failed (${initResp.status}) [${chunkDebug}]`;
       throw new Error(detail);
     }
     const { publish_id: publishId, upload_url: uploadUrl } = initData.data;
