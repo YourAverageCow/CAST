@@ -8,6 +8,7 @@
 # words to mismatch against.
 import argparse
 import json
+import re
 import sys
 
 import numpy as np
@@ -18,6 +19,18 @@ from kokoro import KPipeline
 # KokoroEngine) so both backends bound how much text one pipeline() chunk
 # receives at once, consistent with the model's known token-limit behavior.
 SPLIT_PATTERN = r"\n+|(?<=[.!?])\s+"
+
+# KPipeline's own 510-phoneme budget (see kokoro/pipeline.py's en_tokenize)
+# doesn't reset at our SPLIT_PATTERN boundaries when the whole story is
+# handed to one pipeline(text, split_pattern=SPLIT_PATTERN) call — it just
+# keeps accumulating tokens across sentence after sentence until the budget
+# runs out, then cuts wherever that happens to land, which is often mid-
+# sentence rather than at a period. Splitting the text ourselves first and
+# calling pipeline() once per resulting segment (split_pattern=None, so
+# there's nothing left for it to further split on) resets that budget at
+# every real sentence/paragraph boundary, so a cut can only ever land
+# mid-sentence for one single sentence that's itself implausibly long
+# (still possible in principle, but no longer the common case).
 
 
 def main():
@@ -40,22 +53,25 @@ def main():
     with open(args.text_file, "r", encoding="utf-8") as f:
         text = f.read()
 
+    segments = [s for s in re.split(SPLIT_PATTERN, text.strip()) if s.strip()]
+
     pipeline = KPipeline(lang_code=args.lang)
     words = []
     chunks = []
     offset = 0.0
     sample_rate = 24000
-    for result in pipeline(text, voice=args.voice, speed=args.speed, split_pattern=SPLIT_PATTERN):
-        if result.audio is None:
-            continue
-        audio = result.audio.numpy().astype(np.float32)
-        if result.tokens:
-            for t in result.tokens:
-                if t.start_ts is None or t.end_ts is None:
-                    continue
-                words.append({"text": t.text, "start": offset + t.start_ts, "end": offset + t.end_ts})
-        chunks.append(audio)
-        offset += len(audio) / sample_rate
+    for segment in segments:
+        for result in pipeline(segment, voice=args.voice, speed=args.speed, split_pattern=None):
+            if result.audio is None:
+                continue
+            audio = result.audio.numpy().astype(np.float32)
+            if result.tokens:
+                for t in result.tokens:
+                    if t.start_ts is None or t.end_ts is None:
+                        continue
+                    words.append({"text": t.text, "start": offset + t.start_ts, "end": offset + t.end_ts})
+            chunks.append(audio)
+            offset += len(audio) / sample_rate
 
     audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
     sf.write(args.out, audio, sample_rate)

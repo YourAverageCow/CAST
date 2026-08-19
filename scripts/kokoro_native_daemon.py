@@ -19,6 +19,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -36,21 +37,32 @@ def synthesize(pipelines, text, voice, speed, lang):
         pipelines[lang] = KPipeline(lang_code=lang)
     pipeline = pipelines[lang]
 
+    # KPipeline's own 510-phoneme budget doesn't reset at our SPLIT_PATTERN
+    # boundaries when the whole text is handed to one pipeline(text,
+    # split_pattern=SPLIT_PATTERN) call — it accumulates tokens across
+    # sentence after sentence until the budget runs out, cutting wherever
+    # that lands, often mid-sentence. Splitting ourselves first and calling
+    # pipeline() once per segment (split_pattern=None) resets that budget
+    # at every real sentence/paragraph boundary instead. See
+    # kokoro_native.py's matching comment for the full rationale.
+    segments = [s for s in re.split(SPLIT_PATTERN, text.strip()) if s.strip()]
+
     words = []
     chunks = []
     offset = 0.0
     sample_rate = 24000
-    for result in pipeline(text, voice=voice, speed=speed, split_pattern=SPLIT_PATTERN):
-        if result.audio is None:
-            continue
-        audio = result.audio.numpy().astype(np.float32)
-        if result.tokens:
-            for t in result.tokens:
-                if t.start_ts is None or t.end_ts is None:
-                    continue
-                words.append({"text": t.text, "start": offset + t.start_ts, "end": offset + t.end_ts})
-        chunks.append(audio)
-        offset += len(audio) / sample_rate
+    for segment in segments:
+        for result in pipeline(segment, voice=voice, speed=speed, split_pattern=None):
+            if result.audio is None:
+                continue
+            audio = result.audio.numpy().astype(np.float32)
+            if result.tokens:
+                for t in result.tokens:
+                    if t.start_ts is None or t.end_ts is None:
+                        continue
+                    words.append({"text": t.text, "start": offset + t.start_ts, "end": offset + t.end_ts})
+            chunks.append(audio)
+            offset += len(audio) / sample_rate
 
     audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
     fd, out_path = tempfile.mkstemp(suffix=".wav")
