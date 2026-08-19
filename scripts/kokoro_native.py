@@ -8,6 +8,7 @@
 # words to mismatch against.
 import argparse
 import json
+import re
 import sys
 
 import numpy as np
@@ -67,41 +68,69 @@ def main():
     with open(args.text_file, "r", encoding="utf-8") as f:
         text = f.read()
 
+    # Split the text ourselves, on real punctuation/paragraph boundaries
+    # only — segment 0 is always the title line (its own line, ending at
+    # the first blank line). Each segment gets its own dedicated
+    # pipeline() call below, with split_pattern=None so KPipeline does no
+    # further OUTER splitting on it (there's nothing left in an already-
+    # atomic segment for \n+/[.!?] to match anyway).
+    segments = [s for s in re.split(SPLIT_PATTERN, text.strip()) if s.strip()]
+
     pipeline = KPipeline(lang_code=args.lang)
     words = []
     chunks = []
     offset = 0.0
     sample_rate = 24000
     gap_samples = int(KOKORO_INTER_CHUNK_GAP_SEC * sample_rate)
-    first_chunk = True
-    for result in pipeline(text, voice=args.voice, speed=args.speed, split_pattern=SPLIT_PATTERN):
-        if result.audio is None:
+    first_segment = True
+    for segment in segments:
+        # KPipeline can still internally re-split ONE segment into several
+        # Results if it phonemizes to more than the model's 510-token
+        # limit — a length cutoff, not a punctuation boundary, so those
+        # sub-chunks are concatenated raw here (no trim, no gap) rather
+        # than treated as a real pause point. Trim+gap is only applied
+        # once, below, to the whole segment's combined start/end.
+        segment_chunks = []
+        segment_tokens = []  # (text, start_local, end_local), relative to segment_chunks concatenated raw
+        local_offset = 0.0
+        for result in pipeline(segment, voice=args.voice, speed=args.speed, split_pattern=None):
+            if result.audio is None:
+                continue
+            audio = result.audio.numpy().astype(np.float32)
+            if result.tokens:
+                for t in result.tokens:
+                    if t.start_ts is None or t.end_ts is None:
+                        continue
+                    segment_tokens.append((t.text, local_offset + t.start_ts, local_offset + t.end_ts))
+            segment_chunks.append(audio)
+            local_offset += len(audio) / sample_rate
+        if not segment_chunks:
             continue
-        audio = result.audio.numpy().astype(np.float32)
-        trimmed, lead_trim = trim_silence(audio, sample_rate, KOKORO_MAX_TRIM_SEC)
+
+        segment_audio = np.concatenate(segment_chunks)
+        trimmed, lead_trim = trim_silence(segment_audio, sample_rate, KOKORO_MAX_TRIM_SEC)
         lead_trim_sec = lead_trim / sample_rate
-        if not first_chunk:
-            # A fixed, deliberate gap between chunks instead of whatever
+
+        if not first_segment:
+            # A fixed, deliberate gap between segments instead of whatever
             # untrimmed silence KPipeline happened to leave at this
             # boundary — inserted as real silent samples so it survives
             # into the WAV file, not just a timestamp adjustment.
             chunks.append(np.zeros(gap_samples, dtype=np.float32))
             offset += KOKORO_INTER_CHUNK_GAP_SEC
-        if result.tokens:
-            for t in result.tokens:
-                if t.start_ts is None or t.end_ts is None:
-                    continue
-                # Token timestamps are relative to this chunk's own
-                # (untrimmed) start — shift by -lead_trim_sec to stay
-                # relative to the trimmed chunk's new start, then by
-                # +offset into the final concatenated timeline. Clamped at
-                # 0 in case a token's start fell inside the trimmed silence.
-                start = max(0.0, t.start_ts - lead_trim_sec) + offset
-                end = max(0.0, t.end_ts - lead_trim_sec) + offset
-                words.append({"text": t.text, "start": start, "end": end})
+
+        for tok_text, start_local, end_local in segment_tokens:
+            # Shift by -lead_trim_sec to stay relative to the trimmed
+            # segment's new start, then by +offset into the final
+            # concatenated timeline. Clamped at 0 in case a token's start
+            # fell inside the trimmed silence.
+            start = max(0.0, start_local - lead_trim_sec) + offset
+            end = max(0.0, end_local - lead_trim_sec) + offset
+            words.append({"text": tok_text, "start": start, "end": end})
+
         chunks.append(trimmed)
         offset += len(trimmed) / sample_rate
-        first_chunk = False
+        first_segment = False
 
     audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
     sf.write(args.out, audio, sample_rate)

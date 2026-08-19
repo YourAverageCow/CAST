@@ -19,6 +19,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -56,31 +57,53 @@ def synthesize(pipelines, text, voice, speed, lang):
         pipelines[lang] = KPipeline(lang_code=lang)
     pipeline = pipelines[lang]
 
+    # Split the text ourselves, on real punctuation/paragraph boundaries
+    # only — see kokoro_native.py's matching comment for the full
+    # rationale (KPipeline can still internally re-split one segment via
+    # its 510-token guard; that's a length cutoff, not a punctuation
+    # boundary, so it must not get a deliberate gap).
+    segments = [s for s in re.split(SPLIT_PATTERN, text.strip()) if s.strip()]
+
     words = []
     chunks = []
     offset = 0.0
     sample_rate = 24000
     gap_samples = int(KOKORO_INTER_CHUNK_GAP_SEC * sample_rate)
-    first_chunk = True
-    for result in pipeline(text, voice=voice, speed=speed, split_pattern=SPLIT_PATTERN):
-        if result.audio is None:
+    first_segment = True
+    for segment in segments:
+        segment_chunks = []
+        segment_tokens = []  # (text, start_local, end_local), relative to segment_chunks concatenated raw
+        local_offset = 0.0
+        for result in pipeline(segment, voice=voice, speed=speed, split_pattern=None):
+            if result.audio is None:
+                continue
+            audio = result.audio.numpy().astype(np.float32)
+            if result.tokens:
+                for t in result.tokens:
+                    if t.start_ts is None or t.end_ts is None:
+                        continue
+                    segment_tokens.append((t.text, local_offset + t.start_ts, local_offset + t.end_ts))
+            segment_chunks.append(audio)
+            local_offset += len(audio) / sample_rate
+        if not segment_chunks:
             continue
-        audio = result.audio.numpy().astype(np.float32)
-        trimmed, lead_trim = trim_silence(audio, sample_rate, KOKORO_MAX_TRIM_SEC)
+
+        segment_audio = np.concatenate(segment_chunks)
+        trimmed, lead_trim = trim_silence(segment_audio, sample_rate, KOKORO_MAX_TRIM_SEC)
         lead_trim_sec = lead_trim / sample_rate
-        if not first_chunk:
+
+        if not first_segment:
             chunks.append(np.zeros(gap_samples, dtype=np.float32))
             offset += KOKORO_INTER_CHUNK_GAP_SEC
-        if result.tokens:
-            for t in result.tokens:
-                if t.start_ts is None or t.end_ts is None:
-                    continue
-                start = max(0.0, t.start_ts - lead_trim_sec) + offset
-                end = max(0.0, t.end_ts - lead_trim_sec) + offset
-                words.append({"text": t.text, "start": start, "end": end})
+
+        for tok_text, start_local, end_local in segment_tokens:
+            start = max(0.0, start_local - lead_trim_sec) + offset
+            end = max(0.0, end_local - lead_trim_sec) + offset
+            words.append({"text": tok_text, "start": start, "end": end})
+
         chunks.append(trimmed)
         offset += len(trimmed) / sample_rate
-        first_chunk = False
+        first_segment = False
 
     audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
     fd, out_path = tempfile.mkstemp(suffix=".wav")
