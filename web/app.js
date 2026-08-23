@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 139;
+const VERSION = 140;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -1380,10 +1380,7 @@ async function init() {
   initColorPickerEvents();
   initDateTimePickerEvents();
   syncDtTriggerLabelFromInput("scheduleStartAt");
-  initPanelResize("sidebar", "sidebarResizeHandle", 1, "cast_sidebarWidth");
-  initSidebarToggle();
-  // The sidebar (and with it the preview box) can be resized by dragging its
-  // edge — recompute the preview's pixel-to-output scale when that happens.
+  // Recompute the preview's pixel-to-output scale whenever its box changes size.
   new ResizeObserver(() => updateCaptionStyle()).observe($("#captionLivePreviewBg"));
   initMediaLibraryUI();
   refreshMediaLibraryCache();
@@ -1499,60 +1496,6 @@ async function downloadAppUpdate() {
 function installAppUpdate() {
   if (!window.electronAPI) return;
   window.electronAPI.quitAndInstall();
-}
-
-// Drag-to-resize for the left sidebar and the right settings panel. `sign`
-// is +1 when the handle sits on the panel's right edge (dragging right
-// grows it) or -1 when it sits on the left edge of a right-anchored panel
-// (dragging left grows it, since the panel's own right edge stays pinned).
-function initPanelResize(panelId, handleId, sign, storageKey) {
-  const panel = document.getElementById(panelId);
-  const handle = document.getElementById(handleId);
-  if (!panel || !handle) return;
-
-  const saved = parseInt(localStorage.getItem(storageKey));
-  if (saved) panel.style.width = saved + "px";
-
-  let startX = 0, startW = 0, dragging = false;
-  handle.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    dragging = true;
-    startX = e.clientX;
-    startW = panel.getBoundingClientRect().width;
-    handle.classList.add("dragging");
-    panel.classList.add("dragging-resize");
-    handle.setPointerCapture(e.pointerId);
-  });
-  handle.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    const newW = startW + (e.clientX - startX) * sign;
-    panel.style.width = newW + "px"; // CSS min/max-width clamps the actual value
-  });
-  function stop() {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove("dragging");
-    panel.classList.remove("dragging-resize");
-    localStorage.setItem(storageKey, Math.round(panel.getBoundingClientRect().width));
-  }
-  handle.addEventListener("pointerup", stop);
-  handle.addEventListener("pointercancel", stop);
-}
-
-const SIDEBAR_COLLAPSED_KEY = "cast_sidebarCollapsed";
-function setSidebarCollapsed(collapsed) {
-  $("#sidebar").classList.toggle("collapsed", collapsed);
-  const btn = $("#sidebarToggleBtn");
-  btn.innerHTML = collapsed ? "&raquo;" : "&laquo;";
-  btn.title = collapsed ? "Expand sidebar" : "Collapse sidebar";
-}
-function toggleSidebar() {
-  const collapsed = !$("#sidebar").classList.contains("collapsed");
-  setSidebarCollapsed(collapsed);
-  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
-}
-function initSidebarToggle() {
-  if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1") setSidebarCollapsed(true);
 }
 
 // Rebuilds #voice/#voiceQuick from the given engine's own voice list —
@@ -2022,8 +1965,8 @@ async function setBackground(file, label) {
 }
 
 // ---------- Preview (realtime captions) ----------
-// The preview box renders at whatever CSS width fits the sidebar (~400px),
-// but captions are exported into a 1080px+-wide frame. Without correcting
+// The preview box renders at its own capped CSS width (~480px, see
+// .preview-wrapper), but captions are exported into a 1080px+-wide frame. Without correcting
 // for that ratio, "68px" in the preview looks nothing like 68px in the
 // actual output. Scale every pixel value (font size, stroke) by the same
 // factor so the preview is a true-to-scale mockup of the real export.
@@ -4395,9 +4338,9 @@ function resetBatch() {
   showToast("Batch cleared.");
 }
 
-// The sidebar's "quick single export" — builds one job from the current
-// sidebar/settings state and runs it through the same runJob() path batch
-// jobs use, so there's exactly one render pipeline, not two.
+// Single flow's "quick export" — builds one job from the current
+// single-setup/settings state and runs it through the same runJob() path
+// batch jobs use, so there's exactly one render pipeline, not two.
 async function exportVideo() {
   if (!currentVideo) { alert("Upload a background video first."); return; }
   const story = sanitizeText($("#storyText").value.trim());

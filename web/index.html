@@ -58,10 +58,9 @@
 }
 /* Compact layout — a body class (not a data-attr, to compose freely with
    the theme attribute) tightening the same spacing/font-size properties
-   across sidebar, settings panels, labels, and buttons rather than a
-   parallel set of components. Deliberately modest reductions — enough to
-   fit more on screen without breaking wrapping/alignment. */
-body.compact .sidebar { padding: 12px; }
+   across settings panels, labels, and buttons rather than a parallel set
+   of components. Deliberately modest reductions — enough to fit more on
+   screen without breaking wrapping/alignment. */
 body.compact .settings-section { margin-bottom: 12px; }
 body.compact label { font-size: 0.7rem; margin-top: 6px; margin-bottom: 2px; }
 body.compact select, body.compact input, body.compact textarea { padding: 5px 7px; }
@@ -89,44 +88,11 @@ body {
   display: flex;
   overflow: hidden;
 }
-.sidebar {
-  width: 360px;
-  min-width: 280px;
-  max-width: 700px;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  padding: 20px;
-  overflow-y: auto;
-  height: 100vh;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  -ms-overflow-style: none;
-  scrollbar-width: none;
-}
-.sidebar::-webkit-scrollbar, .sidebar-inner::-webkit-scrollbar, .main::-webkit-scrollbar { display: none; }
 .panel-resize-handle { position: absolute; top: 0; width: 6px; height: 100%; cursor: ew-resize; z-index: 15; touch-action: none; }
 .panel-resize-handle:hover, .panel-resize-handle.dragging { background: rgba(88,166,255,0.35); }
-#sidebarResizeHandle { right: -3px; }
 #settingsResizeHandle { left: -3px; }
-.sidebar-inner { flex: 1; overflow-y: auto; -ms-overflow-style: none; scrollbar-width: none; }
-.sidebar-footer { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 12px; font-size: 0.7rem; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
-.sidebar-footer .version { font-family: 'SF Mono', Menlo, monospace; color: var(--accent); background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); padding: 2px 8px; border-radius: 4px; }
-.sidebar-footer .build-tag { color: var(--green); }
 .main { flex: 1; padding: 20px 30px; overflow-y: auto; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 20px; -ms-overflow-style: none; scrollbar-width: none; }
-
-.sidebar-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
-.sidebar-header h1 { font-size: 1.2rem; font-weight: 600; margin: 0; }
-.subtitle { color: var(--muted); font-size: 0.75rem; margin-bottom: 16px; }
-
-.sidebar-toggle-btn { width: auto; flex: none; padding: 5px 9px; font-size: 0.9rem; line-height: 1; color: var(--muted); }
-.sidebar-toggle-btn:hover { color: var(--text); border-color: var(--hover-border); }
-.sidebar.collapsed { width: 52px !important; min-width: 52px; padding: 20px 8px; overflow: visible; }
-.sidebar.collapsed .sidebar-inner > *:not(.sidebar-header) { display: none !important; }
-.sidebar.collapsed .sidebar-header { flex-direction: column-reverse; gap: 8px; }
-.sidebar.collapsed .sidebar-header h1 { display: none; }
-.sidebar.collapsed #sidebarResizeHandle { display: none; }
-.sidebar.collapsed .sidebar-footer { display: none !important; }
+.main::-webkit-scrollbar { display: none; }
 
 h2 { font-size: 0.78rem; font-weight: 600; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; display: flex; align-items: center; gap: 8px; }
 .step-num { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #0d1119; font-size: 0.7rem; font-weight: 700; flex: none; }
@@ -209,7 +175,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 /* ---- Batch composer ---- */
 #batchFlow { width: 100%; max-width: 1600px; display: flex; flex-direction: column; align-items: stretch; gap: 20px; }
-#bulkSetupView { width: 100%; max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; }
+#bulkSetupView, #singleSetupView { width: 100%; max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; }
 .bulk-cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; margin-bottom: 14px; align-items: start; }
 .bulk-cards-grid .bulk-card { margin-bottom: 0; }
 #batchCardsView { width: 100%; max-width: 1600px; margin: 0 auto; display: flex; flex-direction: column; align-items: stretch; gap: 20px; }
@@ -1191,80 +1157,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 </div>
 
 <!-- Main -->
-<div class="sidebar" id="sidebar">
-  <div class="panel-resize-handle" id="sidebarResizeHandle"></div>
-  <div class="sidebar-inner">
-  <div class="sidebar-header">
-    <button class="sidebar-toggle-btn" id="sidebarToggleBtn" onclick="toggleSidebar()" title="Collapse sidebar">&laquo;</button>
-  </div>
-
-  <h2><span class="step-num">1</span>Background Video<span class="step-bar"></span></h2>
-  <div id="videoUploadArea" onclick="document.getElementById('videoInput').click()">
-    <div class="icon">🎬</div>
-    <p id="uploadStatus">Click to upload background video</p>
-  </div>
-  <input type="file" id="videoInput" accept="video/*" style="display:none" onchange="handleVideoUpload(this)">
-  <div id="presetVideoRow" style="display:none;margin-top:6px;">
-    <select id="presetVideoSelect" onchange="selectPresetVideo(this.value, this)">
-      <option value="">Or pick a preset...</option>
-    </select>
-  </div>
-  <button class="library-pick-link" onclick="openMediaLibrary((file) => setBackground(file, file.name), 'video')">Choose from library</button>
-
-  <h2><span class="step-num">2</span>Story<span class="step-bar"></span></h2>
-  <label>Premise / Idea</label>
-  <textarea id="premise" placeholder="e.g. My brother asked me to babysit his kids during my wedding..." rows="2" oninput="validateInputs()"></textarea>
-  <div class="row">
-    <button class="accent" onclick="getIdeas()" id="ideasBtn">Suggest Ideas</button>
-    <button class="primary" onclick="generateStory()" id="genStoryBtn">Generate Story</button>
-  </div>
-  <label>Story Text</label>
-  <textarea id="storyText" placeholder="Your story will appear here... or paste your own!" rows="7" oninput="validateInputs(); autoGrow(this);"></textarea>
-
-  <h2><span class="step-num">3</span>Preview &amp; Export<span class="step-bar"></span></h2>
-  <div class="voice-preview-row" style="margin-bottom:8px;display:flex;gap:6px;">
-    <select id="ttsEngineQuick" onchange="syncEngineQuick()" style="flex:1;">
-      <option value="">Use settings engine</option>
-    </select>
-    <select id="voiceQuick" onchange="syncVoiceQuick()" style="flex:1;">
-      <option value="">Use settings voice</option>
-    </select>
-    <button type="button" onclick="previewQuickVoice(this)">&#9654;</button>
-  </div>
-  <div class="row" style="align-items:center;margin-top:4px;">
-    <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--text);margin:0;">
-      <input type="checkbox" id="titleCardEnabled" style="width:auto;" checked> Title card
-    </label>
-  </div>
-  <input type="text" id="titleCardText" placeholder="Auto title from story (or type your own)" style="margin-top:6px;">
-
-  <label style="margin-top:10px;">Background Music</label>
-  <div class="row">
-    <input type="file" id="musicInput" accept="audio/*" style="display:none" onchange="handleMusicUpload(this)">
-    <button class="accent" onclick="document.getElementById('musicInput').click()" style="flex:1;">Upload track</button>
-    <button onclick="clearMusic()" style="flex:1;">None</button>
-  </div>
-  <p id="musicStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
-  <div id="presetMusicRow" style="display:none;margin-top:6px;">
-    <select id="presetMusicSelect" onchange="selectPresetMusic(this.value, this)">
-      <option value="">Or pick a preset...</option>
-    </select>
-  </div>
-  <button class="library-pick-link" onclick="openMediaLibrary((file) => { sidebarMusicFile = file; document.getElementById('musicStatus').textContent = file.name; }, 'audio')">Choose from library</button>
-  <label style="margin-top:4px;">Music Volume</label>
-  <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25">
-
-  <div class="row">
-    <button class="accent" onclick="startPreview()" id="previewBtn">Preview</button>
-    <button class="primary" onclick="exportVideo()" id="exportBtn" style="margin-top:0">Export Video</button>
-  </div>
-  <p style="font-size:0.7rem;color:var(--muted);margin-top:6px;">Preview plays captions in real-time. Export renders the MP4.</p>
-  </div>
-  <div class="sidebar-footer">
-    <span class="build-tag">● ready</span>
-  </div>
-</div>
-
 <div class="main">
   <button class="app-theme-toggle" onclick="toggleThemeQuick()" id="themeToggleBtn" title="Toggle dark/light theme">&#9789;</button>
   <button class="gear-btn app-gear" onclick="toggleSettings()" title="Settings">&#9881;</button>
@@ -1276,6 +1168,78 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   </div>
 
   <div id="singleFlow">
+    <div id="singleSetupView">
+      <div class="bulk-cards-grid">
+        <div class="bulk-card">
+          <h3><span class="step-num">1</span> Background video</h3>
+          <div id="videoUploadArea" onclick="document.getElementById('videoInput').click()">
+            <div class="icon">🎬</div>
+            <p id="uploadStatus">Click to upload background video</p>
+          </div>
+          <input type="file" id="videoInput" accept="video/*" style="display:none" onchange="handleVideoUpload(this)">
+          <div id="presetVideoRow" style="display:none;margin-top:6px;">
+            <select id="presetVideoSelect" onchange="selectPresetVideo(this.value, this)">
+              <option value="">Or pick a preset...</option>
+            </select>
+          </div>
+          <button class="library-pick-link" onclick="openMediaLibrary((file) => setBackground(file, file.name), 'video')">Choose from library</button>
+        </div>
+
+        <div class="bulk-card">
+          <h3><span class="step-num">2</span> Story</h3>
+          <label style="margin-top:0;">Premise / Idea</label>
+          <textarea id="premise" placeholder="e.g. My brother asked me to babysit his kids during my wedding..." rows="2" oninput="validateInputs()"></textarea>
+          <div class="row">
+            <button class="accent" onclick="getIdeas()" id="ideasBtn">Suggest Ideas</button>
+            <button class="primary" onclick="generateStory()" id="genStoryBtn">Generate Story</button>
+          </div>
+          <label>Story Text</label>
+          <textarea id="storyText" placeholder="Your story will appear here... or paste your own!" rows="7" oninput="validateInputs(); autoGrow(this);"></textarea>
+        </div>
+
+        <div class="bulk-card">
+          <h3><span class="step-num">3</span> Voice &amp; style</h3>
+          <div class="voice-preview-row" style="margin-top:0;margin-bottom:8px;display:flex;gap:6px;">
+            <select id="ttsEngineQuick" onchange="syncEngineQuick()" style="flex:1;">
+              <option value="">Use settings engine</option>
+            </select>
+            <select id="voiceQuick" onchange="syncVoiceQuick()" style="flex:1;">
+              <option value="">Use settings voice</option>
+            </select>
+            <button type="button" onclick="previewQuickVoice(this)">&#9654;</button>
+          </div>
+          <label class="bulk-checkbox-row">
+            <input type="checkbox" id="titleCardEnabled" checked> Title card
+          </label>
+          <input type="text" id="titleCardText" placeholder="Auto title from story (or type your own)" style="margin-top:6px;">
+        </div>
+
+        <div class="bulk-card">
+          <h3><span class="step-num">4</span> Background music</h3>
+          <div class="row" style="margin-top:0;">
+            <input type="file" id="musicInput" accept="audio/*" style="display:none" onchange="handleMusicUpload(this)">
+            <button class="accent" onclick="document.getElementById('musicInput').click()" style="flex:1;">Upload track</button>
+            <button onclick="clearMusic()" style="flex:1;">None</button>
+          </div>
+          <p id="musicStatus" style="font-size:0.72rem;color:var(--muted);margin-top:4px;">No music selected.</p>
+          <div id="presetMusicRow" style="display:none;margin-top:6px;">
+            <select id="presetMusicSelect" onchange="selectPresetMusic(this.value, this)">
+              <option value="">Or pick a preset...</option>
+            </select>
+          </div>
+          <button class="library-pick-link" onclick="openMediaLibrary((file) => { sidebarMusicFile = file; document.getElementById('musicStatus').textContent = file.name; }, 'audio')">Choose from library</button>
+          <label style="margin-top:4px;">Music Volume</label>
+          <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25">
+        </div>
+      </div>
+
+      <div class="row">
+        <button class="accent" onclick="startPreview()" id="previewBtn">Preview</button>
+        <button class="primary" onclick="exportVideo()" id="exportBtn" style="margin-top:0">Export Video</button>
+      </div>
+      <p style="font-size:0.7rem;color:var(--muted);margin-top:6px;">Preview plays captions in real-time. Export renders the MP4.</p>
+    </div>
+
     <div class="preview-wrapper" id="previewContainer">
       <video id="videoPreview" loop muted playsinline style="display:none"></video>
       <div id="previewPlaceholder">Upload a background video</div>
