@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 // main branch only: package.json's "version" mirrors this as "<VERSION>.0.0"
 // (electron-updater compares that semver against GitHub release tags) — bump
 // both together.
-const VERSION = 140;
+const VERSION = 141;
 
 // Compute the app's base path so it works on GitHub Pages (where the site
 // lives under /username/repo/ rather than the domain root).
@@ -19,7 +19,7 @@ let previewKaraokeGroups = null; // [{start, end, words:[{text,start,end}]}] whe
 let previewActive = false;
 let previewRAF = null;
 let ttsAudio = null;
-let sidebarMusicFile = null; // background music for the sidebar's single-export flow
+let singleMusicFile = null; // background music for the single-export flow
 // Tracked separately from job.resultUrl (which the result-card's Download/
 // Copy Link buttons keep needing after preview) — the debug tool's own
 // preview blob has no other owner, so each run revokes the previous one.
@@ -952,7 +952,7 @@ function resetSettingsToDefaults() {
 }
 
 // ---------- Init ----------
-// Shared by every engine <select> this app builds (Settings/sidebar quick-
+// Shared by every engine <select> this app builds (Settings/single-flow quick-
 // pick, bulk-batch-setup, per-card batch override) — pocketTts/kokoroNative
 // grey out with "— not installed" when their native backend probe fails
 // (a real runtime capability check), and everything in
@@ -1511,7 +1511,7 @@ async function populateVoices(engineId) {
   $("#voiceQuick").innerHTML = '<option value="">Use settings voice</option>' + opts;
 }
 function syncVoiceQuick() { const v = $("#voiceQuick").value; if (v) $("#voice").value = v; }
-// Quick engine override in the sidebar mirrors the settings-panel select
+// Quick engine override in the single flow mirrors the settings-panel select
 // (setting #ttsEngine directly, same as syncVoiceQuick does for #voice) —
 // but changing engines invalidates the current voice list, so it also
 // repopulates voices and resets the now-stale voiceQuick selection.
@@ -1574,7 +1574,7 @@ const storyGenLimiter = makeClientSlotLimiter(DEFAULT_STORY_GEN_CONCURRENCY);
 // (how to pull the next text chunk out of one parsed `data: ` line) — this
 // function is just the shared fetch + SSE-read loop every provider streams
 // through, regardless of whether its wire format is OpenAI's or Anthropic's.
-// Every call — bulk batch, per-card buttons, single-video sidebar — goes
+// Every call — bulk batch, per-card buttons, single-video flow — goes
 // through storyGenLimiter by default, so the concurrency cap is enforced
 // app-wide rather than only inside the one caller that made the problem
 // obvious. The one exception is generateYoutubeMetadata's skipLimiter=true
@@ -1861,18 +1861,18 @@ async function handleVideoUpload(input) {
   if (!file) return;
   await setBackground(file, file.name);
 }
-// Background music for the sidebar's single-export flow. The auto-choice
+// Background music for the single-export flow. The auto-choice
 // library (bundled royalty-free tracks) is intentionally empty for now —
 // this is just the upload-your-own path, wired the same way it'll consume
 // a bundled library later without changing how a job carries its music.
 function handleMusicUpload(input) {
   const file = input.files[0];
   if (!file) return;
-  sidebarMusicFile = file;
+  singleMusicFile = file;
   $("#musicStatus").textContent = file.name;
 }
 function clearMusic() {
-  sidebarMusicFile = null;
+  singleMusicFile = null;
   $("#musicInput").value = "";
   $("#musicStatus").textContent = "No music selected.";
 }
@@ -1932,7 +1932,7 @@ async function selectPresetMusic(id, selectEl) {
   showToast(`Loading preset "${preset.label}"...`);
   try {
     const file = await fetchPresetFile(preset, "audio/mpeg");
-    sidebarMusicFile = file;
+    singleMusicFile = file;
     $("#musicStatus").textContent = preset.label;
   } catch (e) {
     alert(e.message);
@@ -3092,7 +3092,7 @@ async function onEngineChangeUI() {
 // Runs one job end-to-end: transcode (if needed) -> voice -> render. Mutates
 // `job` in place and calls onUpdate(job) after every state change instead of
 // touching the DOM directly, so this is equally usable from the single-video
-// sidebar (a "batch of one") and the batch composer. Never throws — check
+// flow (a "batch of one") and the batch composer. Never throws — check
 // job.status/job.error after it resolves.
 // Memoizes the decoded background-video bytes per File object — when a
 // batch shares one background across many jobs (bulk-generate's "same video
@@ -4358,7 +4358,7 @@ async function exportVideo() {
     bgTranscoded: currentVideoTranscoded,
     titleCardEnabled: $("#titleCardEnabled").checked,
     titleCardText: $("#titleCardText").value.trim() || null,
-    musicFile: sidebarMusicFile,
+    musicFile: singleMusicFile,
     musicVolume: parseFloat($("#musicVolume").value) || 0.25,
   }));
 

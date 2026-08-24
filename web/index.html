@@ -88,9 +88,6 @@ body {
   display: flex;
   overflow: hidden;
 }
-.panel-resize-handle { position: absolute; top: 0; width: 6px; height: 100%; cursor: ew-resize; z-index: 15; touch-action: none; }
-.panel-resize-handle:hover, .panel-resize-handle.dragging { background: rgba(88,166,255,0.35); }
-#settingsResizeHandle { left: -3px; }
 .main { flex: 1; padding: 20px 30px; overflow-y: auto; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 20px; -ms-overflow-style: none; scrollbar-width: none; }
 .main::-webkit-scrollbar { display: none; }
 
@@ -1199,7 +1196,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
         <div class="bulk-card">
           <h3><span class="step-num">3</span> Voice &amp; style</h3>
-          <div class="voice-preview-row" style="margin-top:0;margin-bottom:8px;display:flex;gap:6px;">
+          <div class="voice-preview-row" style="margin-top:0;margin-bottom:8px;">
             <select id="ttsEngineQuick" onchange="syncEngineQuick()" style="flex:1;">
               <option value="">Use settings engine</option>
             </select>
@@ -1227,7 +1224,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
               <option value="">Or pick a preset...</option>
             </select>
           </div>
-          <button class="library-pick-link" onclick="openMediaLibrary((file) => { sidebarMusicFile = file; document.getElementById('musicStatus').textContent = file.name; }, 'audio')">Choose from library</button>
+          <button class="library-pick-link" onclick="openMediaLibrary((file) => { singleMusicFile = file; document.getElementById('musicStatus').textContent = file.name; }, 'audio')">Choose from library</button>
           <label style="margin-top:4px;">Music Volume</label>
           <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25">
         </div>
